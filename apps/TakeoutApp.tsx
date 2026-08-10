@@ -34,7 +34,7 @@ const makeItems = (category: Category, count: number, start = 0, prefix = 'seed'
 });
 const homeSeed = () => CATEGORIES.flatMap(({ name }) => makeItems(name, 2, 0, 'home')).slice(0, 10);
 const initialCatalogs = () => Object.fromEntries(CATEGORIES.map(c => [c.name, makeItems(c.name, 10)])) as Record<Category, Item[]>;
-const savedCatalog = () => { try { return JSON.parse(localStorage.getItem(TAKEOUT_KEY) || '{}') as { home?: Item[]; catalogs?: Record<Category, Item[]> }; } catch { return {}; } };
+const savedCatalog = () => { try { return JSON.parse(localStorage.getItem(TAKEOUT_KEY) || '{}') as { home?: Item[]; catalogs?: Record<Category, Item[]>; searchResults?: Item[]; searchQuery?: string }; } catch { return {}; } };
 const cleanBaseUrl = (url: string) => url.replace(/\/+$/, '');
 const parseArray = (value: string) => { const fenced = value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''); const match = fenced.match(/\[[\s\S]*\]/); return JSON.parse(match?.[0] || fenced); };
 
@@ -44,7 +44,7 @@ export default function TakeoutApp() {
   const [home, setHome] = useState<Item[]>(() => savedCatalog().home || homeSeed());
   const [catalogs, setCatalogs] = useState<Record<Category, Item[]>>(() => ({ ...initialCatalogs(), ...(savedCatalog().catalogs || {}) }));
   const [category, setCategory] = useState<Category | null>(null); const [page, setPage] = useState(0);
-  const [query, setQuery] = useState(''); const [searchResults, setSearchResults] = useState<Item[] | null>(null);
+  const [query, setQuery] = useState(() => savedCatalog().searchQuery || ''); const [searchResults, setSearchResults] = useState<Item[] | null>(() => savedCatalog().searchResults || null);
   const [cart, setCart] = useState<Item[]>([]); const [detail, setDetail] = useState<Item | null>(null); const [selected, setSelected] = useState(''); const [checkout, setCheckout] = useState(false); const [checkoutTarget, setCheckoutTarget] = useState<string | null>(null); const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [apiOpen, setApiOpen] = useState(false);
   const [useSecondary, setUseSecondary] = useState(() => localStorage.getItem('nmj-takeout-api') === 'secondary');
@@ -68,7 +68,7 @@ export default function TakeoutApp() {
     document.head.appendChild(style);
     return () => { root.classList.remove('takeout-mobile-root'); style.remove(); };
   }, []);
-  useEffect(() => { localStorage.setItem('nmj-takeout-location', JSON.stringify(location)); localStorage.setItem('nmj-takeout-api', useSecondary ? 'secondary' : 'main'); localStorage.setItem('nmj-takeout-secondary-api', JSON.stringify(secondary)); localStorage.setItem(TAKEOUT_KEY, JSON.stringify({ home, catalogs })); }, [location, useSecondary, secondary, home, catalogs]);
+  useEffect(() => { localStorage.setItem('nmj-takeout-location', JSON.stringify(location)); localStorage.setItem('nmj-takeout-api', useSecondary ? 'secondary' : 'main'); localStorage.setItem('nmj-takeout-secondary-api', JSON.stringify(secondary)); localStorage.setItem(TAKEOUT_KEY, JSON.stringify({ home, catalogs, searchResults, searchQuery: query })); }, [location, useSecondary, secondary, home, catalogs, searchResults, query]);
   const visible = useMemo(() => searchResults ?? (category ? catalogs[category] : home), [searchResults, category, catalogs, home]);
   const totalPages = Math.max(1, Math.ceil(visible.length / 5)); const displayItems = visible.slice(page * 5, page * 5 + 5);
   useEffect(() => setPage(0), [category, searchResults]);
@@ -88,7 +88,11 @@ export default function TakeoutApp() {
       const data = await safeFetchJson(`${cleanBaseUrl(cfg.baseUrl)}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` }, body: JSON.stringify({ model: cfg.model, stream: false, messages: [{ role: 'user', content: prompt }] }) }, 2, 45000, { appId: 'takeout', appName: '外卖', purpose: purpose === 'search' ? '外卖搜索' : '外卖推荐刷新' });
       const raw = data?.choices?.[0]?.message?.content || ''; const parsed = parseArray(raw); if (!Array.isArray(parsed) || parsed.length < 10) throw new Error('API 没有返回 10 个有效推荐，请检查模型输出。');
       const fresh = parsed.slice(0, 10).map((x: any, i: number): Item => { const valid = CATEGORIES.find(c => c.name === x.category)?.name || category || '美食'; return { id: `api-${Date.now()}-${i}`, category: valid, name: String(x.name || '推荐商品'), shop: String(x.shop || '附近店铺'), price: Math.max(1, Number(x.price) || 20), desc: String(x.desc || ''), options: Array.isArray(x.options) && x.options.length ? x.options.map(String) : ['标准'], image: CATEGORIES.find(c => c.name === valid)!.icon }; });
-      if (purpose === 'home') setHome(fresh); else if (purpose === 'search') setSearchResults(fresh); else if (category) setCatalogs(old => ({ ...old, [category]: [...old[category], ...fresh].slice(-30) }));
+      // 先落盘再更新 React：用户此时退出 App，进行中的请求仍可把结果留在下次打开的页面里。
+      const cached = savedCatalog();
+      if (purpose === 'home') { localStorage.setItem(TAKEOUT_KEY, JSON.stringify({ ...cached, home: fresh })); setHome(fresh); }
+      else if (purpose === 'search') { localStorage.setItem(TAKEOUT_KEY, JSON.stringify({ ...cached, searchResults: fresh, searchQuery: query })); setSearchResults(fresh); }
+      else if (category) { const nextCategory = [...(cached.catalogs?.[category] || catalogs[category]), ...fresh].slice(-30); localStorage.setItem(TAKEOUT_KEY, JSON.stringify({ ...cached, catalogs: { ...(cached.catalogs || catalogs), [category]: nextCategory } })); setCatalogs(old => ({ ...old, [category]: nextCategory })); }
       addToast(purpose === 'home' ? '主页 10 个推荐已由 API 更新' : '已由 API 获取 10 个新推荐', 'success');
     } catch (e: any) { showError('外卖刷新失败', e?.message || '请检查 API 配置、模型输出和网络。'); } finally { setRefreshing(false); }
   };
