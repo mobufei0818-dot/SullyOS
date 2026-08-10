@@ -45,7 +45,7 @@ export default function TakeoutApp() {
   const [catalogs, setCatalogs] = useState<Record<Category, Item[]>>(() => ({ ...initialCatalogs(), ...(savedCatalog().catalogs || {}) }));
   const [category, setCategory] = useState<Category | null>(null); const [page, setPage] = useState(0);
   const [query, setQuery] = useState(() => savedCatalog().searchQuery || ''); const [searchResults, setSearchResults] = useState<Item[] | null>(() => savedCatalog().searchResults || null);
-  const [cart, setCart] = useState<Item[]>([]); const [detail, setDetail] = useState<Item | null>(null); const [selected, setSelected] = useState(''); const [checkout, setCheckout] = useState(false); const [checkoutTarget, setCheckoutTarget] = useState<string | null>(null); const [submitting, setSubmitting] = useState(false);
+  const [cart, setCart] = useState<Item[]>([]); const [cartOpen, setCartOpen] = useState(false); const [selectedCartIds, setSelectedCartIds] = useState<string[]>([]); const [detail, setDetail] = useState<Item | null>(null); const [selected, setSelected] = useState(''); const [checkout, setCheckout] = useState(false); const [checkoutTarget, setCheckoutTarget] = useState<string | null>(null); const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [apiOpen, setApiOpen] = useState(false);
   const [useSecondary, setUseSecondary] = useState(() => localStorage.getItem('nmj-takeout-api') === 'secondary');
   const [secondary, setSecondary] = useState<SecondaryConfig>(() => ({ baseUrl: '', apiKey: '', model: '', ...JSON.parse(localStorage.getItem('nmj-takeout-secondary-api') || '{}') }));
@@ -98,8 +98,8 @@ export default function TakeoutApp() {
   };
   const runSearch = () => { if (!query.trim()) { setSearchResults(null); return; } requestItems('search'); };
   const loadModels = async () => { if (!secondary.baseUrl || !secondary.apiKey) { showError('无法拉取模型', '请先填写副 API 的 URL 和 Key。'); return; } try { const data = await safeFetchJson(`${cleanBaseUrl(secondary.baseUrl)}/models`, { headers: { Authorization: `Bearer ${secondary.apiKey}` } }, 1, 30000, { appId: 'takeout', appName: '外卖', purpose: '拉取副 API 模型' }); const models = Array.isArray(data?.data) ? data.data.map((m: any) => m.id).filter(Boolean) : []; setModelOptions(models); if (models[0] && !secondary.model) setSecondary(s => ({ ...s, model: models[0] })); addToast(`已拉取 ${models.length} 个模型`, 'success'); } catch (e: any) { showError('无法拉取模型', e?.message || '请检查副 API URL、Key 和跨域设置。'); } };
-  const add = () => { if (!detail) return; setCart(c => [...c, { ...detail, desc: selected ? `${detail.desc} · ${selected}` : detail.desc }]); setDetail(null); addToast('已加入购物车', 'success'); };
-  const confirmPay = async () => { if (!checkoutTarget || submitting || !cart.length) return; setSubmitting(true); try { await pay(checkoutTarget); setCheckoutTarget(null); } finally { setSubmitting(false); } };
+  const add = () => { if (!detail) return; const item = { ...detail, id: `${detail.id}-cart-${Date.now()}`, desc: selected ? `${detail.desc} · ${selected}` : detail.desc }; setCart(c => [...c, item]); setSelectedCartIds(ids => [...ids, item.id]); setDetail(null); addToast('已加入购物车', 'success'); };
+  const confirmPay = async () => { if (!checkoutTarget || submitting || !cart.length) return; setSubmitting(true); try { await pay(checkoutTarget); } catch (error: any) { showError('订单后续处理失败', error?.message || '订单已创建，但提醒写入失败。'); } finally { setSubmitting(false); setCheckoutTarget(null); setCheckout(false); } };
   // 先截住“给谁买”按钮，再显示二次确认；避免一碰按钮就直接下单，也保留购物车的合并结算。
   useEffect(() => {
     if (!checkout) { setCheckoutTarget(null); return; }
@@ -113,6 +113,27 @@ export default function TakeoutApp() {
     document.addEventListener('click', intercept, true);
     return () => document.removeEventListener('click', intercept, true);
   }, [checkout]);
+  useEffect(() => {
+    const interceptCart = (event: MouseEvent) => {
+      const button = (event.target as HTMLElement).closest('button');
+      if (!button || !button.textContent?.includes('购物车') || !button.textContent.includes('去结算')) return;
+      event.preventDefault(); event.stopImmediatePropagation(); event.stopPropagation(); setCartOpen(true);
+    };
+    document.addEventListener('click', interceptCart, true);
+    return () => document.removeEventListener('click', interceptCart, true);
+  }, []);
+  useEffect(() => {
+    if (!cartOpen) return;
+    const root = document.querySelector<HTMLElement>('.takeout-mobile-root');
+    if (!root) return;
+    const mask = document.createElement('div'); mask.className = 'absolute inset-0 z-[55] flex items-end bg-black/45';
+    const panel = document.createElement('div'); panel.className = 'w-full max-h-[80%] overflow-y-auto rounded-t-3xl bg-white p-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))]';
+    const heading = document.createElement('div'); heading.className = 'flex items-center justify-between'; const title = document.createElement('h2'); title.className = 'text-xl font-bold'; title.textContent = '购物车'; const close = document.createElement('button'); close.className = 'text-slate-500'; close.textContent = '关闭'; close.onclick = () => setCartOpen(false); heading.append(title, close); panel.appendChild(heading);
+    const all = document.createElement('button'); all.className = 'mt-3 text-sm text-orange-600'; all.textContent = selectedCartIds.length === cart.length ? '取消全选' : '全选'; all.onclick = () => setSelectedCartIds(selectedCartIds.length === cart.length ? [] : cart.map(item => item.id)); panel.appendChild(all);
+    cart.forEach(item => { const row = document.createElement('div'); row.className = 'mt-3 flex items-center gap-3 rounded-2xl bg-slate-50 p-3'; const check = document.createElement('input'); check.type = 'checkbox'; check.checked = selectedCartIds.includes(item.id); check.className = 'h-5 w-5 accent-orange-500'; check.onchange = () => setSelectedCartIds(ids => check.checked ? [...new Set([...ids, item.id])] : ids.filter(id => id !== item.id)); const info = document.createElement('div'); info.className = 'min-w-0 flex-1'; const name = document.createElement('b'); name.className = 'block truncate text-sm'; name.textContent = item.name; const spec = document.createElement('small'); spec.className = 'block truncate text-slate-500'; spec.textContent = item.desc; info.append(name, spec); const price = document.createElement('b'); price.className = 'text-orange-600'; price.textContent = `¥${item.price}`; const remove = document.createElement('button'); remove.className = 'ml-1 text-sm text-slate-400'; remove.textContent = '删除'; remove.onclick = () => { setCart(items => items.filter(x => x.id !== item.id)); setSelectedCartIds(ids => ids.filter(id => id !== item.id)); }; row.append(check, info, price, remove); panel.appendChild(row); });
+    const selectedItems = cart.filter(item => selectedCartIds.includes(item.id)); const payButton = document.createElement('button'); payButton.className = 'mt-5 w-full rounded-xl bg-orange-500 py-3 font-bold text-white disabled:opacity-45'; payButton.disabled = !selectedItems.length; payButton.textContent = selectedItems.length ? `选中 ${selectedItems.length} 件，去结算 ¥${selectedItems.reduce((sum, item) => sum + item.price, 0)}` : '请选择商品'; payButton.onclick = () => { if (!selectedItems.length) return; setCart(selectedItems); setSelectedCartIds(selectedItems.map(item => item.id)); setCartOpen(false); setCheckout(true); }; panel.appendChild(payButton); mask.appendChild(panel); root.appendChild(mask);
+    return () => mask.remove();
+  }, [cartOpen, cart, selectedCartIds]);
   useEffect(() => {
     if (!checkoutTarget) return;
     const root = document.querySelector<HTMLElement>('.takeout-mobile-root');
