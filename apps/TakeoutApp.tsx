@@ -3,6 +3,8 @@ import { ArrowLeft, ArrowsClockwise, CaretRight, MagnifyingGlass, MapPin, Plus, 
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { createAmsg2ToolSession, executeAmsg2Tool } from '../utils/amsg2ToolBridge';
+import { safeFetchJson } from '../utils/safeApi';
+import type { APIConfig } from '../types';
 
 type Category = '美食' | '甜点饮品' | '超市便利' | '蔬菜水果' | '看病买药' | '早餐' | '拼好饭' | '跑腿';
 type Item = { id: string; name: string; shop: string; price: number; desc: string; category: Category; image: string; options: string[] };
@@ -25,15 +27,27 @@ const SEEDS: Record<Category, Array<[string, string, number, string, string[]]>>
 const allItems = (round: number) => CATEGORIES.flatMap(({ name }, ci) => SEEDS[name].map((v, i) => ({ id: `${name}-${round}-${i}`, category: name, name: v[0], shop: `${v[1]} · ${round % 2 ? '今日推荐' : '附近热卖'}`, price: v[2] + ((round + ci + i) % 3) * 2, desc: v[3], options: v[4], image: CATEGORIES[ci].icon })));
 
 export default function TakeoutApp() {
-  const { closeApp, characters, addToast, activeCharacterId, userProfile, groups, realtimeConfig, apiConfig, updateCharacter } = useOS();
+  const { closeApp, characters, addToast, showError, activeCharacterId, userProfile, groups, realtimeConfig, apiConfig, updateCharacter } = useOS();
   const [round, setRound] = useState(() => Number(localStorage.getItem('nmj-takeout-round') || 1));
   const [address, setAddress] = useState(() => localStorage.getItem('nmj-takeout-address') || '虚拟地址 · 上海静安区');
   const [mode, setMode] = useState<'virtual' | 'real'>(() => (localStorage.getItem('nmj-takeout-mode') as 'virtual' | 'real') || 'virtual');
   const [category, setCategory] = useState<Category | null>(null);
   const [query, setQuery] = useState(''); const [cart, setCart] = useState<Item[]>([]); const [detail, setDetail] = useState<Item | null>(null);
-  const [selected, setSelected] = useState<string>(''); const [checkout, setCheckout] = useState(false); const items = useMemo(() => allItems(round), [round]);
-  useEffect(() => { localStorage.setItem('nmj-takeout-round', String(round)); localStorage.setItem('nmj-takeout-address', address); localStorage.setItem('nmj-takeout-mode', mode); }, [round, address, mode]);
-  const refreshAll = () => { setRound(r => r + 1); setQuery(''); addToast('已刷新全部分类推荐', 'success'); };
+  const [selected, setSelected] = useState<string>(''); const [checkout, setCheckout] = useState(false); const [generated, setGenerated] = useState<Item[] | null>(null); const [refreshing, setRefreshing] = useState(false); const [useSecondary, setUseSecondary] = useState(() => localStorage.getItem('nmj-takeout-api') === 'secondary'); const fallbackItems = useMemo(() => allItems(round), [round]); const items = generated || fallbackItems;
+  useEffect(() => { localStorage.setItem('nmj-takeout-round', String(round)); localStorage.setItem('nmj-takeout-address', address); localStorage.setItem('nmj-takeout-mode', mode); localStorage.setItem('nmj-takeout-api', useSecondary ? 'secondary' : 'main'); }, [round, address, mode, useSecondary]);
+  const refreshAll = async () => {
+    const secondary = JSON.parse(localStorage.getItem('nmj-takeout-secondary-api') || 'null') as APIConfig | null;
+    const cfg = useSecondary ? secondary : apiConfig;
+    if (!cfg?.baseUrl || !cfg.apiKey || !cfg.model) { showError('外卖刷新失败', useSecondary ? '请先在外卖 App 配置副 API 的 URL、Key 和模型。' : '请先在设置中完成主 API 配置。'); return; }
+    setRefreshing(true); try {
+      const prompt = `你是外卖推荐引擎。地址：${address}；搜索：${query || '无'}。返回严格 JSON 数组，覆盖美食、甜点饮品、超市便利、蔬菜水果、看病买药、早餐、拼好饭、跑腿八类，每类至少1项。字段 category,name,shop,price,desc,options；category只能是上述八类，price是数字，options是符合商品的真实规格数组。不要markdown。`;
+      const data = await safeFetchJson(`${cfg.baseUrl.replace(/\/+$/, '')}/chat/completions`, { method:'POST', headers:{'Content-Type':'application/json','Authorization':`Bearer ${cfg.apiKey}`}, body:JSON.stringify({model:cfg.model,stream:false,messages:[{role:'user',content:prompt}]}) });
+      const raw = data?.choices?.[0]?.message?.content || ''; const parsed = JSON.parse(raw.replace(/^```json\s*|\s*```$/g,''));
+      if (!Array.isArray(parsed)) throw new Error('模型未返回推荐数组');
+      setGenerated(parsed.map((x:any,i:number)=>({ id:`ai-${Date.now()}-${i}`, category:CATEGORIES.some(c=>c.name===x.category)?x.category:'美食', name:String(x.name), shop:String(x.shop), price:Number(x.price)||20, desc:String(x.desc||''), options:Array.isArray(x.options)?x.options.map(String):['标准'], image:CATEGORIES.find(c=>c.name===x.category)?.icon||'🍜' })));
+      addToast('已通过 API 刷新全部分类推荐','success');
+    } catch (e:any) { showError('外卖刷新失败', e?.message || '请检查 API 配置和网络。'); } finally { setRefreshing(false); }
+  };
   const shown = items.filter(x => (!category || x.category === category) && (!query || `${x.name}${x.shop}${x.desc}`.includes(query)));
   const add = () => { if (!detail) return; setCart(c => [...c, { ...detail, desc: selected ? `${detail.desc} · ${selected}` : detail.desc }]); setDetail(null); addToast('已加入购物车', 'success'); };
   const pay = async (target: string) => {
@@ -55,7 +69,7 @@ export default function TakeoutApp() {
     setCart([]); setCheckout(false); addToast(target === '自己' ? `订单已创建，约 ${deliveryMinutes} 分钟送达` : `订单已创建，角色将在送达时知道取餐`, 'success');
   };
   return <div className="h-full overflow-y-auto bg-[#f7f7f7] text-slate-800 pb-24">
-    <header className="sticky top-0 z-10 bg-gradient-to-b from-[#ffe93c] to-[#fff4a8] px-4 pt-5 pb-3 shadow-sm"><div className="flex items-center gap-2 text-sm"><button onClick={closeApp}><ArrowLeft size={20}/></button><MapPin weight="fill" className="text-orange-600" size={18}/><input className="min-w-0 flex-1 bg-transparent font-semibold outline-none" value={address} onChange={e=>setAddress(e.target.value)} /><button onClick={()=>setMode(mode==='virtual'?'real':'virtual')} className="rounded-full bg-white/75 px-2 py-1 text-xs">{mode === 'virtual' ? '虚拟地址' : '真实 POI'}</button><button onClick={refreshAll} aria-label="刷新全部推荐"><ArrowsClockwise size={22}/></button></div><div className="mt-3 flex rounded-xl bg-white px-3 py-2 shadow-sm"><MagnifyingGlass size={19} className="mr-2 text-slate-400"/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索外卖、商品或店铺" className="min-w-0 flex-1 outline-none text-sm"/><button onClick={refreshAll} className="text-sm font-bold text-orange-600">搜索</button></div>{mode==='real' && <p className="mt-2 text-[11px] text-slate-600">真实 POI 模式将在配置高德 Key 后搜索附近店铺；当前为安全演示数据。</p>}</header>
+    <header className="sticky top-0 z-10 bg-gradient-to-b from-[#ffe93c] to-[#fff4a8] px-4 pt-5 pb-3 shadow-sm"><div className="flex items-center gap-2 text-sm"><button onClick={closeApp}><ArrowLeft size={20}/></button><MapPin weight="fill" className="text-orange-600" size={18}/><input className="min-w-0 flex-1 bg-transparent font-semibold outline-none" value={address} onChange={e=>setAddress(e.target.value)} /><button onClick={()=>setMode(mode==='virtual'?'real':'virtual')} className="rounded-full bg-white/75 px-2 py-1 text-xs">{mode === 'virtual' ? '虚拟地址' : '真实 POI'}</button><button onClick={refreshAll} aria-label="刷新全部推荐" disabled={refreshing}><ArrowsClockwise className={refreshing?'animate-spin':''} size={22}/></button></div><div className="mt-2 text-right"><button onClick={()=>setUseSecondary(v=>!v)} className="rounded-full bg-white/65 px-2 py-1 text-[10px]">{useSecondary?'副 API':'主 API'}</button></div><div className="mt-2 flex rounded-xl bg-white px-3 py-2 shadow-sm"><MagnifyingGlass size={19} className="mr-2 text-slate-400"/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索外卖、商品或店铺" className="min-w-0 flex-1 outline-none text-sm"/><button onClick={refreshAll} className="text-sm font-bold text-orange-600">{refreshing?'请求中':'搜索'}</button></div>{mode==='real' && <p className="mt-2 text-[11px] text-slate-600">真实 POI 模式将在配置高德 Key 后搜索附近店铺；当前为安全演示数据。</p>}</header>
     {!category && <section className="grid grid-cols-4 gap-y-4 bg-white px-3 py-5">{CATEGORIES.map(c=><button key={c.name} onClick={()=>setCategory(c.name)} className="flex flex-col items-center gap-1 text-xs"><span className={`grid h-12 w-12 place-items-center rounded-2xl text-2xl ${c.tint}`}>{c.icon}</span>{c.name}</button>)}</section>}
     <main className="px-3 pt-3"><div className="mb-2 flex items-center justify-between"><h2 className="font-bold">{category ? `${category} · 推荐` : '今日为你推荐'}</h2>{category && <button onClick={()=>setCategory(null)} className="text-xs text-slate-500">全部分类 <CaretRight size={12} className="inline"/></button>}</div>{shown.map(item=><button key={item.id} onClick={()=>{setDetail(item);setSelected(item.options[0])}} className="mb-3 flex w-full gap-3 rounded-2xl bg-white p-3 text-left shadow-sm"><span className="grid h-20 w-20 shrink-0 place-items-center rounded-xl bg-orange-50 text-4xl">{item.image}</span><span className="min-w-0 flex-1"><b className="block truncate">{item.name}</b><small className="block mt-1 text-slate-500">{item.shop}</small><small className="mt-1 line-clamp-1 text-slate-400">{item.desc}</small><strong className="mt-2 block text-orange-600">¥{item.price}</strong></span><Plus className="self-end rounded-full bg-orange-500 p-1 text-white" size={25}/></button>)}</main>
     {cart.length>0 && <button onClick={()=>setCheckout(true)} className="fixed bottom-4 left-5 right-5 z-20 flex items-center justify-between rounded-full bg-slate-900 px-5 py-3 text-white shadow-xl"><span><ShoppingCartSimple size={22} className="inline mr-2"/>购物车 {cart.length} 件</span><b>¥{cart.reduce((n,x)=>n+x.price,0)} 去结算</b></button>}
