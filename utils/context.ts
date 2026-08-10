@@ -302,6 +302,18 @@ export const ContextBuilder = {
         // 完整方法版在 datePrompts 的 DIG_DEEPER_BLOCK（见面模式专用，可按角色开关）。
         // 群聊流（groupOptions）跳过：多成员场景会重复注入 N 份，群聊侧暂不接入。
         if (!groupOptions) {
+            // 外卖 App 只写入最近一笔订单的轻量事实，让角色知情而不把完整购物清单塞进每轮 prompt。
+            // 读取失败（SSR / 无存档 / 损坏数据）一律静默退化，绝不影响聊天主链路。
+            try {
+                const orders = JSON.parse(localStorage.getItem('nmj-takeout-orders') || '[]') as Array<{ target?: string; items?: Array<{ name?: string }>; createdAt?: number }>;
+                const latest = orders[0];
+                const age = latest?.createdAt ? Date.now() - latest.createdAt : Infinity;
+                if (latest && age < 1000 * 60 * 60 * 24 * 3) {
+                    const food = (latest.items || []).map(i => i.name).filter(Boolean).slice(0, 3).join('、') || '外卖';
+                    const relevant = latest.target === char.name || latest.target === `${char.name} 代付`;
+                    context += `### 最近外卖动态\n用户刚通过手机外卖 App 下单了${food}（${latest.target || '自己'}）。${relevant ? '这笔订单与你直接有关，你清楚这件事；' : ''}如聊天自然提及，可以像真实生活一样回应，不要凭空声称已经实际收到或吃完。\n\n`;
+                }
+            } catch { /* localStorage unavailable or malformed */ }
             context += `### 表达底线 (Anti-Filler)\n当你觉得"没什么可说"的时候，不要用空泛的感慨、万能句式或华丽排比去填充——那是没话找话，对方一眼就能看出来。素材永远比你以为的多：对方的用词、ta 怎么说的、ta 没说的部分、此刻的情境、你们的过去、你心里闪过的念头——挑一两条往深处走就够了。宁可一个具体的小细节，不要一句谁都能说的话。\n\n`;
         }
 
