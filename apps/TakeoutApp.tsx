@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, ArrowsClockwise, CaretRight, MagnifyingGlass, MapPin, Plus, ShoppingCartSimple, X } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
+import { DB } from '../utils/db';
 
 type Category = '美食' | '甜点饮品' | '超市便利' | '蔬菜水果' | '看病买药' | '早餐' | '拼好饭' | '跑腿';
 type Item = { id: string; name: string; shop: string; price: number; desc: string; category: Category; image: string; options: string[] };
@@ -23,7 +24,7 @@ const SEEDS: Record<Category, Array<[string, string, number, string, string[]]>>
 const allItems = (round: number) => CATEGORIES.flatMap(({ name }, ci) => SEEDS[name].map((v, i) => ({ id: `${name}-${round}-${i}`, category: name, name: v[0], shop: `${v[1]} · ${round % 2 ? '今日推荐' : '附近热卖'}`, price: v[2] + ((round + ci + i) % 3) * 2, desc: v[3], options: v[4], image: CATEGORIES[ci].icon })));
 
 export default function TakeoutApp() {
-  const { closeApp, characters, addToast } = useOS();
+  const { closeApp, characters, addToast, activeCharacterId } = useOS();
   const [round, setRound] = useState(() => Number(localStorage.getItem('nmj-takeout-round') || 1));
   const [address, setAddress] = useState(() => localStorage.getItem('nmj-takeout-address') || '虚拟地址 · 上海静安区');
   const [mode, setMode] = useState<'virtual' | 'real'>(() => (localStorage.getItem('nmj-takeout-mode') as 'virtual' | 'real') || 'virtual');
@@ -34,7 +35,19 @@ export default function TakeoutApp() {
   const refreshAll = () => { setRound(r => r + 1); setQuery(''); addToast('已刷新全部分类推荐', 'success'); };
   const shown = items.filter(x => (!category || x.category === category) && (!query || `${x.name}${x.shop}${x.desc}`.includes(query)));
   const add = () => { if (!detail) return; setCart(c => [...c, { ...detail, desc: selected ? `${detail.desc} · ${selected}` : detail.desc }]); setDetail(null); addToast('已加入购物车', 'success'); };
-  const pay = (target: string) => { const order = { id: Date.now(), target, items: cart, address, createdAt: Date.now() }; const prior = JSON.parse(localStorage.getItem('nmj-takeout-orders') || '[]'); localStorage.setItem('nmj-takeout-orders', JSON.stringify([order, ...prior])); setCart([]); setCheckout(false); addToast(target === '自己' ? '订单已创建，正在为你安排配送' : `订单已创建，${target}会知道这次外卖`, 'success'); };
+  const pay = async (target: string) => {
+    const deliveryMinutes = 25 + Math.floor(Math.random() * 11);
+    const fee = 3 + Math.floor(Math.random() * 5);
+    const order = { id: Date.now(), target, items: cart, address, createdAt: Date.now(), deliveryMinutes, fee, etaAt: Date.now() + deliveryMinutes * 60000 };
+    const prior = JSON.parse(localStorage.getItem('nmj-takeout-orders') || '[]'); localStorage.setItem('nmj-takeout-orders', JSON.stringify([order, ...prior]));
+    const targetChar = characters.find(c => target === c.name || target === `${c.name} 代付`);
+    const cardTarget = target === '自己' ? '为自己下单' : target.endsWith('代付') ? `${target} · 已代付` : `送给 ${target}`;
+    const rows = cart.map(x => `<div style="display:flex;justify-content:space-between;margin-top:6px"><span>${x.name}</span><b>¥${x.price}</b></div>`).join('');
+    const html = `<div style="width:270px;padding:18px;border-radius:16px;background:linear-gradient(135deg,#fff7df,#fff);font-family:system-ui;color:#4b3424"><div style="font-size:11px;letter-spacing:2px;opacity:.55">TAKEOUT · ORDER</div><div style="font-size:19px;font-weight:700;margin-top:5px">外卖订单已提交</div><div style="font-size:12px;margin-top:6px;color:#8a6b55">${cardTarget} · 预计 ${deliveryMinutes} 分钟送达</div><div style="margin-top:12px;padding-top:8px;border-top:1px solid #f0dfc4">${rows}</div><div style="display:flex;justify-content:space-between;margin-top:12px;font-size:13px"><span>配送费 ¥${fee}</span><b>合计 ¥${cart.reduce((n,x)=>n+x.price,0)+fee}</b></div><div style="font-size:11px;margin-top:10px;opacity:.58">送至：${address}</div></div>`;
+    const recipientId = targetChar?.id || activeCharacterId;
+    if (recipientId) await DB.saveMessage({ charId: recipientId, role: 'user', type: 'html_card', content: '[HTML卡片] 外卖订单已提交', metadata: { htmlSource: html, htmlTextPreview: `外卖订单：${cardTarget}，预计${deliveryMinutes}分钟送达，配送费${fee}元`, source: 'takeout', order } });
+    setCart([]); setCheckout(false); addToast(target === '自己' ? `订单已创建，约 ${deliveryMinutes} 分钟送达` : `订单已创建，角色将在送达时知道取餐`, 'success');
+  };
   return <div className="h-full overflow-y-auto bg-[#f7f7f7] text-slate-800 pb-24">
     <header className="sticky top-0 z-10 bg-gradient-to-b from-[#ffe93c] to-[#fff4a8] px-4 pt-5 pb-3 shadow-sm"><div className="flex items-center gap-2 text-sm"><button onClick={closeApp}><ArrowLeft size={20}/></button><MapPin weight="fill" className="text-orange-600" size={18}/><input className="min-w-0 flex-1 bg-transparent font-semibold outline-none" value={address} onChange={e=>setAddress(e.target.value)} /><button onClick={()=>setMode(mode==='virtual'?'real':'virtual')} className="rounded-full bg-white/75 px-2 py-1 text-xs">{mode === 'virtual' ? '虚拟地址' : '真实 POI'}</button><button onClick={refreshAll} aria-label="刷新全部推荐"><ArrowsClockwise size={22}/></button></div><div className="mt-3 flex rounded-xl bg-white px-3 py-2 shadow-sm"><MagnifyingGlass size={19} className="mr-2 text-slate-400"/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="搜索外卖、商品或店铺" className="min-w-0 flex-1 outline-none text-sm"/><button onClick={refreshAll} className="text-sm font-bold text-orange-600">搜索</button></div>{mode==='real' && <p className="mt-2 text-[11px] text-slate-600">真实 POI 模式将在配置高德 Key 后搜索附近店铺；当前为安全演示数据。</p>}</header>
     {!category && <section className="grid grid-cols-4 gap-y-4 bg-white px-3 py-5">{CATEGORIES.map(c=><button key={c.name} onClick={()=>setCategory(c.name)} className="flex flex-col items-center gap-1 text-xs"><span className={`grid h-12 w-12 place-items-center rounded-2xl text-2xl ${c.tint}`}>{c.icon}</span>{c.name}</button>)}</section>}
