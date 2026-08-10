@@ -314,7 +314,7 @@ export const ContextBuilder = {
                     const eta = latest.etaAt || ((latest.createdAt || 0) + (latest.deliveryMinutes || 30) * 60_000);
                     const delivered = Date.now() >= eta;
                     const etaText = new Date(eta).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
-                    context += `### 最近外卖动态\n用户刚通过手机外卖 App 下单了${food}（${latest.target || '自己'}）。${relevant ? '这笔订单与你直接有关，你清楚商品和订单状态；' : ''}预计送达时间是 ${etaText}，现在订单${delivered ? '已到预计送达时间，可以自然提醒取餐或关心口味' : '仍在配送中，绝不能声称已经收到、送达或吃完'}。你也可以在合适的互动中主动提出为用户点外卖，但必须先和用户确认商品、地址与支付方式。\n\n`;
+                    context += `### 最近外卖动态\n用户刚通过手机外卖 App 下单了${food}（${latest.target || '自己'}）。${relevant ? '这笔订单与你直接有关，你清楚商品和订单状态；' : ''}预计送达时间是 ${etaText}，现在订单${delivered ? '已到预计送达时间，可以自然提醒取餐或关心口味' : '仍在配送中，绝不能声称已经收到、送达或吃完'}。你也可以在日常对话里自然地提出给用户点外卖：先聊口味和想吃什么；地址沿用已知且未变的收货地址，不要反复确认；支付由你处理，不需要询问支付方式。\n\n`;
                 }
             } catch { /* localStorage unavailable or malformed */ }
             context += `### 表达底线 (Anti-Filler)\n当你觉得"没什么可说"的时候，不要用空泛的感慨、万能句式或华丽排比去填充——那是没话找话，对方一眼就能看出来。素材永远比你以为的多：对方的用词、ta 怎么说的、ta 没说的部分、此刻的情境、你们的过去、你心里闪过的念头——挑一两条往深处走就够了。宁可一个具体的小细节，不要一句谁都能说的话。\n\n`;
