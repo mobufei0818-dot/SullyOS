@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, ArrowsClockwise, CaretRight, MagnifyingGlass, MapPin, Plus, ShoppingCartSimple, X } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
+import { createAmsg2ToolSession, executeAmsg2Tool } from '../utils/amsg2ToolBridge';
 
 type Category = '美食' | '甜点饮品' | '超市便利' | '蔬菜水果' | '看病买药' | '早餐' | '拼好饭' | '跑腿';
 type Item = { id: string; name: string; shop: string; price: number; desc: string; category: Category; image: string; options: string[] };
@@ -24,7 +25,7 @@ const SEEDS: Record<Category, Array<[string, string, number, string, string[]]>>
 const allItems = (round: number) => CATEGORIES.flatMap(({ name }, ci) => SEEDS[name].map((v, i) => ({ id: `${name}-${round}-${i}`, category: name, name: v[0], shop: `${v[1]} · ${round % 2 ? '今日推荐' : '附近热卖'}`, price: v[2] + ((round + ci + i) % 3) * 2, desc: v[3], options: v[4], image: CATEGORIES[ci].icon })));
 
 export default function TakeoutApp() {
-  const { closeApp, characters, addToast, activeCharacterId } = useOS();
+  const { closeApp, characters, addToast, activeCharacterId, userProfile, groups, realtimeConfig, apiConfig, updateCharacter } = useOS();
   const [round, setRound] = useState(() => Number(localStorage.getItem('nmj-takeout-round') || 1));
   const [address, setAddress] = useState(() => localStorage.getItem('nmj-takeout-address') || '虚拟地址 · 上海静安区');
   const [mode, setMode] = useState<'virtual' | 'real'>(() => (localStorage.getItem('nmj-takeout-mode') as 'virtual' | 'real') || 'virtual');
@@ -46,6 +47,11 @@ export default function TakeoutApp() {
     const html = `<div style="width:270px;padding:18px;border-radius:16px;background:linear-gradient(135deg,#fff7df,#fff);font-family:system-ui;color:#4b3424"><div style="font-size:11px;letter-spacing:2px;opacity:.55">TAKEOUT · ORDER</div><div style="font-size:19px;font-weight:700;margin-top:5px">外卖订单已提交</div><div style="font-size:12px;margin-top:6px;color:#8a6b55">${cardTarget} · 预计 ${deliveryMinutes} 分钟送达</div><div style="margin-top:12px;padding-top:8px;border-top:1px solid #f0dfc4">${rows}</div><div style="display:flex;justify-content:space-between;margin-top:12px;font-size:13px"><span>配送费 ¥${fee}</span><b>合计 ¥${cart.reduce((n,x)=>n+x.price,0)+fee}</b></div><div style="font-size:11px;margin-top:10px;opacity:.58">送至：${address}</div></div>`;
     const recipientId = targetChar?.id || activeCharacterId;
     if (recipientId) await DB.saveMessage({ charId: recipientId, role: 'user', type: 'html_card', content: '[HTML卡片] 外卖订单已提交', metadata: { htmlSource: html, htmlTextPreview: `外卖订单：${cardTarget}，预计${deliveryMinutes}分钟送达，配送费${fee}元`, source: 'takeout', order } });
+    if (targetChar?.activeMsg2Config?.enabled) {
+      const d = new Date(order.etaAt); const sendAt = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:00`;
+      const session = createAmsg2ToolSession({ char: targetChar, userProfile, groups, realtimeConfig, apiConfig, updateCharacter });
+      await executeAmsg2Tool('schedule_active_message', { send_at: sendAt, mode: 'prompted', prompt_hint: `外卖预计已送达。自然提醒用户取餐；订单是${cart.map(x=>x.name).join('、')}，${target === `${targetChar.name} 代付` ? '你已代付。' : '请结合是谁收餐自然回应。'}`, recurrence: 'none', expire_policy: 'force' }, session);
+    }
     setCart([]); setCheckout(false); addToast(target === '自己' ? `订单已创建，约 ${deliveryMinutes} 分钟送达` : `订单已创建，角色将在送达时知道取餐`, 'success');
   };
   return <div className="h-full overflow-y-auto bg-[#f7f7f7] text-slate-800 pb-24">
