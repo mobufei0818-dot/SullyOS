@@ -50,6 +50,24 @@ export default function TakeoutApp() {
   const [useSecondary, setUseSecondary] = useState(() => localStorage.getItem('nmj-takeout-api') === 'secondary');
   const [secondary, setSecondary] = useState<SecondaryConfig>(() => ({ baseUrl: '', apiKey: '', model: '', ...JSON.parse(localStorage.getItem('nmj-takeout-secondary-api') || '{}') }));
   const [modelOptions, setModelOptions] = useState<string[]>([]);
+  // PhoneShell 给每个 App 一个固定视口；外卖的列表只能在内容区滚动，不能把整台“手机”推走。
+  useEffect(() => {
+    const root = document.querySelector<HTMLElement>('.sully-shell-content [class*="bg-[#f7f7f7]"]');
+    if (!root) return;
+    root.classList.add('takeout-mobile-root');
+    const style = document.createElement('style');
+    style.textContent = `
+      .takeout-mobile-root { display:flex !important; flex-direction:column; min-height:0; overflow:hidden !important; padding-bottom:0 !important; overscroll-behavior:none; }
+      .takeout-mobile-root > header, .takeout-mobile-root > section { flex:0 0 auto; }
+      .takeout-mobile-root > header { position:relative !important; top:auto !important; }
+      .takeout-mobile-root > main { flex:1 1 0%; min-height:0; overflow-y:auto !important; overscroll-behavior:contain; padding-bottom:calc(6rem + env(safe-area-inset-bottom)) !important; }
+      .takeout-mobile-root > .fixed { position:absolute !important; }
+      .takeout-mobile-root > button.fixed { bottom:calc(1rem + env(safe-area-inset-bottom)) !important; }
+      .takeout-mobile-root > .fixed.inset-0 > div { max-height:calc(100% - env(safe-area-inset-top) - 8px); overflow-y:auto; overscroll-behavior:contain; padding-bottom:calc(1.25rem + env(safe-area-inset-bottom)); }
+    `;
+    document.head.appendChild(style);
+    return () => { root.classList.remove('takeout-mobile-root'); style.remove(); };
+  }, []);
   useEffect(() => { localStorage.setItem('nmj-takeout-location', JSON.stringify(location)); localStorage.setItem('nmj-takeout-api', useSecondary ? 'secondary' : 'main'); localStorage.setItem('nmj-takeout-secondary-api', JSON.stringify(secondary)); localStorage.setItem(TAKEOUT_KEY, JSON.stringify({ home, catalogs })); }, [location, useSecondary, secondary, home, catalogs]);
   const visible = useMemo(() => searchResults ?? (category ? catalogs[category] : home), [searchResults, category, catalogs, home]);
   const totalPages = Math.max(1, Math.ceil(visible.length / 5)); const displayItems = visible.slice(page * 5, page * 5 + 5);
