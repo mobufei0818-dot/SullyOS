@@ -2,10 +2,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { ArrowLeft, ArrowsClockwise, CaretLeft, CaretRight, FloppyDisk, GearSix, MagnifyingGlass, MapPin, Plus, ShoppingCartSimple, X } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { createAmsg2ToolSession, executeAmsg2Tool } from '../utils/amsg2ToolBridge';
+import { ActiveMsgClient } from '../utils/activeMsgClient';
+import { applyScheduledTask } from '../utils/amsg2Tasks';
 import { safeFetchJson } from '../utils/safeApi';
 import { nowInTimeZone, resolveCharTimeZone } from '../utils/timezone';
-import type { APIConfig } from '../types';
+import type { APIConfig, ActiveMsg2TaskRecord, CharacterProfile } from '../types';
 
 type Category = '美食' | '甜点饮品' | '超市便利' | '蔬菜水果' | '看病买药' | '早餐' | '拼好饭' | '跑腿';
 type Item = { id: string; name: string; shop: string; price: number; desc: string; category: Category; image: string; options: string[] };
@@ -74,6 +75,16 @@ export default function TakeoutApp() {
   const totalPages = Math.max(1, Math.ceil(visible.length / 5)); const displayItems = visible.slice(page * 5, page * 5 + 5);
   useEffect(() => setPage(0), [category, searchResults]);
   const currentConfig = () => useSecondary ? secondary : apiConfig;
+  const scheduleTakeoutArrival = async (char: CharacterProfile, order: { etaAt: number; items: Item[]; target: string }) => {
+    const config = char.activeMsg2Config;
+    if (!config?.enabled) throw new Error(`「${char.name}」的主动消息 2.0 未开启，无法创建送达提醒。`);
+    const wallClock = nowInTimeZone(resolveCharTimeZone(char), new Date(order.etaAt));
+    const sendAt = `${wallClock.getFullYear()}-${String(wallClock.getMonth()+1).padStart(2,'0')}-${String(wallClock.getDate()).padStart(2,'0')}T${String(wallClock.getHours()).padStart(2,'0')}:${String(wallClock.getMinutes()).padStart(2,'0')}:00`;
+    const promptHint = `现在才是外卖预计送达时刻。订单商品：${order.items.map(x => x.name).join('、')}；${order.target === `${char.name} 代付` ? '你已代付。' : '这是送给你的外卖。'}自然提醒用户取餐；此前绝不能声称已经收到、送达或吃完。`;
+    const result = await ActiveMsgClient.scheduleCharacterTask({ char, config, task: { mode: 'prompted', firstSendTime: sendAt, recurrenceType: 'none', promptHint, expirePolicy: 'force', selfScheduled: false }, userProfile, groups, realtimeConfig, apiConfig });
+    const task: ActiveMsg2TaskRecord = { taskUuid: result.uuid, clientTaskId: result.clientTaskId, mode: 'prompted', firstSendTime: result.firstSendAt, recurrenceType: 'none', promptHint, expirePolicy: 'force', anchorLastUserMsgAt: result.anchorMs, source: 'user', status: 'scheduled', createdAt: Date.now() };
+    updateCharacter(char.id, { activeMsg2Config: { ...config, tasks: applyScheduledTask(config.tasks || [], task, {}, Date.now()), lastSyncedAt: Date.now(), lastError: undefined } });
+  };
   const poiContext = async () => {
     if (!location.amapKey) return '';
     const region = location.mode === 'real' ? location.address : location.mappedAddress;
@@ -168,12 +179,7 @@ export default function TakeoutApp() {
     const html = `<div style="width:270px;padding:18px;border-radius:16px;background:linear-gradient(135deg,#fff7df,#fff);font-family:system-ui;color:#4b3424"><div style="font-size:11px;letter-spacing:2px;opacity:.55">TAKEOUT · ORDER</div><div style="font-size:19px;font-weight:700;margin-top:5px">外卖订单已提交</div><div style="font-size:12px;margin-top:6px;color:#8a6b55">${cardTarget} · 预计 ${arrivalText} 送达（约 ${deliveryMinutes} 分钟）</div><div style="margin-top:12px;padding-top:8px;border-top:1px solid #f0dfc4">${rows}</div><div style="display:flex;justify-content:space-between;margin-top:12px;font-size:13px"><span>配送费 ¥${fee}</span><b>合计 ¥${cart.reduce((n,x)=>n+x.price,0)+fee}</b></div><div style="font-size:11px;margin-top:10px;opacity:.58">送至：${location.address}</div></div>`;
     const recipientId = targetChar?.id || activeCharacterId;
     if (recipientId) await DB.saveMessage({ charId: recipientId, role: 'user', type: 'html_card', content: '[HTML卡片] 外卖订单已提交', metadata: { htmlSource: html, htmlTextPreview: `外卖订单：${cardTarget}；商品：${cart.map(x => x.name).join('、')}；预计 ${arrivalText} 送达（${deliveryMinutes}分钟后），当前尚未送达。配送费${fee}元。`, source: 'takeout', order } });
-    if (targetChar?.activeMsg2Config?.enabled) {
-      const wallClock = nowInTimeZone(resolveCharTimeZone(targetChar), new Date(order.etaAt));
-      const sendAt = `${wallClock.getFullYear()}-${String(wallClock.getMonth()+1).padStart(2,'0')}-${String(wallClock.getDate()).padStart(2,'0')}T${String(wallClock.getHours()).padStart(2,'0')}:${String(wallClock.getMinutes()).padStart(2,'0')}:00`;
-      const session = createAmsg2ToolSession({ char: targetChar, userProfile, groups, realtimeConfig, apiConfig, updateCharacter });
-      await executeAmsg2Tool('schedule_active_message', { send_at: sendAt, mode: 'prompted', prompt_hint: `现在才是外卖预计送达时刻。订单商品：${cart.map(x=>x.name).join('、')}；${target === `${targetChar.name} 代付` ? '你已代付。' : '这是送给你的外卖。'}自然提醒用户取餐；此前绝不能声称已经收到、送达或吃完。`, recurrence: 'none', expire_policy: 'force' }, session);
-    }
+    if (targetChar) await scheduleTakeoutArrival(targetChar, order);
     setCart([]); setSelectedCartIds([]); setCheckout(false);
     addToast(target === '自己' ? `订单已创建，约 ${deliveryMinutes} 分钟送达` : `订单已创建，角色会在预计送达时提醒取餐`, 'success');
   };
