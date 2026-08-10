@@ -39,6 +39,7 @@ const initialCatalogs = () => Object.fromEntries(CATEGORIES.map(c => [c.name, ma
 const savedCatalog = () => { try { return JSON.parse(localStorage.getItem(TAKEOUT_KEY) || '{}') as { home?: Item[]; catalogs?: Record<Category, Item[]>; searchResults?: Item[]; searchQuery?: string }; } catch { return {}; } };
 const cleanBaseUrl = (url: string) => url.replace(/\/+$/, '');
 const parseArray = (value: string) => { const fenced = value.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''); const match = fenced.match(/\[[\s\S]*\]/); return JSON.parse(match?.[0] || fenced); };
+const specChoices = (category: Category): Array<[string, number]> => category === '甜点饮品' ? [['中杯', 0], ['大杯', 3], ['超大杯', 6]] : category === '美食' || category === '早餐' || category === '拼好饭' ? [['标准份', 0], ['加量', 4], ['双拼', 8]] : category === '蔬菜水果' ? [['500g', 0], ['1kg', 8], ['家庭装', 15]] : category === '看病买药' ? [['标准装', 0], ['家庭装', 8], ['加量装', 15]] : [['标准规格', 0], ['加大规格', 5], ['组合装', 10]];
 
 export default function TakeoutApp() {
   const { closeApp, characters, addToast, showError, activeCharacterId, userProfile, groups, realtimeConfig, apiConfig, updateCharacter } = useOS();
@@ -47,7 +48,7 @@ export default function TakeoutApp() {
   const [catalogs, setCatalogs] = useState<Record<Category, Item[]>>(() => ({ ...initialCatalogs(), ...(savedCatalog().catalogs || {}) }));
   const [category, setCategory] = useState<Category | null>(null); const [page, setPage] = useState(0);
   const [query, setQuery] = useState(() => savedCatalog().searchQuery || ''); const [searchResults, setSearchResults] = useState<Item[] | null>(() => savedCatalog().searchResults || null);
-  const [cart, setCart] = useState<Item[]>([]); const [cartOpen, setCartOpen] = useState(false); const [selectedCartIds, setSelectedCartIds] = useState<string[]>([]); const [detail, setDetail] = useState<Item | null>(null); const [selected, setSelected] = useState(''); const [checkout, setCheckout] = useState(false); const [checkoutTarget, setCheckoutTarget] = useState<string | null>(null); const [submitting, setSubmitting] = useState(false);
+  const [cart, setCart] = useState<Item[]>([]); const [cartOpen, setCartOpen] = useState(false); const [selectedCartIds, setSelectedCartIds] = useState<string[]>([]); const [detail, setDetail] = useState<Item | null>(null); const [selected, setSelected] = useState(''); const [selectedSpec, setSelectedSpec] = useState<[string, number]>(['标准规格', 0]); const [checkout, setCheckout] = useState(false); const [checkoutTarget, setCheckoutTarget] = useState<string | null>(null); const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false); const [settingsOpen, setSettingsOpen] = useState(false); const [apiOpen, setApiOpen] = useState(false);
   const [useSecondary, setUseSecondary] = useState(() => localStorage.getItem('nmj-takeout-api') === 'secondary');
   const [secondary, setSecondary] = useState<SecondaryConfig>(() => ({ baseUrl: '', apiKey: '', model: '', ...JSON.parse(localStorage.getItem('nmj-takeout-secondary-api') || '{}') }));
@@ -70,6 +71,19 @@ export default function TakeoutApp() {
     document.head.appendChild(style);
     return () => { root.classList.remove('takeout-mobile-root'); style.remove(); };
   }, []);
+  useEffect(() => { if (detail) { setSelected(detail.options[0] || '标准'); setSelectedSpec(specChoices(detail.category)[0]); } }, [detail?.id]);
+  useEffect(() => {
+    if (!detail) return;
+    const root = document.querySelector<HTMLElement>('.takeout-mobile-root'); const title = [...(root?.querySelectorAll('h2') || [])].find(node => node.textContent === detail.name);
+    const sheet = title?.parentElement; const oldTitle = [...(sheet?.querySelectorAll('h3') || [])].find(node => node.textContent === '口味/规格'); const oldOptions = oldTitle?.nextElementSibling as HTMLElement | null;
+    if (!sheet || !oldTitle || !oldOptions) return;
+    oldTitle.style.display = 'none'; oldOptions.style.display = 'none';
+    const block = document.createElement('div'); block.className = 'mt-5 space-y-3';
+    const makeGroup = (label: string, choices: Array<[string, number]>, selectedName: string, choose: (choice: [string, number]) => void) => { const group = document.createElement('div'); const h = document.createElement('h3'); h.className = 'font-bold'; h.textContent = label; const row = document.createElement('div'); row.className = 'mt-2 flex flex-wrap gap-2'; choices.forEach(choice => { const b = document.createElement('button'); b.className = `rounded-lg px-3 py-2 text-sm ${choice[0] === selectedName ? 'bg-orange-500 text-white' : 'bg-slate-100'}`; b.textContent = choice[1] ? `${choice[0]} +¥${choice[1]}` : choice[0]; b.onclick = () => choose(choice); row.appendChild(b); }); group.append(h, row); return group; };
+    block.append(makeGroup('口味', detail.options.map(x => [x, 0]), selected, choice => setSelected(choice[0])), makeGroup('规格', specChoices(detail.category), selectedSpec[0], choice => setSelectedSpec(choice)));
+    oldOptions.parentElement?.insertBefore(block, oldOptions.nextSibling); const addButton = [...sheet.querySelectorAll('button')].find(button => button.textContent?.includes('加入购物车')); if (addButton) addButton.textContent = `¥${detail.price + selectedSpec[1]} 加入购物车`;
+    return () => block.remove();
+  }, [detail, selected, selectedSpec]);
   useEffect(() => { localStorage.setItem('nmj-takeout-location', JSON.stringify(location)); localStorage.setItem('nmj-takeout-api', useSecondary ? 'secondary' : 'main'); localStorage.setItem('nmj-takeout-secondary-api', JSON.stringify(secondary)); localStorage.setItem(TAKEOUT_KEY, JSON.stringify({ home, catalogs, searchResults, searchQuery: query })); }, [location, useSecondary, secondary, home, catalogs, searchResults, query]);
   const visible = useMemo(() => searchResults ?? (category ? catalogs[category] : home), [searchResults, category, catalogs, home]);
   const totalPages = Math.max(1, Math.ceil(visible.length / 5)); const displayItems = visible.slice(page * 5, page * 5 + 5);
@@ -110,7 +124,7 @@ export default function TakeoutApp() {
   };
   const runSearch = () => { if (!query.trim()) { setSearchResults(null); return; } requestItems('search'); };
   const loadModels = async () => { if (!secondary.baseUrl || !secondary.apiKey) { showError('无法拉取模型', '请先填写副 API 的 URL 和 Key。'); return; } try { const data = await safeFetchJson(`${cleanBaseUrl(secondary.baseUrl)}/models`, { headers: { Authorization: `Bearer ${secondary.apiKey}` } }, 1, 30000, { appId: 'takeout', appName: '外卖', purpose: '拉取副 API 模型' }); const models = Array.isArray(data?.data) ? data.data.map((m: any) => m.id).filter(Boolean) : []; setModelOptions(models); if (models[0] && !secondary.model) setSecondary(s => ({ ...s, model: models[0] })); addToast(`已拉取 ${models.length} 个模型`, 'success'); } catch (e: any) { showError('无法拉取模型', e?.message || '请检查副 API URL、Key 和跨域设置。'); } };
-  const add = () => { if (!detail) return; const item = { ...detail, id: `${detail.id}-cart-${Date.now()}`, desc: selected ? `${detail.desc} · ${selected}` : detail.desc }; setCart(c => [...c, item]); setSelectedCartIds(ids => [...ids, item.id]); setDetail(null); addToast('已加入购物车', 'success'); };
+  const add = () => { if (!detail) return; const item = { ...detail, id: `${detail.id}-cart-${Date.now()}`, price: detail.price + selectedSpec[1], desc: `${detail.desc}${selected ? ` · 口味：${selected}` : ''} · 规格：${selectedSpec[0]}` }; setCart(c => [...c, item]); setSelectedCartIds(ids => [...ids, item.id]); setDetail(null); addToast('已加入购物车', 'success'); };
   const confirmPay = async () => { if (!checkoutTarget || submitting || !cart.length) return; setSubmitting(true); try { await pay(checkoutTarget); } catch (error: any) { showError('订单后续处理失败', error?.message || '订单已创建，但提醒写入失败。'); } finally { setSubmitting(false); setCheckoutTarget(null); setCheckout(false); } };
   // 先截住“给谁买”按钮，再显示二次确认；避免一碰按钮就直接下单，也保留购物车的合并结算。
   useEffect(() => {
