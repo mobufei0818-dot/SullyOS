@@ -47,6 +47,7 @@ import { cleanTextForTts, parseVoiceOutput } from '../utils/minimaxTts';
 import { collectVoiceBatchSubtitle, isPoisonedVoiceSubtitle } from '../utils/voiceSubtitle';
 import { synthesizeSpeechDetailed, characterHasVoice } from '../utils/ttsRouter';
 import { shouldAutoGenerateVoice, shouldAutoPlayGeneratedVoice } from '../utils/voicePlayback';
+import { generateChatImage, isImageGenerationConfigured } from '../utils/imageGeneration';
 import { fetchBlobForShare, shareOrDownloadBlob } from '../utils/shareExport';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { resolveFishAudioApiKey, stripFishMarkupForDisplay, cleanTextForTtsFish } from '../utils/fishAudioTts';
@@ -94,6 +95,7 @@ const Chat: React.FC = () => {
         } catch { return 0; }
     }, []);
     const [messages, setMessages] = useState<Message[]>([]);
+    const imageGenerationInFlightRef = useRef<Set<number>>(new Set());
     // Instant Push 路径："准备中"三个点 = 消息正在拼接+发送; 消失 = SSE POST 已排进
     // 浏览器网络栈. 页面关闭时会主动 abort SSE, 让 worker 尽量走 Web Push fallback。
     const [instantSendingActive, setInstantSendingActive] = useState(false);
@@ -2478,6 +2480,16 @@ const Chat: React.FC = () => {
 
     const confirmEditMessage = async () => {
         if (!selectedMessage) return;
+        if (selectedMessage.type === 'image' && selectedMessage.metadata?.imageGeneration) {
+            const metadata = { ...(selectedMessage.metadata || {}), imageGeneration: { ...selectedMessage.metadata.imageGeneration, prompt: editContent.trim(), status: 'pending' } };
+            await DB.updateMessageMetadata(selectedMessage.id, () => metadata);
+            const updated = { ...selectedMessage, metadata };
+            setMessages(prev => prev.map(m => m.id === selectedMessage.id ? updated : m));
+            setModalType('none'); setSelectedMessage(null);
+            addToast('照片描述已更新', 'success');
+            void handleGeneratePhoto(updated);
+            return;
+        }
         const contentChanged = editContent !== selectedMessage.content;
         await DB.updateMessage(selectedMessage.id, editContent);
         // 内容变了旧语音就作废，否则语音条仍会播放编辑前的音频。
@@ -2490,6 +2502,34 @@ const Chat: React.FC = () => {
         addToast('消息已修改', 'success');
         trackEvent('编辑一条消息');
     };
+
+    const handleGeneratePhoto = useCallback(async (message: Message) => {
+        if (message.type !== 'image' || message.metadata?.imageGeneration?.status === 'ready') return;
+        if (imageGenerationInFlightRef.current.has(message.id)) return;
+        if (!isImageGenerationConfigured(apiConfig)) { showError('请先到 设置 → 其他 API 配置生图 API、Key 和模型'); return; }
+        const prompt = String(message.metadata?.imageGeneration?.prompt || message.content || '').trim();
+        if (!prompt) { showError('这张照片缺少描述，无法合成'); return; }
+        imageGenerationInFlightRef.current.add(message.id);
+        setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata: { ...(m.metadata || {}), imageGeneration: { ...(m.metadata?.imageGeneration || {}), status: 'generating' } } } : m));
+        try {
+            const generated = await generateChatImage({ prompt, config: apiConfig, char });
+            const metadata = { ...(message.metadata || {}), imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'ready', prompt, referenceApplied: generated.referenceApplied } };
+            await DB.updateMessage(message.id, generated.dataUrl);
+            await DB.updateMessageMetadata(message.id, () => metadata);
+            setMessages(prev => prev.map(m => m.id === message.id ? { ...m, content: generated.dataUrl, metadata } : m));
+            addToast('照片已合成', 'success');
+        } catch (error: any) {
+            const metadata = { ...(message.metadata || {}), imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'failed', prompt } };
+            await DB.updateMessageMetadata(message.id, () => metadata);
+            setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata } : m));
+            showError(error?.message || '生图失败，请检查 API 配置');
+        } finally { imageGenerationInFlightRef.current.delete(message.id); }
+    }, [apiConfig, char, addToast, showError]);
+
+    useEffect(() => {
+        if (!char?.chatImageEnabled || !char.chatImageAutoGenerate || !isImageGenerationConfigured(apiConfig)) return;
+        messages.filter(m => m.role === 'assistant' && m.type === 'image' && m.metadata?.imageGeneration?.status === 'pending' && Date.now() - Number(m.metadata?.imageGeneration?.createdAt || 0) < 60_000).forEach(m => { void handleGeneratePhoto(m); });
+    }, [messages, char?.id, char?.chatImageEnabled, char?.chatImageAutoGenerate, apiConfig, handleGeneratePhoto]);
 
     const handleQuickReply = useCallback((message: Message) => {
         setReplyTarget({
@@ -3116,7 +3156,7 @@ const Chat: React.FC = () => {
                 onClearHistory={handleClearHistory} onArchive={handleFullArchive}
                 onCreatePrompt={createNewPrompt} onEditPrompt={editSelectedPrompt} onSavePrompt={handleSavePrompt} onDeletePrompt={handleDeletePrompt}
                 onSetHistoryStart={handleSetHistoryStart} onRestoreAdaptiveContext={restoreAdaptiveContext} onJumpToMessageInChat={handleJumpToMessageInChat} onEnterSelectionMode={handleEnterSelectionMode}
-                onReplyMessage={handleReplyMessage} onEditMessageStart={() => { if (selectedMessage) { setEditContent(selectedMessage.content); setModalType('edit-message'); } }}
+                onReplyMessage={handleReplyMessage} onEditMessageStart={() => { if (selectedMessage) { setEditContent(selectedMessage.metadata?.imageGeneration?.prompt || selectedMessage.content); setModalType('edit-message'); } }}
                 onConfirmEditMessage={confirmEditMessage} onDeleteMessage={handleDeleteMessage} onCopyMessage={handleCopyMessage} onDeleteEmoji={handleDeleteEmoji} onDeleteCategory={handleDeleteCategory}
                 allCharacters={characters} onSaveCategoryVisibility={handleSaveCategoryVisibility}
                 translationEnabled={translationEnabled}
@@ -3137,6 +3177,10 @@ const Chat: React.FC = () => {
                 onToggleChatVoiceAutoPlay={() => updateCharacter(char.id, { chatVoiceAutoPlay: !char.chatVoiceAutoPlay })}
                 chatVoiceLang={char.chatVoiceLang || ''}
                 onSetChatVoiceLang={(lang: string) => updateCharacter(char.id, { chatVoiceLang: lang })}
+                chatImageEnabled={!!char.chatImageEnabled}
+                onToggleChatImage={() => updateCharacter(char.id, { chatImageEnabled: !char.chatImageEnabled })}
+                chatImageAutoGenerate={!!char.chatImageAutoGenerate}
+                onToggleChatImageAutoGenerate={() => updateCharacter(char.id, { chatImageAutoGenerate: !char.chatImageAutoGenerate })}
                 voiceAvailable={characterHasVoice(char, apiConfig)}
                 onGenerateVoice={selectedMessage ? () => handleManualTts(selectedMessage) : undefined}
                 voiceDownloadable={!!(selectedMessage?.id && voiceDataMap[selectedMessage.id])}
@@ -3437,6 +3481,7 @@ const Chat: React.FC = () => {
                             onMcdCandidate={handleMcdCandidate}
                             onResolveTransfer={handleResolveTransfer}
                             onResolveLifeRecord={handleResolveLifeRecord}
+                            onGeneratePhoto={handleGeneratePhoto}
                             thinkingChainOptions={thinkingChainOptions}
                         />
                         {showToolTrace && (
