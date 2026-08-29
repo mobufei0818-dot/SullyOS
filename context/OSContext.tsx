@@ -4405,6 +4405,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const hadAssetStoreBackup = data.assets !== undefined;
           const hadCustomIconsBackup = data.customIcons !== undefined;
           const hadAppearancePresetsBackup = data.appearancePresets !== undefined;
+          let hasV3BlobBackup = false;
 
           // v3 完整备份会把大图片以 `blobref:<id>` 留在业务数据中，二进制本体则单独
           // 存进 blobs/<id>。不能把令牌改成空字符串，否则角色头像、聊天照片等都会丢失；
@@ -4413,6 +4414,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               if (!zip) return;
               const indexFile = zip.file('blobs/index.json');
               if (!indexFile) return; // v1/v2 备份没有 Blob 包，继续沿用原有恢复流程。
+              hasV3BlobBackup = true;
 
               type BlobIndexEntry = { id: string; type?: string; size?: number };
               let rawIndex: unknown;
@@ -4475,6 +4477,32 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       itemTotal: payloads.length,
                   });
                   await new Promise<void>(resolve => setTimeout(resolve, 0));
+              }
+          };
+
+          // 当前项目仍有少数旧界面直接把图片字段传给 <img src>（聊天头像、桌面方图、
+          // 小组件等）。它们无法直接渲染 blobref 令牌；将 v3 包里的令牌转成 data URL，
+          // 让新旧渲染路径都能显示。Blob 本体仍已保留在 blob_assets，供支持令牌的界面使用。
+          const materializeV3BlobRefsForLegacyRender = async (): Promise<void> => {
+              if (!hasV3BlobBackup) return;
+              await resolveBlobRefsDeep(data);
+
+              // 本机主题/用户资料被完整备份放在 ls_mirror_v1 的 JSON 字符串中，常规深度遍历
+              // 不能进入字符串内部，故只对含令牌的镜像项解析一次再写回。
+              const mirror = Array.isArray(data.assets)
+                  ? data.assets.find((asset: any) => asset?.id === 'ls_mirror_v1')
+                  : undefined;
+              const mirroredValues = mirror?.data?.data;
+              if (!mirroredValues || typeof mirroredValues !== 'object') return;
+              for (const [key, rawValue] of Object.entries(mirroredValues as Record<string, unknown>)) {
+                  if (typeof rawValue !== 'string' || !rawValue.includes(BLOBREF_PREFIX)) continue;
+                  try {
+                      const parsed = JSON.parse(rawValue);
+                      await resolveBlobRefsDeep(parsed);
+                      (mirroredValues as Record<string, unknown>)[key] = JSON.stringify(parsed);
+                  } catch {
+                      // 非 JSON 的 localStorage 项保留原值，不能因一个历史项影响整份恢复。
+                  }
               }
           };
 
@@ -4564,6 +4592,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           };
 
           await restoreBlobAssetsFromV3Backup();
+          await materializeV3BlobRefsForLegacyRender();
           showImportProgress('database', '正在写入数据库...', 50, { current: '准备写入数据库', currentFile: '' });
           await DB.importFullData(data, {
               beforeWrite: restoreAssetsInPlace,
