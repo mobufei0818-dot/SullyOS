@@ -14,6 +14,11 @@
 // 单字符串 ~512M（2^29）上限会确定性抛 RangeError。分片后每片字符串长度有界，永不触上限。
 
 export const BACKUP_FORMAT_VERSION = 2;
+/**
+ * 导入端兼容范围。原版曾发出 formatVersion 3 的完整备份；它仍使用 manifest + metadata +
+ * stores 分片布局，因此可安全复用同一组装器。写出端继续维持 v2，避免无必要地改变旧版本契约。
+ */
+export const SUPPORTED_BACKUP_IMPORT_VERSIONS = [2, 3] as const;
 
 /** 分片阈值。注意这里的「Len」量的是 JS 字符串长度（UTF-16 码元数），正是 RangeError 盯的那个量，
  *  不是 UTF-8 字节数——用它当阈值刚好守住「单根字符串别逼近 512M」。 */
@@ -260,7 +265,7 @@ export interface AssembleV2Options {
  * 全程只读 zip、组装内存对象，不碰数据库——所以任何校验不过直接抛错时，DB 一字未动，
  * 调用方应在调用 importFullData 之前先 await 本函数。
  *
- * 校验三档（都在写库前）：① formatVersion 严格等于 2；② manifest 声明的每个分片文件都在
+ * 校验三档（都在写库前）：① formatVersion 是受支持的 v2/v3；② manifest 声明的每个分片文件都在
  * （缺则 abort）；③ 每字段组装后条数 === manifest count、每片必须是数组（抓我们自己导出的 bug，
  * 不是防用户篡改）。素材文件 assets/* 不进这道硬边界——缺图维持 warn+skip（缺图只可能来自
  * 篡改，真丢了也无从恢复，为它拒绝整个导入没意义）。
@@ -273,10 +278,10 @@ export async function assembleV2Backup(
     if (!manifest || typeof manifest !== 'object') {
         throw new Error('损坏的备份包：manifest.json 无法解析。');
     }
-    if (manifest.formatVersion !== BACKUP_FORMAT_VERSION) {
+    if (!SUPPORTED_BACKUP_IMPORT_VERSIONS.includes(manifest.formatVersion as typeof SUPPORTED_BACKUP_IMPORT_VERSIONS[number])) {
         throw new Error(
-            `不支持的备份格式版本：${manifest.formatVersion}（本版本只能导入 formatVersion ` +
-            `${BACKUP_FORMAT_VERSION} 的备份），已中止导入（数据未改动）。`,
+            `不支持的备份格式版本：${manifest.formatVersion}（本版本支持导入 formatVersion ` +
+            `${SUPPORTED_BACKUP_IMPORT_VERSIONS.join('、')} 的备份），已中止导入（数据未改动）。`,
         );
     }
 
