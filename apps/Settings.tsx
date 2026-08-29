@@ -478,6 +478,10 @@ const Settings: React.FC = () => {
   const [imageQuality, setImageQuality] = useState(apiConfig.imageGeneration?.quality || 'medium');
   const [imageFormat, setImageFormat] = useState<'png' | 'jpeg' | 'webp'>(apiConfig.imageGeneration?.outputFormat || 'png');
   const [imageStylePrompt, setImageStylePrompt] = useState(apiConfig.imageGeneration?.baseStylePrompt || DEFAULT_IMAGE_STYLE_PROMPT);
+  const [imageModels, setImageModels] = useState<string[]>([]);
+  const [loadingImageModels, setLoadingImageModels] = useState(false);
+  const [testingImageApi, setTestingImageApi] = useState(false);
+  const [imageApiResult, setImageApiResult] = useState<string>('');
   // 自定义语音表演指南（留空 → 用内置默认）。按服务商分两份。
   const [localVoicePromptMinimax, setLocalVoicePromptMinimax] = useState(apiConfig.voicePrompts?.minimax || '');
   const [localVoicePromptFish, setLocalVoicePromptFish] = useState(apiConfig.voicePrompts?.fishaudio || '');
@@ -1051,6 +1055,40 @@ const Settings: React.FC = () => {
     });
     setOtherStatusMsg('已保存');
     setTimeout(() => setOtherStatusMsg(''), 2000);
+  };
+
+  const fetchImageModels = async () => {
+    if (imageProvider === 'novelai') {
+      setImageModels(['nai-diffusion-4-5-full', 'nai-diffusion-4-5-curated-preview', 'nai-diffusion-4-5-full-inpainting']);
+      setImageApiResult('✅ NovelAI 使用官方图片模型列表');
+      return;
+    }
+    if (!imageUrl.trim() || !imageKey.trim()) { setImageApiResult('❌ 请先填写生图 URL 和 Key'); return; }
+    setLoadingImageModels(true); setImageApiResult('');
+    try {
+      const res = await fetch(`${imageUrl.trim().replace(/\/+$/, '')}/models`, { headers: { Authorization: `Bearer ${imageKey.trim()}` } });
+      const data = await safeResponseJson(res);
+      if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
+      const models = (Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : []).map((m: any) => typeof m === 'string' ? m : m?.id).filter(Boolean);
+      if (!models.length) throw new Error('接口未返回模型列表');
+      setImageModels(models); if (!models.includes(imageModel)) setImageModel(models[0]);
+      setImageApiResult(`✅ 已拉取 ${models.length} 个模型`);
+    } catch (error: any) { setImageApiResult(`❌ 拉取失败：${error?.message || '网络或跨域错误'}`); }
+    finally { setLoadingImageModels(false); }
+  };
+
+  const testImageApi = async () => {
+    if (!imageKey.trim() || (imageProvider === 'openai_compatible' && !imageUrl.trim())) { setImageApiResult('❌ 请先填写完整的生图 API 配置'); return; }
+    setTestingImageApi(true); setImageApiResult('');
+    try {
+      const endpoint = imageProvider === 'novelai'
+        ? 'https://image.novelai.net/ai/generate-image/suggest-tags?query=portrait'
+        : `${imageUrl.trim().replace(/\/+$/, '')}/models`;
+      const res = await fetch(endpoint, { headers: { Authorization: `Bearer ${imageKey.trim()}` } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 120)}`);
+      setImageApiResult('✅ 连接成功：鉴权和生图服务可访问');
+    } catch (error: any) { setImageApiResult(`❌ 连接失败：${error?.message || '网络或跨域错误'}`); }
+    finally { setTestingImageApi(false); }
   };
 
   // 选「谁来做语音生成」立即落库——不需要再点下面的保存。
@@ -2581,13 +2619,18 @@ const Settings: React.FC = () => {
                     </div>
                     {imageProvider === 'openai_compatible' && <input value={imageUrl} onChange={e => setImageUrl(e.target.value)} placeholder="生图接口 URL，例如 https://api.example.com/v1" className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-mono" />}
                     <input type="password" autoComplete="new-password" value={imageKey} onChange={e => setImageKey(e.target.value)} placeholder={imageProvider === 'novelai' ? 'NovelAI Persistent API Token' : '生图 API Key'} className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-mono" />
-                    <input value={imageModel} onChange={e => setImageModel(e.target.value)} placeholder="生图模型" className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs" />
+                    <div className="flex gap-2">
+                        {imageModels.length > 0 ? <select value={imageModel} onChange={e => setImageModel(e.target.value)} className="flex-1 min-w-0 bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs"><option value="">选择生图模型</option>{imageModels.map(model => <option key={model} value={model}>{model}</option>)}</select> : <input value={imageModel} onChange={e => setImageModel(e.target.value)} placeholder="生图模型" className="flex-1 min-w-0 bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs" />}
+                        <button type="button" onClick={fetchImageModels} disabled={loadingImageModels} className="shrink-0 rounded-xl bg-violet-100 px-3 text-xs font-bold text-violet-700 disabled:opacity-60">{loadingImageModels ? '拉取中…' : '拉取模型'}</button>
+                    </div>
                     <div className="grid grid-cols-3 gap-2">
                         <select value={imageSize} onChange={e => setImageSize(e.target.value)} className="bg-white border border-slate-200 rounded-xl px-2 py-2 text-xs"><option>1024x1024</option><option>1024x1536</option><option>1536x1024</option></select>
                         <select value={imageQuality} onChange={e => setImageQuality(e.target.value)} className="bg-white border border-slate-200 rounded-xl px-2 py-2 text-xs"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select>
                         <select value={imageFormat} onChange={e => setImageFormat(e.target.value as 'png' | 'jpeg' | 'webp')} className="bg-white border border-slate-200 rounded-xl px-2 py-2 text-xs"><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select>
                     </div>
                     <textarea value={imageStylePrompt} onChange={e => setImageStylePrompt(e.target.value)} className="w-full h-36 bg-white border border-slate-200 rounded-xl p-3 text-[11px] leading-relaxed resize-y" placeholder="统一画风提示词" />
+                    <button type="button" onClick={testImageApi} disabled={testingImageApi} className="w-full rounded-xl border border-violet-200 bg-white py-2.5 text-xs font-bold text-violet-700 disabled:opacity-60">{testingImageApi ? '测试中…' : '🧪 测试生图连接'}</button>
+                    {imageApiResult && <p className={`rounded-xl px-3 py-2 text-[11px] leading-relaxed ${imageApiResult.startsWith('✅') ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-600'}`}>{imageApiResult}</p>}
                 </div>
 
                 <button onClick={handleSaveOtherApis} className="w-full py-3 rounded-2xl font-bold text-white shadow-lg shadow-amber-500/20 bg-amber-500 active:scale-95 transition-all mt-2">
