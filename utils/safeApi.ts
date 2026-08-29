@@ -16,7 +16,8 @@ import { getApiCallAmbientContext, recordApiCall, type ApiCallMeta } from './api
 const log = makeDebugLogger('api', 'SafeAPI');
 
 function isChatCompletionUrl(url: string): boolean {
-    return url.includes('/chat/completions');
+    // 设置 → API 调用记录除了聊天补全，也需要能看见聊天照片的真实生图请求与报错。
+    return url.includes('/chat/completions') || url.includes('/images/generations') || url.includes('/ai/generate-image');
 }
 
 /** Parse a fetch Response as JSON safely (text-first, then JSON.parse) */
