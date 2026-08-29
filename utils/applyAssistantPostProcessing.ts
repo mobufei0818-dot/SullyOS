@@ -1992,6 +1992,26 @@ export async function applyAssistantPostProcessing(
         aiContent = aiContent.replace(/\[html\][\s\S]*?\[\/html\]/gi, '[HTML 卡片]').trim();
     }
 
+    // ─── Step 5.5: 聊天照片卡 ───
+    // 用原版后处理管线解析专用结构化标签，而不是把可点击逻辑塞进 HTML iframe。
+    // 存成 image 消息，后续可在原位被真实图片替换，主动消息/即时推送同样会走这里。
+    if ((char as any).chatImageEnabled && /<照片>/i.test(aiContent)) {
+        const photoRe = /<照片>\s*([\s\S]*?)\s*<\/照片>/gi;
+        let match: RegExpExecArray | null;
+        while ((match = photoRe.exec(aiContent))) {
+            const prompt = match[1].trim();
+            if (!prompt) continue;
+            await persistMessage({
+                charId: char.id, role: 'assistant', type: 'image', content: '',
+                metadata: mergeAssistantMeta({ imageGeneration: { status: 'pending', prompt, createdAt: Date.now() }, ...(mcdInheritMeta || {}) }),
+            } as any);
+            setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+        }
+        aiContent = aiContent.replace(photoRe, '').trim();
+    } else if (/<照片>/i.test(aiContent)) {
+        aiContent = aiContent.replace(/<照片>[\s\S]*?<\/照片>/gi, '[照片]').trim();
+    }
+
     // ─── Step 6: 展示本轮回复 (二轮结果 B / 无二轮时的单轮回复) ───
     // - 跑过二轮 (data !== initialData): aiContent 现在是 B; 一轮正文 A 已在 Step 2 开头先行展示, 这里只展示 B。
     // - 有重生指令但没真正发起二轮 (data 不变: 未配置/无结果/无日志/已激活/二轮异常 等): A 已展示, 跳过避免重复。
