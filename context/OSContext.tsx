@@ -4406,6 +4406,78 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
           const hadCustomIconsBackup = data.customIcons !== undefined;
           const hadAppearancePresetsBackup = data.appearancePresets !== undefined;
 
+          // v3 完整备份会把大图片以 `blobref:<id>` 留在业务数据中，二进制本体则单独
+          // 存进 blobs/<id>。不能把令牌改成空字符串，否则角色头像、聊天照片等都会丢失；
+          // 需要原样写回 IndexedDB 的 blob_assets，令牌才仍然有效。
+          const restoreBlobAssetsFromV3Backup = async (): Promise<void> => {
+              if (!zip) return;
+              const indexFile = zip.file('blobs/index.json');
+              if (!indexFile) return; // v1/v2 备份没有 Blob 包，继续沿用原有恢复流程。
+
+              type BlobIndexEntry = { id: string; type?: string; size?: number };
+              let rawIndex: unknown;
+              try {
+                  rawIndex = JSON.parse(await indexFile.async('string'));
+              } catch {
+                  throw new Error('损坏的 v3 备份：blobs/index.json 解析失败，已中止导入（数据未改动）');
+              }
+              if (!Array.isArray(rawIndex)) {
+                  throw new Error('损坏的 v3 备份：blobs/index.json 格式无效，已中止导入（数据未改动）');
+              }
+
+              const seenIds = new Set<string>();
+              const entries: BlobIndexEntry[] = rawIndex.map((entry, index) => {
+                  const rawEntry = entry as { id?: unknown; type?: unknown; size?: unknown };
+                  const id = typeof rawEntry.id === 'string' ? rawEntry.id.trim() : '';
+                  if (!id || id.includes('/') || id.includes('\\')) {
+                      throw new Error(`损坏的 v3 备份：第 ${index + 1} 个 Blob 索引无效，已中止导入（数据未改动）`);
+                  }
+                  if (seenIds.has(id)) {
+                      throw new Error(`损坏的 v3 备份：Blob 索引重复（${id}），已中止导入（数据未改动）`);
+                  }
+                  seenIds.add(id);
+                  return {
+                      id,
+                      type: typeof rawEntry.type === 'string' && rawEntry.type ? rawEntry.type : 'application/octet-stream',
+                      size: typeof rawEntry.size === 'number' && rawEntry.size >= 0 ? rawEntry.size : undefined,
+                  };
+              });
+              if (!entries.length) return;
+
+              // 先完整读取并校验，确认压缩包没有缺件后才写数据库，避免半包覆盖现有资料。
+              const payloads: Array<{ entry: BlobIndexEntry; blob: Blob }> = [];
+              for (let index = 0; index < entries.length; index++) {
+                  const entry = entries[index];
+                  const file = zip.file(`blobs/${entry.id}`);
+                  if (!file) {
+                      throw new Error(`损坏的 v3 备份：缺少 blobs/${entry.id}，已中止导入（数据未改动）`);
+                  }
+                  const bytes = await file.async('uint8array');
+                  payloads.push({ entry, blob: new Blob([bytes], { type: entry.type }) });
+                  showImportProgress('blobs', '正在校验高清素材...', 30 + Math.floor(((index + 1) / entries.length) * 10), {
+                      current: 'Blob 素材',
+                      currentFile: `blobs/${entry.id}`,
+                      currentFileSize: entry.size ?? bytes.byteLength,
+                      itemDone: index + 1,
+                      itemTotal: entries.length,
+                  });
+                  await new Promise<void>(resolve => setTimeout(resolve, 0));
+              }
+
+              for (let index = 0; index < payloads.length; index++) {
+                  const { entry, blob } = payloads[index];
+                  await DB.putBlobAsset(entry.id, blob);
+                  showImportProgress('blobs', '正在恢复高清素材...', 40 + Math.floor(((index + 1) / payloads.length) * 8), {
+                      current: 'Blob 素材',
+                      currentFile: `blobs/${entry.id}`,
+                      currentFileSize: entry.size ?? blob.size,
+                      itemDone: index + 1,
+                      itemTotal: payloads.length,
+                  });
+                  await new Promise<void>(resolve => setTimeout(resolve, 0));
+              }
+          };
+
           const restoreAssetsInPlace = async (root: any, label = '数据'): Promise<void> => {
               if (!zip) return;
 
@@ -4491,6 +4563,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               }
           };
 
+          await restoreBlobAssetsFromV3Backup();
           showImportProgress('database', '正在写入数据库...', 50, { current: '准备写入数据库', currentFile: '' });
           await DB.importFullData(data, {
               beforeWrite: restoreAssetsInPlace,
