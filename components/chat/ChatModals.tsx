@@ -105,6 +105,10 @@ interface ChatModalsProps {
     onToggleChatVoiceAutoPlay?: () => void;
     chatVoiceLang?: string;
     onSetChatVoiceLang?: (lang: string) => void;
+    chatImageEnabled?: boolean;
+    onToggleChatImage?: () => void;
+    chatImageAutoGenerate?: boolean;
+    onToggleChatImageAutoGenerate?: () => void;
     // Voice generation from long-press
     onGenerateVoice?: () => void;
     voiceAvailable?: boolean; // true if char has voiceProfile configured
@@ -248,7 +252,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     translationEnabled, onToggleTranslation, translateSourceLang, translateTargetLang, onSetTranslateSourceLang, onSetTranslateLang,
     xhsEnabled, onToggleXhs,
     htmlModeEnabled, onToggleHtmlMode, htmlModeCustomPrompt, setHtmlModeCustomPrompt,
-    chatVoiceEnabled, onToggleChatVoice, chatVoiceAutoPlay, onToggleChatVoiceAutoPlay, chatVoiceLang, onSetChatVoiceLang,
+    chatVoiceEnabled, onToggleChatVoice, chatVoiceAutoPlay, onToggleChatVoiceAutoPlay, chatVoiceLang, onSetChatVoiceLang, chatImageEnabled, onToggleChatImage, chatImageAutoGenerate, onToggleChatImageAutoGenerate,
     onGenerateVoice, voiceAvailable, onDownloadVoice, voiceDownloadable,
     scheduleData, isScheduleGenerating, onScheduleEdit, onScheduleDelete, onScheduleReroll, onScheduleCoverChange,
     onScheduleStyleChange, onPlayTheater,
@@ -600,6 +604,21 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                      {/* 时间感知 / 自定义时区 / 线下时间感知 已统一迁移至「神经链接」角色设定页 */}
 
                      <div className="pt-2 border-t border-slate-100">
+                         <div className="flex justify-between items-center cursor-pointer" onClick={onToggleChatImage}>
+                             <label className="text-xs font-bold text-slate-400 uppercase pointer-events-none">生图消息</label>
+                             <div className={`w-10 h-6 rounded-full p-1 transition-colors flex items-center ${chatImageEnabled ? 'bg-violet-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${chatImageEnabled ? 'translate-x-4' : ''}`} /></div>
+                         </div>
+                         <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">开启后，角色可在合适的时候发送照片描述卡；需要先在设置中配置生图 API。</p>
+                         {chatImageEnabled && <div className="mt-3 pt-3 border-t border-slate-100">
+                             <div className="flex justify-between items-center cursor-pointer" onClick={onToggleChatImageAutoGenerate}>
+                                 <label className="text-[10px] font-bold text-slate-400 uppercase pointer-events-none">收到就自动生图</label>
+                                 <div className={`w-9 h-5 rounded-full p-1 transition-colors flex items-center ${chatImageAutoGenerate ? 'bg-violet-500' : 'bg-slate-200'}`}><div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform ${chatImageAutoGenerate ? 'translate-x-4' : ''}`} /></div>
+                             </div>
+                             <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">关闭时点击照片卡才会合成。自动合成失败只提示一次，不会反复扣费重试。</p>
+                         </div>}
+                     </div>
+
+                     <div className="pt-2 border-t border-slate-100">
                          <button onClick={() => setModalType('history-manager')} className="w-full py-3 bg-slate-50 text-slate-600 font-bold rounded-2xl border border-slate-200 active:scale-95 transition-transform flex items-center justify-center gap-2">
                              查看原文范围 / 设置用户断点
                          </button>
@@ -932,6 +951,11 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                     {selectedMessage?.type === 'text' && (
                         <button onClick={onEditMessageStart} className="w-full py-3 bg-slate-50 text-slate-700 font-medium rounded-2xl active:bg-slate-100 transition-colors flex items-center justify-center gap-2">
                             编辑内容
+                        </button>
+                    )}
+                    {selectedMessage?.type === 'image' && selectedMessage?.metadata?.imageGeneration && (
+                        <button onClick={onEditMessageStart} className="w-full py-3 bg-violet-50 text-violet-600 font-medium rounded-2xl active:bg-violet-100 transition-colors flex items-center justify-center gap-2">
+                            编辑照片描述并重新生成
                         </button>
                     )}
                     {selectedMessage?.type === 'text' && (
