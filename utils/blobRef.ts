@@ -208,6 +208,9 @@ export async function resolveBlobRefsDeep(root: unknown): Promise<void> {
     const stack: object[] = [root as object];
     while (stack.length) {
         const node = stack.pop()!;
+        // 备份里的记忆向量等二进制数据也会是 object。它们不可能含有 blobref，
+        // 更不能逐字节枚举，否则全量恢复会被无意义的遍历拖慢。
+        if (node instanceof ArrayBuffer || ArrayBuffer.isView(node) || (typeof Blob !== 'undefined' && node instanceof Blob)) continue;
         if (seen.has(node)) continue;
         seen.add(node);
         const entries: Array<[string | number, unknown]> = Array.isArray(node)
