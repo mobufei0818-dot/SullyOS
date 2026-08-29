@@ -822,6 +822,8 @@ const LifeRecordCard: React.FC<{
     commonLayout: (content: React.ReactNode) => JSX.Element;
     selectionMode: boolean;
     onResolveLifeRecord?: (m: Message, action: 'confirmed' | 'rejected') => void;
+    /** 照片占位卡被点击后，聊天页负责调用真实生图接口。 */
+    onGeneratePhoto?: (m: Message) => void;
 }> = ({ m, charName, commonLayout, selectionMode, onResolveLifeRecord }) => {
     const meta = m.metadata || {};
     const style = LIFE_CARD_STYLE[meta.module as string] || LIFE_CARD_STYLE.exercise;
@@ -1458,6 +1460,7 @@ const MessageItem = React.memo(({
     onLuckinCandidate,
     onResolveTransfer,
     onResolveLifeRecord,
+    onGeneratePhoto,
     thinkingChainOptions,
 }: MessageItemProps) => {
     const isUser = m.role === 'user';
@@ -3269,6 +3272,19 @@ const MessageItem = React.memo(({
     }
 
     if (m.type === 'image') {
+        const photo = m.metadata?.imageGeneration;
+        if (photo && photo.status !== 'ready') {
+            const generating = photo.status === 'generating';
+            const failed = photo.status === 'failed';
+            return commonLayout(
+                <button type="button" onClick={() => !generating && onGeneratePhoto?.(m)} className="w-64 text-left overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm active:scale-[0.98] transition-transform disabled:opacity-70" disabled={generating}>
+                    <div className="h-40 bg-gradient-to-br from-slate-100 via-violet-50 to-rose-50 flex items-center justify-center p-5">
+                        <div className="w-full h-full rounded-xl border border-white/80 bg-white/55 flex items-center justify-center text-center text-xs leading-relaxed text-slate-500">{photo.prompt || '一张照片'}</div>
+                    </div>
+                    <div className="px-3 py-2.5 flex items-center justify-between"><span className="text-[11px] font-semibold text-slate-600">{generating ? '正在合成照片…' : failed ? '合成失败，点击重试' : '点击合成照片'}</span><span className="text-[10px] text-violet-500">PHOTO</span></div>
+                </button>
+            );
+        }
         return commonLayout(
             <div className="relative group">
                 {m.content ? (
