@@ -35,6 +35,7 @@ import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBac
 import { bucketRetryCount, isAnalyticsConfigured, isAnalyticsEnabled, setAnalyticsEnabled, trackEvent } from '../utils/analytics';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '../utils/apiConfigNormalize';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
+import { DEFAULT_IMAGE_STYLE_PROMPT } from '../utils/imageGeneration';
 
 // hot_news（news.orz.ai）可选热榜平台。key 必须与 API 的 ?platform= 完全一致。
 const HOTNEWS_PLATFORM_OPTIONS: { key: string; label: string }[] = [
@@ -469,6 +470,14 @@ const Settings: React.FC = () => {
   );
   const [localFishKey, setLocalFishKey] = useState(apiConfig.fishAudioApiKey || '');
   const [localFishModel, setLocalFishModel] = useState(apiConfig.fishAudioModel || 's2.1-pro');
+  const [imageProvider, setImageProvider] = useState<'openai_compatible' | 'novelai'>(apiConfig.imageGeneration?.provider || 'openai_compatible');
+  const [imageUrl, setImageUrl] = useState(apiConfig.imageGeneration?.baseUrl || '');
+  const [imageKey, setImageKey] = useState(apiConfig.imageGeneration?.apiKey || '');
+  const [imageModel, setImageModel] = useState(apiConfig.imageGeneration?.model || 'gpt-image-2');
+  const [imageSize, setImageSize] = useState(apiConfig.imageGeneration?.size || '1024x1024');
+  const [imageQuality, setImageQuality] = useState(apiConfig.imageGeneration?.quality || 'medium');
+  const [imageFormat, setImageFormat] = useState<'png' | 'jpeg' | 'webp'>(apiConfig.imageGeneration?.outputFormat || 'png');
+  const [imageStylePrompt, setImageStylePrompt] = useState(apiConfig.imageGeneration?.baseStylePrompt || DEFAULT_IMAGE_STYLE_PROMPT);
   // 自定义语音表演指南（留空 → 用内置默认）。按服务商分两份。
   const [localVoicePromptMinimax, setLocalVoicePromptMinimax] = useState(apiConfig.voicePrompts?.minimax || '');
   const [localVoicePromptFish, setLocalVoicePromptFish] = useState(apiConfig.voicePrompts?.fishaudio || '');
@@ -806,6 +815,14 @@ const Settings: React.FC = () => {
       setLocalTtsProvider(apiConfig.ttsProvider === 'fishaudio' ? 'fishaudio' : 'minimax');
       setLocalFishKey(apiConfig.fishAudioApiKey || '');
       setLocalFishModel(apiConfig.fishAudioModel || 's2.1-pro');
+      setImageProvider(apiConfig.imageGeneration?.provider || 'openai_compatible');
+      setImageUrl(apiConfig.imageGeneration?.baseUrl || '');
+      setImageKey(apiConfig.imageGeneration?.apiKey || '');
+      setImageModel(apiConfig.imageGeneration?.model || 'gpt-image-2');
+      setImageSize(apiConfig.imageGeneration?.size || '1024x1024');
+      setImageQuality(apiConfig.imageGeneration?.quality || 'medium');
+      setImageFormat(apiConfig.imageGeneration?.outputFormat || 'png');
+      setImageStylePrompt(apiConfig.imageGeneration?.baseStylePrompt || DEFAULT_IMAGE_STYLE_PROMPT);
       setLocalVoicePromptMinimax(apiConfig.voicePrompts?.minimax || '');
       setLocalVoicePromptFish(apiConfig.voicePrompts?.fishaudio || '');
       setLocalVoicePromptDate(apiConfig.voicePrompts?.dateVoice || '');
@@ -1025,6 +1042,7 @@ const Settings: React.FC = () => {
       ttsProvider: localTtsProvider,
       fishAudioApiKey: localFishKey,
       fishAudioModel: localFishModel,
+      imageGeneration: { provider: imageProvider, baseUrl: imageUrl.trim(), apiKey: imageKey.trim(), model: imageModel.trim(), size: imageSize, quality: imageQuality, outputFormat: imageFormat, baseStylePrompt: imageStylePrompt.trim() },
       voicePrompts: {
         minimax: localVoicePromptMinimax.trim() ? localVoicePromptMinimax : undefined,
         fishaudio: localVoicePromptFish.trim() ? localVoicePromptFish : undefined,
@@ -2551,6 +2569,25 @@ const Settings: React.FC = () => {
                             </div>
                         </div>
                     )}
+                </div>
+
+                <div className="group rounded-2xl border border-violet-200/70 bg-violet-50/45 p-3 space-y-3">
+                    <div>
+                        <div className="text-[10px] font-bold text-violet-600 uppercase tracking-widest">生图 API</div>
+                        <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">给聊天照片卡使用。Key 只保存在本机；选择 NovelAI 时使用其官方图片接口，角色参考脸不会发送给 NovelAI。</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                        {([['openai_compatible', 'OpenAI 兼容'], ['novelai', 'NovelAI']] as const).map(([value, label]) => <button key={value} type="button" onClick={() => setImageProvider(value)} className={`rounded-xl border px-3 py-2 text-xs font-bold ${imageProvider === value ? 'bg-violet-500 border-violet-500 text-white' : 'bg-white border-violet-100 text-slate-500'}`}>{label}</button>)}
+                    </div>
+                    {imageProvider === 'openai_compatible' && <input value={imageUrl} onChange={e => setImageUrl(e.target.value)} placeholder="生图接口 URL，例如 https://api.example.com/v1" className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-mono" />}
+                    <input type="password" autoComplete="new-password" value={imageKey} onChange={e => setImageKey(e.target.value)} placeholder={imageProvider === 'novelai' ? 'NovelAI Persistent API Token' : '生图 API Key'} className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-mono" />
+                    <input value={imageModel} onChange={e => setImageModel(e.target.value)} placeholder="生图模型" className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs" />
+                    <div className="grid grid-cols-3 gap-2">
+                        <select value={imageSize} onChange={e => setImageSize(e.target.value)} className="bg-white border border-slate-200 rounded-xl px-2 py-2 text-xs"><option>1024x1024</option><option>1024x1536</option><option>1536x1024</option></select>
+                        <select value={imageQuality} onChange={e => setImageQuality(e.target.value)} className="bg-white border border-slate-200 rounded-xl px-2 py-2 text-xs"><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select>
+                        <select value={imageFormat} onChange={e => setImageFormat(e.target.value as 'png' | 'jpeg' | 'webp')} className="bg-white border border-slate-200 rounded-xl px-2 py-2 text-xs"><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WebP</option></select>
+                    </div>
+                    <textarea value={imageStylePrompt} onChange={e => setImageStylePrompt(e.target.value)} className="w-full h-36 bg-white border border-slate-200 rounded-xl p-3 text-[11px] leading-relaxed resize-y" placeholder="统一画风提示词" />
                 </div>
 
                 <button onClick={handleSaveOtherApis} className="w-full py-3 rounded-2xl font-bold text-white shadow-lg shadow-amber-500/20 bg-amber-500 active:scale-95 transition-all mt-2">
