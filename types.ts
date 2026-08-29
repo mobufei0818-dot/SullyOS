@@ -244,6 +244,18 @@ export interface APIConfig {
   apiKey: string;
   // 可选识图中转：给不支持 image_url 的主模型补视觉能力。
   visionApi?: VisionApiConfig;
+  /** 图片生成独立配置。密钥只保存在用户本机，随备份/恢复一并导出。 */
+  imageGeneration?: {
+    provider: 'openai_compatible' | 'novelai';
+    baseUrl?: string;
+    apiKey?: string;
+    model?: string;
+    size?: string;
+    quality?: string;
+    outputFormat?: 'png' | 'jpeg' | 'webp';
+    /** 全局基础画风提示词；角色外貌和当次照片描述会在请求时追加。 */
+    baseStylePrompt?: string;
+  };
   minimaxApiKey?: string;
   minimaxGroupId?: string;
   // 'domestic' → https://api.minimaxi.com (国内站)
@@ -2517,6 +2529,12 @@ export interface CharacterProfile {
       pitch?: number;
   };
 
+  /** 聊天照片：参考图只作为五官/发型辅助约束，不替代角色外貌文字。 */
+  imageProfile?: {
+      faceReferenceImage?: string;
+      appearancePrompt?: string;
+  };
+
   // 时间感知强化：开启（默认）时会向上下文注入「距离上次聊天已过去多久」的强化提示，
   // 让角色强化时间观念、主动匹配现实世界时间。关掉后不再注入这组提示词
   // （注意：历史消息本身仍带时间戳，关掉后弱化程度取决于模型自身理解）。
@@ -2548,6 +2566,10 @@ export interface CharacterProfile {
   // 只管 AI 自动发来的语音；用户主动点「转换语音」/ 点空语音条生成的，仍然生成完就播。
   chatVoiceAutoPlay?: boolean;
   chatVoiceLang?: string;
+  /** 允许角色在聊天中发送照片占位卡。 */
+  chatImageEnabled?: boolean;
+  /** 收到照片占位卡后立刻合成；失败只提示一次，不自动重试。 */
+  chatImageAutoGenerate?: boolean;
   dateVoiceEnabled?: boolean;
   dateVoiceLang?: string;
   // Call (voice phone) — remembered translation language for this character
