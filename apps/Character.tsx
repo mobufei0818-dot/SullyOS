@@ -439,6 +439,16 @@ const Character: React.FC = () => {
           }
       }
   };
+  const handleFaceReferenceChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      try {
+          const dataUrl = await processImage(file);
+          handleChange('imageProfile', { ...(formData?.imageProfile || {}), faceReferenceImage: dataUrl });
+          addToast('角色参考图已保存', 'success');
+      } catch (error: any) { addToast(error?.message || '图片处理失败', 'error'); }
+      finally { e.target.value = ''; }
+  };
   
   const handleRefineMonth = async (year: string, month: string, rawText: string, formattedPrompt?: string) => {
       if (!apiConfig.apiKey) { addToast('请先配置 API Key', 'error'); return; }
@@ -1614,6 +1624,21 @@ ${isInitialGeneration ? `
                                        })}
                                    </div>
                                )}
+                           </div>
+
+                           <div className="bg-white rounded-3xl p-4 shadow-sm border border-violet-100 space-y-3">
+                               <div>
+                                   <label className="text-[10px] font-bold text-violet-600 uppercase tracking-widest">聊天生图 · 外貌参考</label>
+                                   <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">参考图只用于稳定五官和发型，不会替代外貌提示词。仅对支持图片输入的模型生效；部分 OpenAI 兼容中转站不支持。</p>
+                               </div>
+                               <div className="flex gap-3 items-start">
+                                   <label className="w-20 h-20 shrink-0 rounded-2xl overflow-hidden border border-dashed border-violet-200 bg-violet-50 flex items-center justify-center cursor-pointer text-[10px] text-violet-500 text-center p-1">
+                                       {formData.imageProfile?.faceReferenceImage ? <img src={formData.imageProfile.faceReferenceImage} className="w-full h-full object-cover" /> : '上传角色\n面部照片'}
+                                       <input type="file" accept="image/*" className="hidden" onChange={handleFaceReferenceChange} />
+                                   </label>
+                                   <textarea value={formData.imageProfile?.appearancePrompt || ''} onChange={e => handleChange('imageProfile', { ...(formData.imageProfile || {}), appearancePrompt: e.target.value })} placeholder="手写角色外貌特征，例如：黑色微卷短发、琥珀色眼睛、左眼下有很浅的小痣……" className="flex-1 min-h-20 bg-slate-50 rounded-2xl p-3 text-xs border border-slate-200 resize-y" />
+                               </div>
+                               {formData.imageProfile?.faceReferenceImage && <button type="button" onClick={() => handleChange('imageProfile', { ...(formData.imageProfile || {}), faceReferenceImage: undefined })} className="text-[10px] text-rose-500">移除参考图</button>}
                            </div>
 
                            {/* Worldbook Section */}
