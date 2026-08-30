@@ -119,7 +119,7 @@ export default function TakeoutApp() {
     if (!config?.enabled) throw new Error(`「${char.name}」的主动消息 2.0 未开启，无法创建送达提醒。`);
     const wallClock = nowInTimeZone(resolveCharTimeZone(char), new Date(order.etaAt));
     const sendAt = `${wallClock.getFullYear()}-${String(wallClock.getMonth()+1).padStart(2,'0')}-${String(wallClock.getDate()).padStart(2,'0')}T${String(wallClock.getHours()).padStart(2,'0')}:${String(wallClock.getMinutes()).padStart(2,'0')}:00`;
-    const promptHint = `现在才是外卖预计送达时刻。订单商品：${order.items.map(x => x.name).join('、')}；${order.target === `${char.name} 代付` ? '你已代付。' : '这是送给你的外卖。'}自然提醒用户取餐；此前绝不能声称已经收到、送达或吃完。`;
+    const promptHint = `现在才是外卖预计送达时刻。订单商品：${order.items.map(x => x.name).join('、')}；${order.target === `${char.name} 代付` ? '你已代付。' : '这是送给你的外卖。'}请自然问用户“外卖到了吗”或“收到了没”；此前及此刻都不能擅自断言已经收到、送达或吃完，必须等待用户确认。`;
     const result = await ActiveMsgClient.scheduleCharacterTask({ char, config, task: { mode: 'prompted', firstSendTime: sendAt, recurrenceType: 'none', promptHint, expirePolicy: 'force', selfScheduled: false }, userProfile, groups, realtimeConfig, apiConfig });
     const task: ActiveMsg2TaskRecord = { taskUuid: result.uuid, clientTaskId: result.clientTaskId, mode: 'prompted', firstSendTime: result.firstSendAt, recurrenceType: 'none', promptHint, expirePolicy: 'force', anchorLastUserMsgAt: result.anchorMs, source: 'user', status: 'scheduled', createdAt: Date.now() };
     updateCharacter(char.id, { activeMsg2Config: { ...config, tasks: applyScheduledTask(config.tasks || [], task, {}, Date.now()), lastSyncedAt: Date.now(), lastError: undefined } });
