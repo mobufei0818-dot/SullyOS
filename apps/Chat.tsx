@@ -152,6 +152,8 @@ const Chat: React.FC = () => {
     }, []);
     const [messages, setMessages] = useState<Message[]>([]);
     const imageGenerationInFlightRef = useRef<Set<number>>(new Set());
+    // 本地刚改完照片卡时，忽略更早发起的 IndexedDB 读取结果，避免旧 pending 数据反盖回去。
+    const messageMutationRevisionRef = useRef(0);
     // Instant Push 路径："准备中"三个点 = 消息正在拼接+发送; 消失 = SSE POST 已排进
     // 浏览器网络栈. 页面关闭时会主动 abort SSE, 让 worker 尽量走 Web Push fallback。
     const [instantSendingActive, setInstantSendingActive] = useState(false);
@@ -954,6 +956,7 @@ const Chat: React.FC = () => {
         if (!activeCharacterId) return;
 
         const charIdAtStart = activeCharacterId;
+        const mutationRevisionAtStart = messageMutationRevisionRef.current;
         // 只用倒序游标取「最近 N 条」（含少量缓冲，抵消 date/call/系统消息被过滤后条数变少），
         // 不再 getAll 全量反序列化 —— 图片多/消息多的账号原本要把整段历史（含内联图片）一次性读进
         // 内存才显示 30 条，首次打开会卡好几秒。totalCount 走 index.count，不反序列化、极廉价。
@@ -978,7 +981,7 @@ const Chat: React.FC = () => {
             const { messages: recent, totalCount } = await DB.getRecentMessagesWithCount(activeCharacterId, fetchLimit);
             // Guard against stale async results: if the user switched characters
             // while the DB query was in flight, discard this result.
-            if (activeCharIdRef.current !== charIdAtStart) return;
+            if (activeCharIdRef.current !== charIdAtStart || messageMutationRevisionRef.current !== mutationRevisionAtStart) return;
             applyResult(recent, totalCount);
         } catch (e) {
             // DB read failed — retry once after a short delay
@@ -987,7 +990,7 @@ const Chat: React.FC = () => {
             if (activeCharIdRef.current !== charIdAtStart) return;
             try {
                 const { messages: recent, totalCount } = await DB.getRecentMessagesWithCount(activeCharacterId, fetchLimit);
-                if (activeCharIdRef.current !== charIdAtStart) return;
+                if (activeCharIdRef.current !== charIdAtStart || messageMutationRevisionRef.current !== mutationRevisionAtStart) return;
                 applyResult(recent, totalCount);
             } catch { /* give up silently */ }
         }
@@ -2951,6 +2954,7 @@ const Chat: React.FC = () => {
             return;
         }
         imageGenerationInFlightRef.current.add(message.id);
+        messageMutationRevisionRef.current += 1;
         const generatingMetadata = {
             ...(message.metadata || {}),
             imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'generating', prompt },
@@ -2961,13 +2965,14 @@ const Chat: React.FC = () => {
             await DB.updateMessageMetadata(message.id, () => generatingMetadata);
             const generated = await generateChatImage({ prompt, config: apiConfig, char, includeCharacter: message.metadata?.imageGeneration?.includeCharacter === true });
             const metadata = { ...generatingMetadata, imageGeneration: { ...generatingMetadata.imageGeneration, status: 'ready', referenceApplied: generated.referenceApplied } };
-            await DB.updateMessage(message.id, generated.dataUrl);
-            await DB.updateMessageMetadata(message.id, () => metadata);
+            await DB.updateMessageContentAndMetadata(message.id, generated.dataUrl, metadata);
+            messageMutationRevisionRef.current += 1;
             setMessages(prev => prev.map(m => m.id === message.id ? { ...m, content: generated.dataUrl, metadata } : m));
             addToast('照片已合成', 'success');
         } catch (error: any) {
             const metadata = { ...(message.metadata || {}), imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'failed', prompt } };
             await DB.updateMessageMetadata(message.id, () => metadata);
+            messageMutationRevisionRef.current += 1;
             setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata } : m));
             const details = error instanceof Error ? error.message : String(error || '未知错误');
             showError('生图失败', details || '未知错误，请检查 API 配置与 API 调用记录。');
