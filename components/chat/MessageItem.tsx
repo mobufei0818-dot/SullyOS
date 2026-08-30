@@ -3887,6 +3887,11 @@ const MessageItem = React.memo(({
            prev.msg.metadata?.reviewStatus === next.msg.metadata?.reviewStatus &&
            prev.msg.metadata?.status === next.msg.metadata?.status &&
            prev.msg.metadata?.receipt === next.msg.metadata?.receipt &&
+           // 聊天照片卡的 pending / generating / ready / failed 都在 imageGeneration 内；
+           // 漏掉它会导致实际已开始合成，卡片却仍显示“点击合成”。
+           prev.msg.metadata?.imageGeneration?.status === next.msg.metadata?.imageGeneration?.status &&
+           prev.msg.metadata?.imageGeneration?.prompt === next.msg.metadata?.imageGeneration?.prompt &&
+           prev.msg.metadata?.imageGeneration?.includeCharacter === next.msg.metadata?.imageGeneration?.includeCharacter &&
            prev.isFirstInGroup === next.isFirstInGroup &&
            prev.isLastInGroup === next.isLastInGroup &&
            prev.activeTheme === next.activeTheme &&
