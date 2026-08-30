@@ -3296,10 +3296,14 @@ const MessageItem = React.memo(({
         const extension = String(m.metadata?.format || fileName.split('.').pop() || 'FILE').toUpperCase().slice(0, 8);
         const isPdf = extension === 'PDF' || mimeType.includes('pdf');
         const isWord = ['DOC', 'DOCX'].includes(extension) || mimeType.includes('wordprocessingml');
-        const accentClass = isPdf
+        const isInstallable = m.metadata?.collaborationAttachmentKind === 'installable' || mimeType.includes('vnd.sullyos.installable');
+        const displayExtension = isInstallable ? '作品' : extension;
+        const accentClass = isInstallable
+            ? 'bg-violet-50 text-violet-600 border-violet-100'
+            : isPdf
             ? 'bg-rose-50 text-rose-600 border-rose-100'
             : isWord ? 'bg-blue-50 text-blue-600 border-blue-100' : 'bg-slate-100 text-slate-600 border-slate-200';
-        const badgeClass = isPdf ? 'bg-rose-600' : isWord ? 'bg-blue-600' : 'bg-slate-600';
+        const badgeClass = isInstallable ? 'bg-violet-600' : isPdf ? 'bg-rose-600' : isWord ? 'bg-blue-600' : 'bg-slate-600';
         const openFile = async (event: React.MouseEvent<HTMLButtonElement>) => {
             event.stopPropagation();
             if (selectionMode) {
@@ -3328,21 +3332,23 @@ const MessageItem = React.memo(({
                             <path d="M7 3.75h6.75L18.5 8.5v11.75H7z" />
                             <path d="M13.5 3.75V8.5h5" />
                         </svg>
-                        <span className={`absolute -bottom-1 rounded-[5px] px-1.5 py-[1px] text-[7px] font-black tracking-[0.08em] text-white ${badgeClass}`}>{extension}</span>
+                        <span className={`absolute -bottom-1 rounded-[5px] px-1.5 py-[1px] text-[7px] font-black tracking-[0.08em] text-white ${badgeClass}`}>{displayExtension}</span>
                     </span>
                     <span className="sully-collaboration-file-meta min-w-0 flex-1">
                         <span className="sully-collaboration-file-name block max-h-[2.7em] overflow-hidden break-words text-[13px] font-semibold leading-[1.35] text-slate-800">{fileName}</span>
-                        <span className="sully-collaboration-file-detail mt-1.5 block text-[10px] font-medium tracking-wide text-slate-400">{extension} · {fileSize}</span>
+                        <span className="sully-collaboration-file-detail mt-1.5 block text-[10px] font-medium tracking-wide text-slate-400">{displayExtension} · {fileSize}</span>
                     </span>
                     <span className="sully-collaboration-file-action grid h-8 w-8 shrink-0 place-items-center rounded-full text-slate-400 transition-colors group-hover:text-slate-700">
                         {openingCollaborationFile ? (
                             <svg viewBox="0 0 24 24" fill="none" className="h-[18px] w-[18px] animate-spin" aria-hidden="true"><circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2" opacity=".22"/><path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+                        ) : isInstallable ? (
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-[18px] w-[18px]" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.6"/></svg>
                         ) : (
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="h-[18px] w-[18px]" aria-hidden="true"><path d="M12 3v12"/><path d="m7.5 11 4.5 4.5 4.5-4.5"/><path d="M5 20h14"/></svg>
                         )}
                     </span>
                 </span>
-                <span className="block border-t border-slate-100 px-3.5 py-2 text-[9px] font-semibold tracking-[0.12em] text-slate-400">协同工作 · 原始文件</span>
+                <span className="block border-t border-slate-100 px-3.5 py-2 text-[9px] font-semibold tracking-[0.12em] text-slate-400">协同工作 · {isInstallable ? '可安装作品' : '原始文件'}</span>
             </button>
         );
     }
