@@ -2918,9 +2918,13 @@ export interface CharacterProfile {
       pitch?: number;
   };
 
-  /** 聊天照片：参考图只作为五官/发型辅助约束，不替代角色外貌文字。 */
+  /** 聊天照片：把「身份锚点」与当次画面的构图分开保存，避免参考照反复复制同一角度。 */
   imageProfile?: {
       faceReferenceImage?: string;
+      /** 从面部参考图提取、且可由用户校正的稳定身份特征。 */
+      identityProfile?: string;
+      /** 默认身份参考仅传文字；强参考才会将原图作为图片编辑底图发送。 */
+      referenceMode?: 'identity' | 'strong';
       appearancePrompt?: string;
   };
 
