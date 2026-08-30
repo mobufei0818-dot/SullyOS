@@ -33,43 +33,39 @@ const ROLE_ORDER_INTENT_STORAGE_KEY = 'nmj-takeout-role-order-intents';
 const escapeHtml = (value: string) => value.replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char] || char));
 const STORE_PREFIX_RE = /^(?:古茗|蜜雪冰城|霸王茶姬|喜茶|奈雪(?:的茶)?|瑞幸|星巴克|库迪|茶百道|沪上阿姨|一点点|coco|书亦烧仙草|益禾堂|快乐柠檬)\s*的\s*/i;
 
-/**
- * 这是纯本地角色互动：用户明确让角色点餐后，角色的下一次回复就应落回外卖 App
- * 的统一订单链路，不依赖模型是否恰好输出隐藏标记或某句“已下单”。
- */
 type TakeoutConversationMessage = { role?: string; content?: string; id?: string | number; timestamp?: number };
 
-function findLatestFoodRequest(conversation: TakeoutConversationMessage[]): { food: string; key: string } | null {
-  const userMessages = conversation
-    .filter(message => message.role === 'user')
-    // 只取当前这一次用户发言：本地订单应在紧随点餐请求的角色回复中生成，
-    // 不能在之后的普通聊天里因为旧请求重复落单。
-    .slice(-1)
-    .reverse()
-    .map(message => String(message.content || '').replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-  const patterns = [
-    /(?:帮我|给我|替我)?\s*(?:点|来|买|下单)\s*(?:一(?:份|杯|个|碗|盒|瓶))?\s*([^。！？!?，,\n]{2,48})/,
-    /(?:想吃|想喝|要吃|要喝|想要)\s*(?:一(?:份|杯|个|碗|盒|瓶))?\s*([^。！？!?，,\n]{2,48})/,
-  ];
-  for (const text of userMessages) {
-    for (const pattern of patterns) {
-      const candidate = text.match(pattern)?.[1]
-        ?.replace(/^(?:一(?:份|杯|个|碗|盒|瓶))\s*/, '')
-        .replace(/^(?:的|个|份)\s*/, '')
-        // 品牌/店名属于搜索线索，不属于小票上的商品名。
-        .replace(STORE_PREFIX_RE, '')
-        .trim();
-      if (candidate) {
-        const source = conversation.filter(message => message.role === 'user').at(-1);
-        const key = source?.id != null
-          ? `id:${String(source.id)}`
-          : `text:${text}|at:${String(source?.timestamp || '')}`;
-        return { food: candidate, key };
-      }
-    }
+/**
+ * 角色为用户生成订单前必须已经得到明确授权。
+ *
+ * 只认可两条链路：
+ * 1. 用户这一句明确要求角色点/买/下单；
+ * 2. 角色上一句明确提议替用户点外卖，用户这一句明确答应。
+ *
+ * “想吃”“想喝”“饿了”只是聊天内容，绝不能当作下单授权。
+ */
+function resolveConfirmedRoleOrderIntent(conversation: TakeoutConversationMessage[]): { key: string } | null {
+  const lastUserIndex = [...conversation].map(message => message.role).lastIndexOf('user');
+  if (lastUserIndex < 0) return null;
+  const userMessage = conversation[lastUserIndex];
+  const userText = String(userMessage.content || '').replace(/\s+/g, ' ').trim();
+  if (!userText) return null;
+  const userKey = userMessage.id != null
+    ? `id:${String(userMessage.id)}`
+    : `text:${userText}|at:${String(userMessage.timestamp || '')}`;
+
+  // 用户直接要求角色代为下单。仅表达食欲不算。
+  if (/(?:帮我|给我|替我|麻烦你|请你).{0,12}(?:点|买|下单)|(?:你来|你给我|你帮我).{0,12}(?:点|买|下单)/u.test(userText)) {
+    return { key: `user-request:${userKey}` };
   }
-  return null;
+
+  // 角色先主动提出“我给你点外卖”，用户再说好/确认/下吧，才允许这一轮生成订单。
+  const userApproved = /^(?:好(?:的|呀|啊)?|行(?:啊|呀)?|可以|确认|就这个|要(?:的|吧)?|点吧|下吧|买吧|麻烦你了|拜托了)(?:[。！!，,\s]|$)/u.test(userText);
+  if (!userApproved) return null;
+  const priorAssistant = conversation.slice(0, lastUserIndex).reverse().find(message => message.role === 'assistant');
+  const proposal = String(priorAssistant?.content || '').replace(/\s+/g, ' ').trim();
+  const roleProposedOrder = /(?:要不要|要不|不如).{0,18}(?:给你|帮你).{0,12}(?:点|买|下单)|(?:我来|我给你|我帮你).{0,18}(?:点|买|下单).{0,18}(?:外卖|吃的|喝的|餐|奶茶|咖啡|饮品|饭|面|粥|水果)/u.test(proposal);
+  return roleProposedOrder ? { key: `role-proposal:${userKey}` } : null;
 }
 
 function claimRoleOrderIntent(intentKey: string): boolean {
@@ -127,12 +123,14 @@ export function extractRoleTakeoutOrders(content: string, conversation: TakeoutC
   });
   const location = resolveTakeoutAddress(loadTakeoutAddressBook(), { kind: 'user' }).address || '当前收货地址';
   const orders: TakeoutOrder[] = [];
-  const requestedFood = findLatestFoodRequest(conversation);
+  const confirmedIntent = resolveConfirmedRoleOrderIntent(conversation);
   const cleanedContent = cleaned.replace(/\[\[TAKEOUT_ORDER:\s*([^\]]+?)\s*\]\]/gi, (_all, raw: string) => {
-    // 同一轮回复被重放时，结构标记也只能生成一次；有当前点餐请求时与本地订单共用锁。
-    const markerKey = `marker:${requestedFood?.key || 'assistant'}:${raw.trim()}`;
+    // 标记不是授权本身。没有获得明确点单授权时，静默剥掉模型误输出的标记，绝不下单。
+    if (!confirmedIntent) return '';
+    // 同一轮回复被重放时，结构标记也只能生成一次。
+    const markerKey = `marker:${confirmedIntent.key}:${raw.trim()}`;
     if (!claimRoleOrderIntent(markerKey)) return '';
-    if (requestedFood) claimRoleOrderIntent(requestedFood.key);
+    claimRoleOrderIntent(confirmedIntent.key);
     const items = raw.split(/[;；]/).map((part: string, index: number) => {
       const [nameRaw, priceRaw, specRaw] = part.split('|').map(value => value.trim());
       const name = nameRaw?.slice(0, 48) || '';
@@ -149,30 +147,5 @@ export function extractRoleTakeoutOrders(content: string, conversation: TakeoutC
     return '';
   }).replace(/\n{3,}/g, '\n\n').trim();
 
-  // 正常路径由模型给出结构标记。模型漏标记时，用户刚明确让角色点餐就直接创建本地
-  // 剧情订单；不等待“已下单”等额外完成词，也不涉及任何真实支付或第三方平台。
-  if (orders.length === 0 && requestedFood && claimRoleOrderIntent(requestedFood.key)) {
-    const specs = cleanedContent.match(/(?:正常冰|少冰|去冰|热饮|全糖|半糖|少糖|无糖|三分糖|五分糖|七分糖|大杯|中杯|小杯|标准份|加量)/g) || [];
-    const foodName = requestedFood.food.trim();
-    if (foodName) {
-      const createdAt = Date.now();
-      const deliveryMinutes = 25 + Math.floor(Math.random() * 11);
-      const fee = 3 + Math.floor(Math.random() * 5);
-      const userAddress = resolveTakeoutAddress(loadTakeoutAddressBook(), { kind: 'user' });
-      orders.push({
-        id: createdAt,
-        target: '用户',
-        items: [{ id: `char-takeout-context-${createdAt}`, name: specs.length ? `${foodName}（${Array.from(new Set(specs)).join('、')}）` : foodName, price: 16 + Math.floor(Math.random() * 33) }],
-        address: String(location),
-        deliveryDetail: userAddress.detail,
-        deliveryNote: userAddress.note,
-        createdAt,
-        deliveryMinutes,
-        fee,
-        etaAt: createdAt + deliveryMinutes * 60_000,
-        placedBy: 'character',
-      });
-    }
-  }
   return { cleanedContent, orders };
 }
