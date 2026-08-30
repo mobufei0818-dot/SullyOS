@@ -2941,9 +2941,15 @@ const Chat: React.FC = () => {
     const handleGeneratePhoto = useCallback(async (message: Message) => {
         if (message.type !== 'image' || message.metadata?.imageGeneration?.status === 'ready') return;
         if (imageGenerationInFlightRef.current.has(message.id)) return;
-        if (!isImageGenerationConfigured(apiConfig)) { showError('请先到 设置 → 其他 API 配置生图 API、Key 和模型'); return; }
+        if (!isImageGenerationConfigured(apiConfig)) {
+            showError('生图配置不完整', '请先到 设置 → 其他 API 配置生图 API、Key 和模型。');
+            return;
+        }
         const prompt = String(message.metadata?.imageGeneration?.prompt || message.content || '').trim();
-        if (!prompt) { showError('这张照片缺少描述，无法合成'); return; }
+        if (!prompt) {
+            showError('无法合成照片', '这张照片缺少描述。');
+            return;
+        }
         imageGenerationInFlightRef.current.add(message.id);
         setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata: { ...(m.metadata || {}), imageGeneration: { ...(m.metadata?.imageGeneration || {}), status: 'generating' } } } : m));
         try {
@@ -2957,7 +2963,8 @@ const Chat: React.FC = () => {
             const metadata = { ...(message.metadata || {}), imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'failed', prompt } };
             await DB.updateMessageMetadata(message.id, () => metadata);
             setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata } : m));
-            showError(error?.message || '生图失败，请检查 API 配置');
+            const details = error instanceof Error ? error.message : String(error || '未知错误');
+            showError('生图失败', details || '未知错误，请检查 API 配置与 API 调用记录。');
         } finally { imageGenerationInFlightRef.current.delete(message.id); }
     }, [apiConfig, char, addToast, showError]);
 
