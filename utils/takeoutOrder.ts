@@ -29,6 +29,7 @@ export type TakeoutOrder = {
 };
 
 const ORDER_STORAGE_KEY = 'nmj-takeout-orders';
+const ROLE_ORDER_INTENT_STORAGE_KEY = 'nmj-takeout-role-order-intents';
 const escapeHtml = (value: string) => value.replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char] || char));
 const STORE_PREFIX_RE = /^(?:古茗|蜜雪冰城|霸王茶姬|喜茶|奈雪(?:的茶)?|瑞幸|星巴克|库迪|茶百道|沪上阿姨|一点点|coco|书亦烧仙草|益禾堂|快乐柠檬)\s*的\s*/i;
 
@@ -36,7 +37,9 @@ const STORE_PREFIX_RE = /^(?:古茗|蜜雪冰城|霸王茶姬|喜茶|奈雪(?:�
  * 这是纯本地角色互动：用户明确让角色点餐后，角色的下一次回复就应落回外卖 App
  * 的统一订单链路，不依赖模型是否恰好输出隐藏标记或某句“已下单”。
  */
-function findRecentFoodRequest(conversation: Array<{ role?: string; content?: string }>): string | null {
+type TakeoutConversationMessage = { role?: string; content?: string; id?: string | number; timestamp?: number };
+
+function findLatestFoodRequest(conversation: TakeoutConversationMessage[]): { food: string; key: string } | null {
   const userMessages = conversation
     .filter(message => message.role === 'user')
     // 只取当前这一次用户发言：本地订单应在紧随点餐请求的角色回复中生成，
@@ -57,10 +60,29 @@ function findRecentFoodRequest(conversation: Array<{ role?: string; content?: st
         // 品牌/店名属于搜索线索，不属于小票上的商品名。
         .replace(STORE_PREFIX_RE, '')
         .trim();
-      if (candidate) return candidate;
+      if (candidate) {
+        const source = conversation.filter(message => message.role === 'user').at(-1);
+        const key = source?.id != null
+          ? `id:${String(source.id)}`
+          : `text:${text}|at:${String(source?.timestamp || '')}`;
+        return { food: candidate, key };
+      }
     }
   }
   return null;
+}
+
+function claimRoleOrderIntent(intentKey: string): boolean {
+  if (typeof localStorage === 'undefined') return true;
+  try {
+    const prior = JSON.parse(localStorage.getItem(ROLE_ORDER_INTENT_STORAGE_KEY) || '[]');
+    const keys = Array.isArray(prior) ? prior.filter((value): value is string => typeof value === 'string').slice(-60) : [];
+    if (keys.includes(intentKey)) return false;
+    localStorage.setItem(ROLE_ORDER_INTENT_STORAGE_KEY, JSON.stringify([...keys, intentKey].slice(-60)));
+  } catch {
+    // 存储异常时宁可继续生成一张，也不能让订单流程整体失效。
+  }
+  return true;
 }
 
 export function saveTakeoutOrder(order: TakeoutOrder): void {
@@ -95,7 +117,7 @@ export function buildTakeoutOrderCard(order: TakeoutOrder): { html: string; text
  * [[TAKEOUT_ORDER: 商品名|价格|规格; 商品名|价格|规格]]
  * 仅由程序生成订单，模型输出的文字不会直接成为卡片样式。
  */
-export function extractRoleTakeoutOrders(content: string, conversation: Array<{ role?: string; content?: string }> = []): { cleanedContent: string; orders: TakeoutOrder[] } {
+export function extractRoleTakeoutOrders(content: string, conversation: TakeoutConversationMessage[] = []): { cleanedContent: string; orders: TakeoutOrder[] } {
   let cleaned = content.replace(/\[\[TAKEOUT_ADDRESS:\s*([^\]]+?)\s*\]\]/gi, (_all, raw: string) => {
     const [nameRaw, addressRaw, modeRaw, mappedRaw] = raw.split('|').map(value => value.trim());
     // This directive is only emitted after the user has explicitly confirmed a travel/current address in conversation.
@@ -105,7 +127,12 @@ export function extractRoleTakeoutOrders(content: string, conversation: Array<{ 
   });
   const location = resolveTakeoutAddress(loadTakeoutAddressBook(), { kind: 'user' }).address || '当前收货地址';
   const orders: TakeoutOrder[] = [];
+  const requestedFood = findLatestFoodRequest(conversation);
   const cleanedContent = cleaned.replace(/\[\[TAKEOUT_ORDER:\s*([^\]]+?)\s*\]\]/gi, (_all, raw: string) => {
+    // 同一轮回复被重放时，结构标记也只能生成一次；有当前点餐请求时与本地订单共用锁。
+    const markerKey = `marker:${requestedFood?.key || 'assistant'}:${raw.trim()}`;
+    if (!claimRoleOrderIntent(markerKey)) return '';
+    if (requestedFood) claimRoleOrderIntent(requestedFood.key);
     const items = raw.split(/[;；]/).map((part: string, index: number) => {
       const [nameRaw, priceRaw, specRaw] = part.split('|').map(value => value.trim());
       const name = nameRaw?.slice(0, 48) || '';
@@ -124,10 +151,9 @@ export function extractRoleTakeoutOrders(content: string, conversation: Array<{ 
 
   // 正常路径由模型给出结构标记。模型漏标记时，用户刚明确让角色点餐就直接创建本地
   // 剧情订单；不等待“已下单”等额外完成词，也不涉及任何真实支付或第三方平台。
-  const requestedFood = findRecentFoodRequest(conversation);
-  if (orders.length === 0 && requestedFood) {
+  if (orders.length === 0 && requestedFood && claimRoleOrderIntent(requestedFood.key)) {
     const specs = cleanedContent.match(/(?:正常冰|少冰|去冰|热饮|全糖|半糖|少糖|无糖|三分糖|五分糖|七分糖|大杯|中杯|小杯|标准份|加量)/g) || [];
-    const foodName = requestedFood.trim();
+    const foodName = requestedFood.food.trim();
     if (foodName) {
       const createdAt = Date.now();
       const deliveryMinutes = 25 + Math.floor(Math.random() * 11);
