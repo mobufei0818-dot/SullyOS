@@ -5,9 +5,9 @@ import {
     CaretRight,
     ChatCircleDots,
     Image,
+    MagnifyingGlass,
     Pause,
     Play,
-    Star,
     Trash,
     Waveform,
     X,
@@ -29,6 +29,7 @@ import {
     type VoiceFavorite,
     type VoiceFavoriteSource,
 } from '../../utils/voiceFavorites';
+import { normalizeChatSearchText, searchableChatMessageText } from '../../utils/chatMessageSearch';
 
 const PAGE_SIZE = 10;
 type FavoriteTab = 'chat' | 'voice' | 'image';
@@ -74,6 +75,9 @@ const FavoritesPortal: React.FC<FavoritesPortalProps> = ({ onClose, onJumpToMess
     const [voiceItems, setVoiceItems] = useState<VoiceFavorite[]>([]);
     const [resolvedItems, setResolvedItems] = useState<Record<string, ResolvedContentFavorite>>({});
     const [voiceFilter, setVoiceFilter] = useState<VoiceSourceFilter>('all');
+    const [searchOpen, setSearchOpen] = useState(false);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchHydrating, setSearchHydrating] = useState(false);
     const [page, setPage] = useState(0);
     const [loading, setLoading] = useState(true);
     const [resolving, setResolving] = useState(false);
@@ -113,18 +117,39 @@ const FavoritesPortal: React.FC<FavoritesPortalProps> = ({ onClose, onJumpToMess
 
     const chatItems = useMemo(() => contentItems.filter(item => item.kind === 'chat'), [contentItems]);
     const imageItems = useMemo(() => contentItems.filter(item => item.kind === 'image'), [contentItems]);
+    const normalizedSearchQuery = normalizeChatSearchText(searchQuery);
+    const searchedChatItems = useMemo(() => {
+        if (!normalizedSearchQuery) return chatItems;
+        return chatItems.filter(item => {
+            const resolved = resolvedItems[item.id];
+            const resolvedMessage = resolved && 'message' in resolved ? resolved.message : null;
+            const message = resolvedMessage || item.snapshot;
+            if (message?.type === 'emoji') return false;
+            const searchableText = normalizeChatSearchText([
+                item.charName,
+                messageTypeLabel(message?.type),
+                searchableChatMessageText(message),
+            ].join('\n'));
+            return searchableText.includes(normalizedSearchQuery);
+        });
+    }, [chatItems, normalizedSearchQuery, resolvedItems]);
     const filteredVoices = useMemo(
         () => voiceFilter === 'all' ? voiceItems : voiceItems.filter(item => item.source === voiceFilter),
         [voiceFilter, voiceItems],
     );
-    const activeItems = tab === 'chat' ? chatItems : tab === 'image' ? imageItems : filteredVoices;
+    const activeItems = tab === 'chat' ? searchedChatItems : tab === 'image' ? imageItems : filteredVoices;
     const pageCount = Math.max(1, Math.ceil(activeItems.length / PAGE_SIZE));
     const visibleItems = activeItems.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
+    const searchActive = tab === 'chat' && !!normalizedSearchQuery;
 
     useEffect(() => {
         setPage(0);
         setAudioError(null);
     }, [tab, voiceFilter]);
+
+    useEffect(() => {
+        setPage(0);
+    }, [normalizedSearchQuery]);
 
     useEffect(() => {
         if (page >= pageCount) setPage(Math.max(0, pageCount - 1));
@@ -147,6 +172,31 @@ const FavoritesPortal: React.FC<FavoritesPortalProps> = ({ onClose, onJumpToMess
         });
         return () => { cancelled = true; };
     }, [tab, page, visibleItems.map(item => item.id).join('|')]);
+
+    useEffect(() => {
+        if (!searchOpen || tab !== 'chat') {
+            setSearchHydrating(false);
+            return;
+        }
+        const unresolvedLegacyItems = chatItems.filter(item => !item.snapshot && !resolvedItems[item.id]);
+        if (!unresolvedLegacyItems.length) {
+            setSearchHydrating(false);
+            return;
+        }
+        let cancelled = false;
+        setSearchHydrating(true);
+        Promise.all(unresolvedLegacyItems.map(resolveContentFavorite)).then(results => {
+            if (cancelled) return;
+            setResolvedItems(previous => {
+                const next = { ...previous };
+                results.forEach(result => { next[result.favorite.id] = result; });
+                return next;
+            });
+        }).finally(() => {
+            if (!cancelled) setSearchHydrating(false);
+        });
+        return () => { cancelled = true; };
+    }, [searchOpen, tab, chatItems.map(item => item.id).join('|')]);
 
     const stopPlayback = useCallback(() => {
         audioRef.current?.pause();
@@ -213,7 +263,8 @@ const FavoritesPortal: React.FC<FavoritesPortalProps> = ({ onClose, onJumpToMess
     const renderChat = () => (visibleItems as ContentFavorite[]).map(item => {
         if (item.kind !== 'chat') return null;
         const resolved = resolvedItems[item.id];
-        const message = resolved && 'message' in resolved ? resolved.message : null;
+        const resolvedMessage = resolved && 'message' in resolved ? resolved.message : null;
+        const message = resolvedMessage || item.snapshot || null;
         const sourceAvailable = !!(resolved && 'sourceAvailable' in resolved && resolved.sourceAvailable);
         const missing = !!resolved && !message;
         return (
@@ -238,7 +289,7 @@ const FavoritesPortal: React.FC<FavoritesPortalProps> = ({ onClose, onJumpToMess
                     ) : (
                         <p className="mt-2 text-[12px] text-slate-400">正在读取原消息…</p>
                     )}
-                    {message && !sourceAvailable && <p className="mt-2 text-[10px] font-bold text-amber-700">原消息已删除 · 内容由收藏保留</p>}
+                    {resolved && message && !sourceAvailable && <p className="mt-2 text-[10px] font-bold text-amber-700">原消息已删除 · 内容由收藏保留</p>}
                     {sourceAvailable && onJumpToMessage && <p className="mt-2 text-[10px] font-bold text-violet-600">点按跳回原聊天</p>}
                 </button>
                 <button type="button" onClick={() => void removeContent(item)} className="self-start shrink-0 w-9 h-9 grid place-items-center rounded-full text-slate-400 active:bg-rose-50 active:text-rose-500" aria-label="取消收藏">
@@ -336,7 +387,23 @@ const FavoritesPortal: React.FC<FavoritesPortalProps> = ({ onClose, onJumpToMess
                             <h1 className="text-[17px] font-bold tracking-[.12em]">收藏</h1>
                             <p className="mt-0.5 text-[10px] text-slate-500">聊天 {chatItems.length} · 语音 {voiceItems.length} · 图片 {imageItems.length}</p>
                         </div>
-                        <Star size={20} weight="fill" className="w-10 text-amber-500" />
+                        <button
+                            type="button"
+                            onClick={() => {
+                                if (tab === 'chat' && searchOpen) {
+                                    setSearchOpen(false);
+                                    setSearchQuery('');
+                                } else {
+                                    setTab('chat');
+                                    setSearchOpen(true);
+                                }
+                            }}
+                            className={`w-10 h-10 -mr-1 grid place-items-center rounded-full transition-colors ${tab === 'chat' && searchOpen ? 'bg-violet-100 text-violet-700' : 'text-slate-600 active:bg-black/5'}`}
+                            aria-label={tab === 'chat' && searchOpen ? '关闭收藏搜索' : '搜索聊天收藏'}
+                            aria-pressed={tab === 'chat' && searchOpen}
+                        >
+                            <MagnifyingGlass size={21} weight="bold" />
+                        </button>
                     </div>
                     <div className="grid grid-cols-3 gap-1.5 mt-2 rounded-2xl bg-slate-900/5 p-1" role="tablist" aria-label="收藏分类">
                         {tabs.map(option => (
@@ -345,6 +412,32 @@ const FavoritesPortal: React.FC<FavoritesPortalProps> = ({ onClose, onJumpToMess
                             </button>
                         ))}
                     </div>
+                    {tab === 'chat' && searchOpen && (
+                        <div className="mt-2">
+                            <div className="relative">
+                                <MagnifyingGlass size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+                                <input
+                                    autoFocus
+                                    type="search"
+                                    value={searchQuery}
+                                    onChange={event => setSearchQuery(event.target.value)}
+                                    placeholder="搜索聊天收藏中的关键词"
+                                    className="w-full h-10 rounded-xl border border-slate-900/10 bg-white/80 pl-9 pr-10 text-[12px] text-slate-800 outline-none placeholder:text-slate-400 focus:border-violet-300 focus:bg-white"
+                                    aria-label="搜索聊天收藏中的关键词"
+                                />
+                                {searchQuery && (
+                                    <button type="button" onClick={() => setSearchQuery('')} className="absolute right-1.5 top-1/2 -translate-y-1/2 w-8 h-8 grid place-items-center rounded-full text-slate-400 active:bg-black/5" aria-label="清空收藏搜索">
+                                        <X size={14} weight="bold" />
+                                    </button>
+                                )}
+                            </div>
+                            {normalizedSearchQuery && (
+                                <p className="mt-1.5 px-1 text-[10px] text-slate-500">
+                                    {searchHydrating ? '正在补读旧版收藏…' : <>找到 <b className="text-violet-700">{searchedChatItems.length}</b> 条聊天收藏</>}
+                                </p>
+                            )}
+                        </div>
+                    )}
                     {tab === 'voice' && (
                         <div className="flex items-center justify-center gap-1 mt-2" role="tablist" aria-label="按语音来源筛选">
                             {voiceFilters.map(option => (
@@ -357,12 +450,14 @@ const FavoritesPortal: React.FC<FavoritesPortalProps> = ({ onClose, onJumpToMess
                 <main className="favorites-list flex-1 min-h-0 overflow-y-auto">
                     {loading ? (
                         <div className="h-full grid place-items-center text-sm text-slate-400">正在整理收藏…</div>
+                    ) : searchActive && searchHydrating && visibleItems.length === 0 ? (
+                        <div className="h-full min-h-64 grid place-items-center text-center px-8 text-sm text-slate-400">正在补读旧版收藏…</div>
                     ) : visibleItems.length === 0 ? (
                         <div className="h-full min-h-64 grid place-items-center text-center px-8">
                             <div>
-                                {tab === 'chat' ? <ChatCircleDots size={34} className="mx-auto text-slate-300" /> : tab === 'voice' ? <Waveform size={34} className="mx-auto text-slate-300" /> : <Image size={34} className="mx-auto text-slate-300" />}
-                                <p className="mt-4 text-sm font-bold text-slate-500">这里还没有{tab === 'chat' ? '聊天收藏' : tab === 'voice' ? '语音' : '图片'}</p>
-                                <p className="mt-1.5 text-xs leading-5 text-slate-400">{emptyText}</p>
+                                {searchActive ? <MagnifyingGlass size={34} className="mx-auto text-slate-300" /> : tab === 'chat' ? <ChatCircleDots size={34} className="mx-auto text-slate-300" /> : tab === 'voice' ? <Waveform size={34} className="mx-auto text-slate-300" /> : <Image size={34} className="mx-auto text-slate-300" />}
+                                <p className="mt-4 text-sm font-bold text-slate-500">{searchActive ? `没有找到“${searchQuery.trim()}”` : `这里还没有${tab === 'chat' ? '聊天收藏' : tab === 'voice' ? '语音' : '图片'}`}</p>
+                                <p className="mt-1.5 text-xs leading-5 text-slate-400">{searchActive ? '试试缩短关键词，或换一个更具体的词。' : emptyText}</p>
                             </div>
                         </div>
                     ) : tab === 'chat' ? renderChat() : tab === 'voice' ? renderVoice() : renderImages()}
@@ -372,7 +467,7 @@ const FavoritesPortal: React.FC<FavoritesPortalProps> = ({ onClose, onJumpToMess
                 {audioError && <div className="shrink-0 py-2 text-center text-[11px] text-rose-600">{audioError}</div>}
                 <footer className="shrink-0 min-h-[62px] pb-[max(12px,env(safe-area-inset-bottom))] pt-2 border-t border-slate-900/10 flex items-center justify-between">
                     <button type="button" disabled={page === 0} onClick={() => setPage(value => Math.max(0, value - 1))} className="w-10 h-10 grid place-items-center rounded-full text-slate-600 disabled:opacity-20 active:bg-black/5" aria-label="上一页"><CaretLeft size={18} weight="bold" /></button>
-                    <span className="text-[11px] tabular-nums text-slate-500">第 {page + 1} / {pageCount} 页 · 每页 {PAGE_SIZE} 条</span>
+                    <span className="text-[11px] tabular-nums text-slate-500">第 {page + 1} / {pageCount} 页 · {searchActive ? `共 ${activeItems.length} 条` : `每页 ${PAGE_SIZE} 条`}</span>
                     <button type="button" disabled={page >= pageCount - 1} onClick={() => setPage(value => Math.min(pageCount - 1, value + 1))} className="w-10 h-10 grid place-items-center rounded-full text-slate-600 disabled:opacity-20 active:bg-black/5" aria-label="下一页"><CaretRight size={18} weight="bold" /></button>
                 </footer>
             </div>
