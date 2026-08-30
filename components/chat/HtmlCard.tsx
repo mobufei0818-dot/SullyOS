@@ -64,13 +64,12 @@ const HtmlCard: React.FC<{ html: string; action?: HtmlCardAction }> = ({ html, a
         event.preventDefault();
         event.stopPropagation();
         if (!action) return;
-        // 必须在点击事件仍处于同步调用栈时打开。iOS/Safari 会把「await 复制剪贴板后
-        // 再 window.open」视作弹窗，直接拦掉，因此用户会看见按钮却完全没有跳转。
-        window.open(action.url, '_blank', 'noopener,noreferrer');
-        // 复制只是附加便利，绝不能阻塞跳转；浏览器拒绝复制时也不影响打开美团。
+        // 复制请求和 App Scheme 都要在同一次点击手势内触发。不能 await，否则 iOS
+        // 会把后续唤起视为弹窗并拦截；也不能跳网页，因为这条入口的语义就是打开 App。
         if (action.copyText && navigator.clipboard?.writeText) {
             void navigator.clipboard.writeText(action.copyText).catch(() => undefined);
         }
+        window.location.href = action.url;
     };
 
     return (
