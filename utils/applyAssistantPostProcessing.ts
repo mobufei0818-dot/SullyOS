@@ -415,6 +415,8 @@ export interface PostProcessMusicHooks {
 export interface PostProcessHooks {
     setMessages: (msgs: Message[]) => void;
     addToast: (msg: string, type: 'info' | 'success' | 'error') => void;
+    /** 需要把后处理新建的主动消息任务同步回当前 React 角色状态，不能只写 IndexedDB。 */
+    updateCharacter?: (id: string, partial: Partial<CharacterProfile>) => void;
     setRecallStatus?: (s: string) => void;
     setSearchStatus?: (s: string) => void;
     setDiaryStatus?: (s: string) => void;
@@ -566,6 +568,7 @@ export async function applyAssistantPostProcessing(
         setXhsStatus = () => {},
         updateTokenUsage = () => {},
         musicHooks,
+        updateCharacter,
     } = hooks;
     const {
         xsecTokenCache: xsecTokenCacheRef,
@@ -2254,6 +2257,9 @@ export async function applyAssistantPostProcessing(
                     activeMsg2Config: { ...config, tasks: applyScheduledTask(config.tasks || [], task, {}, Date.now()), lastSyncedAt: Date.now(), lastError: undefined },
                 };
                 await DB.saveCharacter(updatedChar);
+                // 仅写 DB 会让当前打开的主动消息 2.0 面板继续使用旧角色快照，
+                // 表现为任务远端已建、面板却没有新增。同步 React 状态后任务立即可见。
+                updateCharacter?.(char.id, { activeMsg2Config: updatedChar.activeMsg2Config });
                 if (groups) markAmsgStateDirty({ char: updatedChar, userProfile, groups, realtimeConfig });
             } catch (error) {
                 console.error('[Takeout] character order reminder schedule failed', error);
