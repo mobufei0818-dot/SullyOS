@@ -2223,7 +2223,7 @@ export async function applyAssistantPostProcessing(
             try {
                 const wallClock = nowInTimeZone(resolveCharTimeZone(char), new Date(order.etaAt));
                 const sendAt = `${wallClock.getFullYear()}-${String(wallClock.getMonth() + 1).padStart(2, '0')}-${String(wallClock.getDate()).padStart(2, '0')}T${String(wallClock.getHours()).padStart(2, '0')}:${String(wallClock.getMinutes()).padStart(2, '0')}:00`;
-                const promptHint = `现在才是你为用户点的外卖预计送达时刻。订单商品：${order.items.map(item => item.name).join('、')}。自然提醒用户取餐；此前绝不能声称已经收到、送达或吃完。`;
+                const promptHint = `现在才是你为用户点的外卖预计送达时刻。订单商品：${order.items.map(item => item.name).join('、')}。请自然问用户“外卖到了吗”或“收到了没”；此前及此刻都不能擅自断言已经收到、送达或吃完，必须等待用户确认。`;
                 const result = await ActiveMsgClient.scheduleCharacterTask({
                     char,
                     config,
