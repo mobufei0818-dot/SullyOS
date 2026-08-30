@@ -268,6 +268,66 @@ const persistTasks = (
   });
 };
 
+/**
+ * 主动消息 2.0 的唯一「建任务 + 写回本地清单」入口。
+ *
+ * 角色在聊天中调用工具、以及系统替角色建立业务提醒（例如外卖送达确认）都必须经这里：
+ * 远端任务建成却没回写角色配置，会变成面板看不见、后续状态也无法同步的幽灵任务。
+ */
+export const scheduleAmsg2TaskAndPersist = async (
+  deps: Amsg2ToolDeps,
+  input: {
+    mode: ActiveMsg2Mode;
+    firstSendTime: string;
+    recurrenceType: ActiveMsg2Recurrence;
+    promptHint?: string;
+    userMessage?: string;
+    expirePolicy?: ActiveMsg2ExpirePolicy;
+    selfScheduled?: boolean;
+    replaceTaskUuid?: string;
+  },
+): Promise<{ result: Awaited<ReturnType<typeof ActiveMsgClient.scheduleCharacterTask>>; record: ActiveMsg2TaskRecord }> => {
+  const config = readConfig(deps);
+  const result = await ActiveMsgClient.scheduleCharacterTask({
+    char: deps.char,
+    config,
+    task: {
+      mode: input.mode,
+      firstSendTime: input.firstSendTime,
+      recurrenceType: input.recurrenceType,
+      promptHint: input.promptHint,
+      userMessage: input.userMessage,
+      expirePolicy: input.expirePolicy,
+      selfScheduled: input.selfScheduled,
+    },
+    replaceTaskUuid: input.replaceTaskUuid,
+    userProfile: deps.userProfile,
+    groups: deps.groups,
+    realtimeConfig: deps.realtimeConfig,
+    apiConfig: deps.apiConfig,
+  });
+  const record: ActiveMsg2TaskRecord = {
+    taskUuid: result.uuid,
+    clientTaskId: result.clientTaskId,
+    mode: input.mode,
+    firstSendTime: result.firstSendAt,
+    recurrenceType: input.recurrenceType,
+    ...(input.promptHint ? { promptHint: input.promptHint } : {}),
+    ...(input.userMessage ? { userMessage: input.userMessage } : {}),
+    expirePolicy: resolveExpirePolicy(input.mode, input.expirePolicy),
+    source: 'character',
+    status: 'scheduled',
+    createdAt: Date.now(),
+  };
+  persistTasks(deps, config, applyScheduledTask(
+    config.tasks,
+    record,
+    { replaceTaskUuid: input.replaceTaskUuid, replacedCancelFailed: result.replacedCancelFailed },
+    Date.now(),
+  ));
+  return { result, record };
+};
+
 async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): Promise<string> {
   const { char, userProfile, groups, realtimeConfig, apiConfig } = deps;
   const config = readConfig(deps);
@@ -298,33 +358,13 @@ async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): P
     expirePolicy,
   };
 
-  const result = await ActiveMsgClient.scheduleCharacterTask({
+  const { result, record } = await scheduleAmsg2TaskAndPersist(deps, {
     // selfScheduled：角色自己排的要带标记进任务 metadata——连发上限的到点兜底闸只拦
     // 带它的任务，用户在面板里亲手排的不带、不受限（面板走的是同一个入口但不传这个）。
-    char, config, task: { ...taskInput, selfScheduled: true },
-    replaceTaskUuid: args.__replaceTaskUuid,   // renew 内部复用，LLM 不感知
-    userProfile, groups, realtimeConfig, apiConfig,
-  });
-
-  const record: ActiveMsg2TaskRecord = {
-    taskUuid: result.uuid,
-    clientTaskId: result.clientTaskId,
     ...taskInput,
-    // send_at 是角色那边的墙钟，落盘存排程接口折好的绝对时刻。存原串的话，本地读它的地方
-    // （面板卡片、待触发判定、下面这句回话）一律 new Date() 按设备时区解析，异国角色差一个时差。
-    firstSendTime: result.firstSendAt,
-    source: 'character',
-    status: 'scheduled',
-    createdAt: Date.now(),
-  };
-  // 并清单的规则（替换成功才移除旧记录；远端取消失败则保留旧记录并标错，短 id 还在、
-  // 角色和用户都还能再取消一次）与设置面板共用 applyScheduledTask。
-  persistTasks(deps, config, applyScheduledTask(
-    config.tasks,
-    record,
-    { replaceTaskUuid: args.__replaceTaskUuid, replacedCancelFailed: result.replacedCancelFailed },
-    Date.now(),
-  ));
+    selfScheduled: true,
+    replaceTaskUuid: args.__replaceTaskUuid,
+  });
 
   // 只报枚举构成（模式/频率都是写死的取值集合）。内容、时间、编号一概不带。
   // 这份文件只在浏览器聊天侧运行（不进 amsg worker bundle），引 analytics 安全。
