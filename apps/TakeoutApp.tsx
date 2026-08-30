@@ -213,7 +213,7 @@ export default function TakeoutApp() {
     const targetChar = characters.find(c => target === c.name || target === `${c.name} 代付`);
     const recipient = target === '自己' || target.endsWith('代付') ? { kind: 'user' as const } : targetChar ? { kind: 'character' as const, characterId: targetChar.id } : deliveryRecipient;
     const destination = resolveTakeoutAddress(addressBook, recipient);
-    const order = { id: Date.now(), target, items: cart, address: destination.address, createdAt: Date.now(), deliveryMinutes, fee, etaAt: Date.now() + deliveryMinutes * 60000, placedBy: 'user' as const };
+    const order = { id: Date.now(), target, items: cart, address: destination.address, deliveryDetail: destination.detail, deliveryNote: destination.note, createdAt: Date.now(), deliveryMinutes, fee, etaAt: Date.now() + deliveryMinutes * 60000, placedBy: 'user' as const };
     saveTakeoutOrder(order);
     const { html, textPreview } = buildTakeoutOrderCard(order);
     const recipientId = targetChar?.id || activeCharacterId;
