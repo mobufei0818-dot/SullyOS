@@ -2959,7 +2959,7 @@ const Chat: React.FC = () => {
         setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata: generatingMetadata } : m));
         try {
             await DB.updateMessageMetadata(message.id, () => generatingMetadata);
-            const generated = await generateChatImage({ prompt, config: apiConfig, char });
+            const generated = await generateChatImage({ prompt, config: apiConfig, char, includeCharacter: message.metadata?.imageGeneration?.includeCharacter === true });
             const metadata = { ...generatingMetadata, imageGeneration: { ...generatingMetadata.imageGeneration, status: 'ready', referenceApplied: generated.referenceApplied } };
             await DB.updateMessage(message.id, generated.dataUrl);
             await DB.updateMessageMetadata(message.id, () => metadata);
