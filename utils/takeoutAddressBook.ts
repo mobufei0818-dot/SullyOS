@@ -52,6 +52,19 @@ export function createTakeoutAddress(values: Omit<TakeoutAddress, 'id' | 'create
   return { ...values, id: `takeout-address-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, createdAt: Date.now() };
 }
 
+/** Applies the address a character has just confirmed with the user in chat. */
+export function saveConfirmedUserTakeoutAddress(values: { name: string; address: string; mode?: string; mappedAddress?: string }): TakeoutAddress {
+  const book = loadTakeoutAddressBook();
+  const name = values.name.trim() || '临时收货地址';
+  const address = values.address.trim();
+  const existing = book.entries.find(entry => entry.name === name && (!address || entry.address === address)) || book.entries.find(entry => entry.name === name);
+  if (!address && !existing) return resolveTakeoutAddress(book, { kind: 'user' });
+  const entry = existing && !address ? existing : existing ? { ...existing, address: address || existing.address, mode: values.mode === 'virtual' ? 'virtual' : 'real', mappedAddress: values.mappedAddress?.trim() || address || existing.mappedAddress } : createTakeoutAddress({ name, address, mode: values.mode === 'virtual' ? 'virtual' : 'real', mappedAddress: values.mappedAddress?.trim() || address });
+  const entries = existing ? book.entries.map(item => item.id === entry.id ? entry : item) : [...book.entries, entry];
+  persistTakeoutAddressBook({ ...book, entries, userAddressId: entry.id });
+  return entry;
+}
+
 export type PoiTestResult = { success: boolean; message: string; poiNames?: string[] };
 
 export async function testAmapPoi(key: string, address: TakeoutAddress, keyword = '餐饮'): Promise<PoiTestResult> {
