@@ -2185,7 +2185,11 @@ export async function applyAssistantPostProcessing(
     // ─── Step 5: 角色外卖订单 ───
     // 角色不能自己画一张看似订单的普通 HTML；确认下单后输出紧凑标记，由外卖 App
     // 生成固定小票、写入订单记录并安排送达提醒。这样跟用户在 App 内下单是同一条业务链。
-    const roleTakeout = extractRoleTakeoutOrders(aiContent, char.name, fullMessages);
+    // 本地聊天带 fullMessages；主动消息 2.0 的即时回传为避免重复带整包请求，
+    // fullMessages 会是空数组，但 contextMsgs 仍是当前会话的真实历史。
+    // 外卖订单必须在两条路径都能读到“用户刚刚想吃什么”，否则云端回复会漏卡片。
+    const takeoutConversation = fullMessages.length > 0 ? fullMessages : contextMsgs;
+    const roleTakeout = extractRoleTakeoutOrders(aiContent, char.name, takeoutConversation);
     // 地址确认可以发生在“下单前的一轮”对话里；即使这轮还没有订单，也必须剥掉结构标记并保留已确认的新地址。
     if (roleTakeout.cleanedContent !== aiContent) aiContent = roleTakeout.cleanedContent;
     if (roleTakeout.orders.length > 0) {
