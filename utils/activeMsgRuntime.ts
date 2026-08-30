@@ -734,7 +734,7 @@ const processInboxMessageWithPostProcessing = async (
       // 不动，用户看到的是两边对不上而没有任何解释。走 active-msg-process-failed——
       // 已有的可见通道，自带每角色 60 秒节流，不会因为一串推送而狂弹。
       notifyScheduleChangeFailed: (note: string) => {
-        notifyInboxProcessFailed(message, 'schedule-missed', note);
+        notifyInboxProcessFailed(message, 'schedule-missed', '后处理', note);
       },
       // musicHooks: 由 MusicProvider 注册到模块级 slot, 与 useChatAI 同一份, 见 MusicContext.loadMusicHooks.
       // slot 未填充时 (理论上 MusicProvider 未 mount, 实际单页应用不会发生) 退化为 undefined,
@@ -757,9 +757,14 @@ const processInboxMessageWithPostProcessing = async (
     // 这条 push 拆出的每条气泡共用一个时间戳 (跟降级存原稿路径同口径), 见
     // resolveInboxPersistTimestampForMessage。
     messageTimestamp: persistTimestamp,
-    // 补收的消息跳过拟人打字延迟, 一次性回填: 内容几小时前就在云端生成完了, 再一条条
-    // 慢放只会让用户干等, 期间他插的话还会把时间戳倒挂的口子撑开。实时收到的照旧慢放。
-    instantRender: !isFreshInboxDelivery(message.receivedAt, Date.now()),
+    // 两种情况跳过拟人打字延迟、一次性回填，共同点是「用户已经读过这句话了，再演一遍
+    // 打字过程只剩干等」：
+    //   1. 补收：内容几小时前就在云端生成完了，慢放期间用户插的话还会把时间戳倒挂的
+    //      口子撑开（见 resolveBackfillTimestamp）。
+    //   2. 送达时人不在场：系统通知已经把整句话完整显示过，他是看着通知点进来的。
+    // App 在前台时收到的实时消息照旧慢放——那才是「角色正在你眼前打字」的场景。
+    instantRender: !isFreshInboxDelivery(message.receivedAt, Date.now())
+      || wasDeliveredWhileAway(message.receivedAt),
   });
 
   // ─── 即时对话（amsg2）的情绪评估结果 ───
@@ -1227,6 +1232,41 @@ export const isFreshInboxDelivery = (
 };
 
 /**
+ * 页面最近一次回到前台的时刻（epoch 毫秒）。0 = 这一辈子还没可见过 / 没人报过。
+ * 只在内存里，刷新即忘——它要回答的问题也只在本次会话内有意义。
+ */
+let pageBecameVisibleAt = 0;
+
+/** 页面回到前台了。init 时（当时就可见的话）和每次 visibilitychange 转 visible 时报一次。 */
+export const notePageBecameVisible = (at: number = Date.now()): void => {
+  pageBecameVisibleAt = at;
+};
+
+/**
+ * 这条消息落到设备时，用户是不是不在这个页面上（true = 不在，跳过慢放）。
+ *
+ * 慢放（拟人打字节奏）的意义是「角色正在你眼前打字」。人不在场时，系统通知已经把整句话
+ * 完整显示过了，再点进来看它一个字一个字重演一遍，剩下的只有等待。
+ *
+ * 判据是「送达时刻早于页面最近一次回到前台」：
+ *   - App 在前台时收到 → receivedAt 落在这段可见期内 → 在场，保留慢放
+ *   - 切后台 / 锁屏时收到，点通知进来 → 回到前台的时刻晚于 receivedAt → 缺席，跳过
+ *   - 冷启动（点通知才把 App 拉起来）→ 页面首次可见也晚于 receivedAt → 缺席，跳过
+ *
+ * 两处保守退让，都倒向「保留慢放」：receivedAt 缺失/非法（老 push 可能不带），以及还没
+ * 记录过回到前台的时刻（0）——后者若不挡住，会把每一条消息都判成缺席。
+ * 纯函数，边界值见 activeMsgRuntime.test.ts。
+ */
+export const wasDeliveredWhileAway = (
+  receivedAt: number | undefined,
+  becameVisibleAt: number = pageBecameVisibleAt,
+): boolean => {
+  if (typeof receivedAt !== 'number' || !Number.isFinite(receivedAt) || receivedAt <= 0) return false;
+  if (!Number.isFinite(becameVisibleAt) || becameVisibleAt <= 0) return false;
+  return receivedAt < becameVisibleAt;
+};
+
+/**
  * 算一条 inbox 消息落库该用的时间戳：一律取 sentAt（云端真正把这句话发出去的那一刻）。
  * 返回 undefined = 不指定，走 DB.saveMessage 默认的写库当刻（Date.now()）。
  *
@@ -1303,8 +1343,23 @@ const resolveInboxPersistTimestampForMessage = async (
   }
 };
 
-/** 重试前等多久。本地存储的抖动一般几秒就过去了，30s 足够缓过来又不至于让用户干等。 */
-const INBOX_RETRY_DELAY_MS = 30_000;
+/**
+ * 重试前等多久（毫秒），按这条消息已经失败的次数取。
+ *
+ * 这条路上最常见的失败是 IndexedDB 的「将死连接」：App 切后台时系统强关连接，页面刚
+ * 解冻就处理推送，正好撞在重建窗口里，`db.transaction()` 同步抛 InvalidStateError
+ * （形态见 db.ts 的 onclose 注释——当次失败，下一次调用就自愈）。自愈是毫秒级的，
+ * 而推送通知早把这句话完整显示过了，聊天界面再让用户对着「正在输入」等半分钟，
+ * 观感上就是「通知都看到了，App 里还没有」。
+ *
+ * 所以第一档压到 1 秒。真的连着失败再拉长，避免存储持续故障时空转
+ * （连挂到 MAX_INBOX_PROCESS_ATTEMPTS 就不重试了，退回存原稿保底）。
+ */
+export const resolveInboxRetryDelay = (attempts: number): number => {
+  const ladder = [1_000, 5_000, 30_000];
+  const nth = Number.isFinite(attempts) ? Math.floor(attempts) : 1;
+  return ladder[Math.min(Math.max(nth, 1), ladder.length) - 1];
+};
 let inboxRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
@@ -1312,12 +1367,12 @@ let inboxRetryTimer: ReturnType<typeof setTimeout> | null = null;
  * 「等下次打开 App」不能当作重试时机——用户不会为一条没出现的消息去重启，
  * 在他一直开着 App 聊天的时候，那条消息就永远躺在收件箱里了。
  */
-const scheduleInboxRetry = () => {
+const scheduleInboxRetry = (attempts: number) => {
   if (inboxRetryTimer != null) return;   // 已经排了就不重复排，一次重试会带上全部积压
   inboxRetryTimer = setTimeout(() => {
     inboxRetryTimer = null;
     void flushInboxToChat();
-  }, INBOX_RETRY_DELAY_MS);
+  }, resolveInboxRetryDelay(attempts));
 };
 
 /** 写回收件箱等下次处理（带上失败次数），并排一次自动重试。 */
@@ -1337,7 +1392,7 @@ const requeueForRetry = async (message: ActiveMsg2InboxMessage, attempts: number
   retainedInboxMessageIds.add(message.messageId);
   try {
     await ActiveMsgStore.saveInboxMessage({ ...message, processAttempts: attempts });
-    scheduleInboxRetry();
+    scheduleInboxRetry(attempts);
   } catch (reputErr) {
     // 写回也失败，大概率同一根因（存储关停 / 配额满）。消息到此为止，留个明确的日志。
     log.error('requeue failed, message lost', { messageId: message.messageId, error: reputErr });
@@ -1469,6 +1524,12 @@ const holdUntilEarlierChunksLand = async (
 };
 
 /**
+ * 送达失败发生在哪一段。**每条上报都要带**：不带的话面板上会多出一个空分组，
+ * 而空分组恰恰是最需要被看见的那种「不知道哪来的」。
+ */
+type InboxFailureStage = '收发' | '防穿帮闸' | '后处理' | '补收';
+
+/**
  * 告诉用户「有条消息没能正常显示」。
  * push 路径平时是故意不弹 toast 的（用户没在看这个角色时会很吵），但这里是失败提醒，
  * 频率极低且用户需要知道，所以照发——由 OSContext 那侧统一节流。
@@ -1476,6 +1537,11 @@ const holdUntilEarlierChunksLand = async (
 const notifyInboxProcessFailed = (
   message: ActiveMsg2InboxMessage,
   kind: 'retrying' | 'degraded' | 'swallowed' | 'schedule-missed',
+  /**
+   * 这条是在哪一段挂的。同一个 kind 有好几个发射点（「重试中」就有三个），不分段的话
+   * 面板上只看得到「有多少次失败」，看不出该去查哪条路——取值写死在各个调用点上。
+   */
+  stage: InboxFailureStage,
   /**
    * 给用户看的那句话，由发起方按具体原因写好。同一个 kind 底下不止一种情况
    * （日程没落地就分「没有对得上的时段」和「格式没认出来」），这里原样带过去，
@@ -1492,6 +1558,7 @@ const notifyInboxProcessFailed = (
       : kind === 'swallowed' ? '被跳过'
         : kind === 'schedule-missed' ? '日程没落地'
           : '重试中',
+    stage,
   });
   try {
     window.dispatchEvent(new CustomEvent('active-msg-process-failed', {
@@ -1544,7 +1611,7 @@ const handleInboxStageFailure = async (
       messageId: message.messageId, attempts, error,
     });
     await requeueForRetry(message, attempts);
-    notifyInboxProcessFailed(message, 'retrying');
+    notifyInboxProcessFailed(message, 'retrying', '收发');
     return;
   }
 
@@ -1553,7 +1620,7 @@ const handleInboxStageFailure = async (
   log.error('处理 inbox message 反复抛错，这条跳过', {
     messageId: message.messageId, attempts, error,
   });
-  notifyInboxProcessFailed(message, 'swallowed');
+  notifyInboxProcessFailed(message, 'swallowed', '收发');
 };
 
 const flushInboxToChatImpl = async (): Promise<string[]> => {
@@ -1691,7 +1758,7 @@ const flushInboxToChatImpl = async (): Promise<string[]> => {
           if (attempts < MAX_INBOX_PROCESS_ATTEMPTS) {
             log.warn('防穿帮闸判定失败，压回收件箱稍后重判', { messageId: message.messageId, attempts, error: gateErr });
             await requeueForRetry(message, attempts);
-            notifyInboxProcessFailed(message, 'retrying');
+            notifyInboxProcessFailed(message, 'retrying', '防穿帮闸');
             continue;
           }
           // 压到上限还是判不了：本地存储这时候基本是真出问题了，让角色继续冒新消息只会更乱。
@@ -1703,7 +1770,7 @@ const flushInboxToChatImpl = async (): Promise<string[]> => {
             charId: message.charId,
             taskId: message.taskId,
           });
-          notifyInboxProcessFailed(message, 'swallowed');
+          notifyInboxProcessFailed(message, 'swallowed', '防穿帮闸');
           continue;
         }
         if (expired) {
@@ -1782,7 +1849,7 @@ const flushInboxToChatImpl = async (): Promise<string[]> => {
             // 不就地存原稿：残缺版进了聊天记录是永久的，而这类故障通常是暂时的。
             log.warn('post-processing failed, requeue for retry', { messageId: message.messageId, attempts, error: postErr });
             await requeueForRetry(message, attempts);
-            notifyInboxProcessFailed(message, 'retrying');
+            notifyInboxProcessFailed(message, 'retrying', '后处理');
             continue;
           }
 
@@ -1795,7 +1862,7 @@ const flushInboxToChatImpl = async (): Promise<string[]> => {
           } catch (purgeErr) {
             log.warn('存原稿前清理半成品失败（原稿照存，可能与残留气泡并存）', { messageId: message.messageId, error: purgeErr });
           }
-          notifyInboxProcessFailed(message, 'degraded');
+          notifyInboxProcessFailed(message, 'degraded', '后处理');
         }
       }
 
@@ -2098,7 +2165,7 @@ export const resetOutboxCatchUpThrottleForTesting = (): void => { lastOutboxDrai
 const notifyOutboxStaleDropped = (count: number): void => {
   // 跟送达端其它失败共用一个事件名，只多一个写死的代号。条数不进上报——属性只能是
   // 固定枚举（见 docs/analytics.md），而且这一格要的是「有没有人在丢消息」，不是丢了几条。
-  trackEvent('主动消息送达失败', { kind: '超时丢弃' });
+  trackEvent('主动消息送达失败', { kind: '超时丢弃', stage: '补收' satisfies InboxFailureStage });
   try {
     window.dispatchEvent(new CustomEvent('active-msg-backfill-stale', { detail: { count } }));
   } catch { /* SSR-safe */ }
@@ -2226,6 +2293,35 @@ let instantChatStatusPollTimer: ReturnType<typeof setTimeout> | null = null;
 // ——那是这台设备暂时没网，不是 worker 的错。
 const instantStatusCheckFailures = new Map<string, number>();
 const INSTANT_STATUS_CHECK_MAX_FAILURES = 5;
+
+/**
+ * 页面回到前台了：先记下时刻，再把后台期间攒下的活儿补上。
+ *
+ * **顺序有要求**：`notePageBecameVisible()` 必须排在 flush 之前。后台期间攒下的那条
+ * 消息正是「用户看着通知点进来」的那条，flush 要靠这个时刻判出「送达时人不在场」
+ * 才会跳过拟人慢放；反过来的话它会被当成实时消息又演一遍打字，而且不报任何错。
+ *
+ * 补的这几件事：
+ *  - flush：页面被冻结（iOS PWA / 移动端后台）时 SW 那条 postMessage 可能丢失，
+ *    消息卡在收件箱里不刷新（「离开后台消息不返回」）。
+ *  - 上线补收：后台期间丢掉的推送去账本上捞回来。**不管有没有在等回复**——定时主动
+ *    消息丢了的话客户端没有任何本地状态知道它来过（见 catchUpMissedPushes）。自带节流。
+ *  - 即时对话点名：欠着回复就立刻点一次，不用再等满 60 秒。后台不排下一跳，周期从这里接上。
+ *  - 待写日记 / pending tool calls：写 Notion/飞书的 fetch 后台会被冻结打断，回前台补打。
+ */
+export const handlePageBecameVisible = (): void => {
+  notePageBecameVisible();
+  // 先 await flush 落库 round-1 旁白, 再跑 runner 触发 round-2, 避免 "B+A".
+  void (async () => {
+    await flushInboxToChat();
+    void catchUpMissedPushes('foreground');
+    void runInstantChatStatusCheck();
+    void drainPendingDiaries(loadRealtimeConfigFromLocalStorage(), (charId) => {
+      window.dispatchEvent(new CustomEvent('active-msg-progress', { detail: { charId } }));
+    });
+    void runPendingToolCallsSafely();
+  })();
+};
 
 /**
  * 还欠着回复时，把下一跳点名排到 60s 后；一条都不欠就直接撤掉定时器。
@@ -2601,31 +2697,14 @@ export const ActiveMsgRuntime = {
       });
     }
 
-    // 回到前台兜底: 后台期间 SW 收到 push 写进 inbox 后会 postMessage 触发 flushInboxToChat,
-    // 但页面被冻结 (iOS PWA / 移动端后台) 时那条 postMessage 可能丢失, 导致回前台后消息卡在 inbox
-    // 里不刷新 ("离开后台消息不返回"). 这里 visibilitychange→visible 主动 flush 一次兜底.
-    // 同时排空"待写日记"队列 (写 Notion/飞书的网络 fetch 后台会被冻结打断, 预写进 pendingDiary,
-    // 回前台 fetch 可靠时补打) + pending tool calls.
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', () => {
         if (document.visibilityState !== 'visible') return;
-        // 先 await flush 落库 round-1 旁白, 再跑 runner 触发 round-2, 避免 "B+A".
-        void (async () => {
-          await flushInboxToChat();
-          // 后台期间丢掉的推送去账本上捞回来。**不管有没有在等回复**：定时主动消息
-          // 丢了的话，客户端这边没有任何本地状态知道它来过（见 catchUpMissedPushes）。
-          // 自带节流，切标签页来回切不会每次都打网络。
-          void catchUpMissedPushes('foreground');
-          // 即时对话还欠着回复的话，立刻点一次名：后台期间推送丢了、或者云端那一轮
-          // 已经出结果了，回前台这一刻就该看到，不用再等满 60 秒。
-          // 后台不排下一跳，周期就是从这里接上的。没欠着的话点名自己会空转返回。
-          void runInstantChatStatusCheck();
-          void drainPendingDiaries(loadRealtimeConfigFromLocalStorage(), (charId) => {
-            window.dispatchEvent(new CustomEvent('active-msg-progress', { detail: { charId } }));
-          });
-          void runPendingToolCallsSafely();
-        })();
+        handlePageBecameVisible();
       });
+      // 冷启动那一下（点通知才把 App 拉起来）没有 visibilitychange 可听，这里补一次：
+      // 不补的话「回到前台的时刻」一直是 0，从通知进来的第一条判不出「送达时人不在」。
+      if (document.visibilityState === 'visible') notePageBecameVisible();
     }
 
     // 受理一轮即时对话之后（useChatAI 那边写记录 + 广播），把点名周期排上。
