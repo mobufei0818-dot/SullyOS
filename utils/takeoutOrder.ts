@@ -63,7 +63,7 @@ export function buildTakeoutOrderCard(order: TakeoutOrder): { html: string; text
  * [[TAKEOUT_ORDER: 商品名|价格|规格; 商品名|价格|规格]]
  * 仅由程序生成订单，模型输出的文字不会直接成为卡片样式。
  */
-export function extractRoleTakeoutOrders(content: string): { cleanedContent: string; orders: TakeoutOrder[] } {
+export function extractRoleTakeoutOrders(content: string, conversation: Array<{ role?: string; content?: string }> = []): { cleanedContent: string; orders: TakeoutOrder[] } {
   let cleaned = content.replace(/\[\[TAKEOUT_ADDRESS:\s*([^\]]+?)\s*\]\]/gi, (_all, raw: string) => {
     const [nameRaw, addressRaw, modeRaw, mappedRaw] = raw.split('|').map(value => value.trim());
     // This directive is only emitted after the user has explicitly confirmed a travel/current address in conversation.
@@ -89,5 +89,40 @@ export function extractRoleTakeoutOrders(content: string): { cleanedContent: str
     orders.push({ id: createdAt, target: '用户', items, address: String(location), deliveryDetail: userAddress.detail, deliveryNote: userAddress.note, createdAt, deliveryMinutes, fee, etaAt: createdAt + deliveryMinutes * 60_000, placedBy: 'character' });
     return '';
   }).replace(/\n{3,}/g, '\n\n').trim();
+
+  // 正常路径由模型给出结构标记；但角色常会自然地说“给你点了”，而漏掉隐藏标记。
+  // 此时只在用户最近明确提出餐品、且角色明确表示已完成下单时兜底创建订单，
+  // 不会把“我去点”“要不要点”这种未完成意图误判成订单。
+  const recentUserText = conversation
+    .filter(message => message.role === 'user')
+    .slice(-5)
+    .map(message => String(message.content || ''))
+    .reverse()
+    .join('。');
+  const requestedFood = recentUserText.match(/(?:想吃|想喝|要吃|要喝|想要|给我来|帮我点|点一?[份杯个]?|来一?[份杯个]?)[：：\s]*([^。！？!?\n]{2,42})/)?.[1]?.trim();
+  const orderCompleted = /(?:给|替|帮).{0,8}(?:点好(?:了)?|点上了|点了|下好了单|下单了|叫好(?:了)?|按下去了)|(?:已经|刚刚).{0,12}(?:点好(?:了)?|点上了|点了|下好了单|下单了)|(?:点餐|点单|点外卖|下单|安排).{0,8}(?:好了|完成了|搞定了|妥了)/.test(cleanedContent);
+  if (orders.length === 0 && requestedFood && orderCompleted) {
+    const specs = cleanedContent.match(/(?:正常冰|少冰|去冰|热饮|全糖|半糖|少糖|无糖|三分糖|五分糖|七分糖|大杯|中杯|小杯|标准份|加量)/g) || [];
+    const foodName = requestedFood.replace(/^(?:一(?:杯|份|个|碗))\s*/, '').trim();
+    if (foodName) {
+      const createdAt = Date.now();
+      const deliveryMinutes = 25 + Math.floor(Math.random() * 11);
+      const fee = 3 + Math.floor(Math.random() * 5);
+      const userAddress = resolveTakeoutAddress(loadTakeoutAddressBook(), { kind: 'user' });
+      orders.push({
+        id: createdAt,
+        target: '用户',
+        items: [{ id: `char-takeout-context-${createdAt}`, name: specs.length ? `${foodName}（${Array.from(new Set(specs)).join('、')}）` : foodName, price: 16 + Math.floor(Math.random() * 33) }],
+        address: String(location),
+        deliveryDetail: userAddress.detail,
+        deliveryNote: userAddress.note,
+        createdAt,
+        deliveryMinutes,
+        fee,
+        etaAt: createdAt + deliveryMinutes * 60_000,
+        placedBy: 'character',
+      });
+    }
+  }
   return { cleanedContent, orders };
 }
