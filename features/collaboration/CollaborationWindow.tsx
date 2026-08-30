@@ -42,6 +42,7 @@ import type { CollaborationInlineSpan } from './markdown';
 import { parseCollaborationRichOutput, resolveCollaborationEmoji, sanitizeCollaborationRichOutputSource } from './richOutput';
 import { canSynthesizeSpeech, providerUsesRawVoiceMarkup, synthesizeSpeechDetailed } from '../../utils/ttsRouter';
 import { CollaborationStore } from './store';
+import { COLLABORATION_LIBRARY_GROUP_LABELS, collaborationLibraryGroupOf, type CollaborationLibraryGroup } from './chatLibrary';
 import {
   buildInstallablePreviewDocument,
   COLLABORATION_MAKERS,
@@ -87,6 +88,8 @@ interface CollaborationWindowProps {
   recentChatMessages: Message[];
   realtimeConfig?: RealtimeConfig;
   chatCollaborationEnabled: boolean;
+  requestedPreviewAssetId?: string | null;
+  onRequestedPreviewHandled?: () => void;
   onClose: () => void;
   onSendToChat: (title: string, messages: CollaborationTransferMessage[]) => Promise<void>;
   onInstallArtifact: (artifact: CollaborationInstallableArtifact, targetCharacterId?: string) => Promise<string>;
@@ -189,11 +192,11 @@ const COLLABORATION_UI_THEME_CSS = `
 .collab-ui-root:not(.collab-ui-sully) .collab-mode-option-title{color:var(--collab-ink)!important}
 .collab-ui-root:not(.collab-ui-sully) .collab-mode-option-description{color:var(--collab-muted)!important}
 .collab-ui-root:not(.collab-ui-sully) .collab-mode-footnote{color:var(--collab-muted)!important}
-.collab-ui-root:not(.collab-ui-sully) .collab-message-row{width:min(100%,760px);margin-inline:auto;align-items:flex-start;padding:10px 18px;gap:12px}
+.collab-ui-root:not(.collab-ui-sully) .collab-message-row{width:min(100%,760px);max-width:100%;min-width:0;margin-inline:auto;align-items:flex-start;padding:10px 18px;gap:12px;box-sizing:border-box}
 .collab-ui-root:not(.collab-ui-sully) .collab-message-avatar{display:none}
 .collab-ui-root:not(.collab-ui-sully) .collab-assistant-mark{display:grid;width:25px;height:25px;flex:none;place-items:center;margin-top:2px;border-radius:8px;background:var(--collab-accent);color:#fff;font-size:13px;font-weight:700}
 .collab-ui-root:not(.collab-ui-sully) .collab-message-row-user{justify-content:flex-start;flex-direction:row-reverse}
-.collab-ui-root:not(.collab-ui-sully) .collab-message-stack{max-width:85%}
+.collab-ui-root:not(.collab-ui-sully) .collab-message-stack{min-width:0;max-width:85%}
 .collab-ui-root:not(.collab-ui-sully) .collab-message-bubble{box-shadow:none!important;border:0!important;font-size:15px;line-height:1.75}
 .collab-ui-root:not(.collab-ui-sully) .collab-message-bubble-assistant{background:transparent!important;color:var(--collab-ink)!important;padding:1px 0!important;border-radius:0!important}
 .collab-ui-root:not(.collab-ui-sully) .collab-message-bubble-user{background:var(--collab-user)!important;color:var(--collab-user-ink)!important;padding:10px 16px!important;border-radius:20px!important}
@@ -259,6 +262,9 @@ const COLLABORATION_UI_THEME_CSS = `
 .collab-avatar-style-portrait .collab-header-avatar{width:29px!important;height:36px!important;border-radius:9px!important}
 .collab-avatar-style-portrait .collab-mode-avatar{width:54px!important;height:68px!important;border-radius:16px!important}
 .collab-avatar-style-portrait .collab-empty-avatar{width:68px!important;height:86px!important;border-radius:20px!important}
+.collab-message-row{width:100%;max-width:100%;min-width:0;box-sizing:border-box}
+.collab-message-stack{min-width:0}
+.collab-message-bubble{min-width:0;max-width:100%;box-sizing:border-box;overflow-wrap:anywhere}
 `;
 
 const shortPreview = (value: string, max = 52): string => {
@@ -989,7 +995,7 @@ const CollaborationInline: React.FC<{ spans: CollaborationInlineSpan[] }> = ({ s
 );
 
 const CollaborationMarkdownView: React.FC<{ content: string }> = ({ content }) => (
-  <div className="break-words">
+  <div className="min-w-0 max-w-full overflow-hidden break-words [overflow-wrap:anywhere]">
     {parseCollaborationMarkdown(normalizeCollaborationVisibleText(content)).map((block, index) => {
       const key = `${block.type}-${index}`;
       if (block.type === 'blank') return <div key={key} className="h-3" aria-hidden="true" />;
@@ -1110,9 +1116,9 @@ const MessageBubble: React.FC<{
   return (
     <div className={`collab-message-row ${isUser ? 'collab-message-row-user flex-row-reverse' : 'collab-message-row-assistant'} flex items-end gap-2.5 px-4 py-2`}>
       <TokenImg value={avatar} alt={isUser ? user.name : character.name} className={`collab-message-avatar ${isUser ? 'collab-message-avatar-user' : 'collab-message-avatar-assistant'} h-8 w-8 shrink-0 rounded-full object-cover shadow-sm ring-1 ring-black/5`} />
-      <div className={`collab-message-stack max-w-[78%] ${isUser ? 'items-end' : 'items-start'} flex flex-col`} data-ui-theme={uiTheme}>
+      <div className={`collab-message-stack min-w-0 max-w-[78%] ${isUser ? 'items-end' : 'items-start'} flex flex-col`} data-ui-theme={uiTheme}>
         <div
-          className={`collab-message-bubble ${isUser ? 'collab-message-bubble-user' : 'collab-message-bubble-assistant'} px-4 py-3 text-[15px] leading-7 shadow-sm`}
+          className={`collab-message-bubble min-w-0 max-w-full ${isUser ? 'collab-message-bubble-user' : 'collab-message-bubble-assistant'} px-4 py-3 text-[15px] leading-7 shadow-sm`}
           style={{
             color: style.textColor || (isUser ? '#fff' : '#1e293b'),
             backgroundColor: withAlpha(style.backgroundColor, style.opacity ?? 1, isUser ? '#6366f1' : '#fff'),
@@ -1187,14 +1193,14 @@ const CollaborationLibraryRow: React.FC<{
       }}
       className="collab-library-row flex w-full items-center gap-3 border-b border-slate-200/65 px-4 py-3.5 text-left transition-colors active:bg-slate-100"
     >
-      <span className={`grid h-11 w-11 shrink-0 place-items-center rounded-[14px] ${file.format === 'pdf' ? 'bg-rose-50 text-rose-500' : 'bg-indigo-50 text-indigo-500'}`}>
-        {file.format === 'pdf' ? <FilePdf size={22} weight="duotone" /> : <FileText size={22} weight="duotone" />}
+      <span className={`grid h-11 w-11 shrink-0 place-items-center rounded-[14px] ${file.kind === 'installable' ? 'bg-violet-50 text-violet-500' : file.format === 'pdf' ? 'bg-rose-50 text-rose-500' : 'bg-indigo-50 text-indigo-500'}`}>
+        {file.kind === 'installable' ? <Briefcase size={22} weight="duotone" /> : file.format === 'pdf' ? <FilePdf size={22} weight="duotone" /> : <FileText size={22} weight="duotone" />}
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[13px] font-semibold text-slate-700">{file.name}</span>
-        <span className="mt-1 block truncate text-[10px] text-slate-400">{file.sessionTitle} · {collaborationFileSize(file.size)} · {new Date(file.createdAt).toLocaleDateString()}</span>
+        <span className="mt-1 block truncate text-[10px] text-slate-400">{file.kind === 'installable' && file.installableKind ? COLLABORATION_MAKER_MAP[file.installableKind]?.label || '可安装作品' : file.sessionTitle} · {collaborationFileSize(file.size)} · {new Date(file.createdAt).toLocaleDateString()}</span>
       </span>
-      <DownloadSimple size={18} className="shrink-0 text-slate-300" />
+      {file.kind === 'installable' ? <Eye size={18} className="shrink-0 text-slate-300" /> : <DownloadSimple size={18} className="shrink-0 text-slate-300" />}
     </button>
   );
 };
@@ -1218,14 +1224,17 @@ const CollaborationFileLibrary: React.FC<{
   if (!open) return null;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const shown = normalizedQuery
-    ? files.filter(file => `${file.name} ${file.sessionTitle} ${file.format || ''}`.toLocaleLowerCase().includes(normalizedQuery))
+    ? files.filter(file => `${file.name} ${file.sessionTitle} ${file.format || ''} ${file.installableKind || ''} ${COLLABORATION_LIBRARY_GROUP_LABELS[collaborationLibraryGroupOf(file)]}`.toLocaleLowerCase().includes(normalizedQuery))
     : files;
+  const grouped = (['beautification', 'character', 'document'] as CollaborationLibraryGroup[])
+    .map(group => ({ group, files: shown.filter(file => collaborationLibraryGroupOf(file) === group) }))
+    .filter(section => section.files.length > 0);
   return (
     <div className="collab-file-library absolute inset-0 z-[70] flex flex-col bg-[#f8f9fc]">
       <header className="collab-safe-header flex h-16 shrink-0 items-center gap-2 border-b border-slate-200/80 bg-white/92 px-3 backdrop-blur-xl">
         <button type="button" onClick={onClose} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 active:bg-slate-100" aria-label="关闭文件库"><ArrowLeft size={21} /></button>
         <div className="min-w-0 flex-1">
-          <h2 className="text-[16px] font-semibold text-slate-800">协同文件</h2>
+          <h2 className="text-[16px] font-semibold text-slate-800">协同文件与作品</h2>
           <p className="text-[10px] text-slate-400">{files.length} 份 · 来自全部协同窗口</p>
         </div>
       </header>
@@ -1242,17 +1251,24 @@ const CollaborationFileLibrary: React.FC<{
         {loading ? (
           <div className="flex items-center justify-center gap-2 px-6 py-20 text-xs text-slate-400"><SpinnerGap size={17} className="animate-spin" />正在读取文件库</div>
         ) : shown.length > 0 ? (
-          <div className="bg-white">
-            {shown.map(file => <CollaborationLibraryRow key={file.assetId} file={file} onOpen={() => onOpen(file)} onLongPress={() => setActionFile(file)} />)}
+          <div>
+            {grouped.map(section => (
+              <section key={section.group}>
+                <h3 className="border-y border-slate-200/70 bg-slate-50 px-4 py-2 text-[10px] font-semibold tracking-[.12em] text-slate-400">{COLLABORATION_LIBRARY_GROUP_LABELS[section.group]} · {section.files.length}</h3>
+                <div className="bg-white">
+                  {section.files.map(file => <CollaborationLibraryRow key={file.assetId} file={file} onOpen={() => onOpen(file)} onLongPress={() => setActionFile(file)} />)}
+                </div>
+              </section>
+            ))}
           </div>
         ) : (
           <div className="px-8 py-20 text-center">
             <Folder size={38} weight="duotone" className="mx-auto text-slate-300" />
-            <p className="mt-4 text-sm font-semibold text-slate-500">{query ? '没有找到对应文件' : '还没有协同文件'}</p>
-            <p className="mt-1 text-[11px] leading-5 text-slate-400">制作或上传并发送后的文件会收在这里。</p>
+            <p className="mt-4 text-sm font-semibold text-slate-500">{query ? '没有找到对应内容' : '还没有协同文件或作品'}</p>
+            <p className="mt-1 text-[11px] leading-5 text-slate-400">制作或上传并发送后的文档、美化和角色资料会收在这里。</p>
           </div>
         )}
-        {!loading && files.length > 0 && <p className="px-5 py-4 text-center text-[10px] text-slate-400">点击分享 / 导出 · 长按管理文件</p>}
+        {!loading && files.length > 0 && <p className="px-5 py-4 text-center text-[10px] text-slate-400">点击预览 / 分享 / 导出 · 长按管理文件或作品</p>}
       </div>
 
       {actionFile && (
@@ -1261,9 +1277,9 @@ const CollaborationFileLibrary: React.FC<{
           <div className="absolute inset-x-3 bottom-[max(.75rem,env(safe-area-inset-bottom))] z-20 overflow-hidden rounded-[22px] bg-white shadow-[0_20px_60px_rgba(15,23,42,.22)]">
             <div className="border-b border-slate-100 px-5 py-4">
               <p className="truncate text-[12px] font-semibold text-slate-700">{actionFile.name}</p>
-              <p className="mt-1 text-[10px] text-slate-400">删除后，聊天里已经发出的同一文件也将无法再次打开。</p>
+              <p className="mt-1 text-[10px] text-slate-400">删除后，聊天里已经发出的同一文件或作品也将无法再次打开。</p>
             </div>
-            <button type="button" onClick={() => { const file = actionFile; setActionFile(null); onDelete(file); }} className="flex w-full items-center justify-center gap-2 px-4 py-4 text-[13px] font-semibold text-rose-600 active:bg-rose-50"><Trash size={17} />删除文件</button>
+            <button type="button" onClick={() => { const file = actionFile; setActionFile(null); onDelete(file); }} className="flex w-full items-center justify-center gap-2 px-4 py-4 text-[13px] font-semibold text-rose-600 active:bg-rose-50"><Trash size={17} />删除这项内容</button>
             <button type="button" onClick={() => setActionFile(null)} className="w-full border-t border-slate-100 px-4 py-3.5 text-[12px] font-semibold text-slate-500 active:bg-slate-50">取消</button>
           </div>
         </>
@@ -1377,6 +1393,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   recentChatMessages,
   realtimeConfig,
   chatCollaborationEnabled,
+  requestedPreviewAssetId,
+  onRequestedPreviewHandled,
   onClose,
   onSendToChat,
   onInstallArtifact,
@@ -1456,6 +1474,32 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     setShowEntryChooser(sessions.length > 0);
     setShowModePicker(sessions.length === 0);
   }, [loaded, open, sessions.length]);
+
+  // A work delivered in ordinary ChatApp opens the same full-screen preview
+  // used by the collaboration cabinet. The asset remains canonical in the
+  // sidecar DB; this bridge passes only its id.
+  useEffect(() => {
+    if (!open || !loaded || !requestedPreviewAssetId) return;
+    let cancelled = false;
+    const openRequestedWork = async () => {
+      try {
+        const blob = await CollaborationStore.getAsset(requestedPreviewAssetId);
+        if (!blob) throw new Error('原始作品已不存在');
+        const parsed = JSON.parse(await blob.text()) as CollaborationInstallableArtifact;
+        if (!COLLABORATION_MAKER_MAP[parsed.kind]) throw new Error('未知作品类型');
+        if (!cancelled) {
+          setPreviewArtifact(parsed);
+          trackEvent('预览协同作品', { 类型: analyticsMakerKind(parsed.kind), 来源: '普通聊天' });
+        }
+      } catch (error: any) {
+        if (!cancelled) notifyRef.current(`作品无法预览：${error?.message || '数据损坏'}`, 'error');
+      } finally {
+        if (!cancelled) onRequestedPreviewHandled?.();
+      }
+    };
+    void openRequestedWork();
+    return () => { cancelled = true; };
+  }, [loaded, onRequestedPreviewHandled, open, requestedPreviewAssetId]);
 
   useEffect(() => {
     if (open) return;
@@ -2186,7 +2230,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
             {isGenerating && (
               <div className="collab-message-row collab-message-row-assistant flex items-end gap-2.5 px-4 py-2">
                 <TokenImg value={character.avatar} alt={character.name} className="collab-message-avatar collab-message-avatar-assistant h-8 w-8 rounded-full object-cover shadow-sm ring-1 ring-black/5" />
-                <div className="collab-message-stack collab-message-bubble collab-message-bubble-assistant max-w-[78%] rounded-[20px] bg-white px-4 py-3 text-[15px] leading-7 text-slate-700 shadow-sm">
+                <div className="collab-message-stack collab-message-bubble collab-message-bubble-assistant min-w-0 max-w-[78%] rounded-[20px] bg-white px-4 py-3 text-[15px] leading-7 text-slate-700 shadow-sm">
                   {streamingText
                     ? streamingRichOutput.text
                       ? <CollaborationMarkdownView content={streamingRichOutput.text} />
