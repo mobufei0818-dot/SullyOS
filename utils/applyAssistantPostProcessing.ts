@@ -2266,6 +2266,9 @@ export async function applyAssistantPostProcessing(
         const { blocks, cleanedContent } = extractHtmlBlocks(aiContent);
         for (const blk of blocks) {
             try {
+                // Compatibility bridge: older character presets may still emit a hand-written takeout HTML card.
+                // Keep its visual content, but make it a Meituan confirmation card rather than a fake completed order.
+                const legacyTakeout = /外卖|点餐|点单|订单|配送|餐品/i.test(blk.textPreview);
                 await persistMessage({
                     charId: char.id,
                     role: 'assistant',
@@ -2274,6 +2277,7 @@ export async function applyAssistantPostProcessing(
                     metadata: mergeAssistantMeta({
                         htmlSource: blk.html,
                         htmlTextPreview: blk.textPreview,
+                        ...(legacyTakeout ? { source: 'takeout', placedBy: 'character', meituanPending: true, meituanSearchText: blk.textPreview } : {}),
                         ...(mcdInheritMeta || {}),
                     }),
                 } as any);
