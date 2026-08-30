@@ -109,6 +109,11 @@ export default function TakeoutApp() {
     button.addEventListener('click', intercept, true);
     return () => button.removeEventListener('click', intercept, true);
   }, [addressBook, deliveryRecipient, characters, addToast]);
+  useEffect(() => {
+    const label = deliveryRecipient.kind === 'user' ? (userProfile.name || '用户') : (characters.find(char => char.id === deliveryRecipient.characterId)?.name || '角色');
+    const addressLabel = document.querySelector<HTMLElement>('.takeout-mobile-root header > div:first-child button:nth-of-type(2) span');
+    if (addressLabel) addressLabel.textContent = `${label} · ${location.address || '输入收货地址'}`;
+  }, [deliveryRecipient, location.address, characters, userProfile.name]);
   const scheduleTakeoutArrival = async (char: CharacterProfile, order: { etaAt: number; items: Item[]; target: string }) => {
     const config = char.activeMsg2Config;
     if (!config?.enabled) throw new Error(`「${char.name}」的主动消息 2.0 未开启，无法创建送达提醒。`);
