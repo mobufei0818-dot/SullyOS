@@ -28,7 +28,7 @@
 import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, RealtimeConfig, GroupProfile } from '../types';
 import { DB } from './db';
 import { ChatParser, type FrozenMusicSong } from './chatParser';
-import { nowInTimeZone, resolveCharTimeZone } from './timezone';
+import { resolveCharTimeZone } from './timezone';
 import { NotionManager, FeishuManager, XhsNote } from './realtimeContext';
 import { enqueuePendingDiary, removePendingDiary } from './pendingDiary';
 import { parseXhsCount, XhsMcpClient } from './xhsMcpClient';
@@ -54,8 +54,6 @@ import { normalizeAssistantActionFormatting } from './assistantActionFormat';
 import { markAmsgStateDirty } from './amsgStateSync';
 import { announceScheduleChanges, applyAssistantScheduleChanges } from './scheduleChange';
 import { isBlobRef } from './blobRef';
-import { createAmsg2ToolSession, scheduleAmsg2TaskAndPersist } from './amsg2ToolBridge';
-import { buildTakeoutOrderCard, extractRoleTakeoutOrders, saveTakeoutOrder } from './takeoutOrder';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -2184,87 +2182,7 @@ export async function applyAssistantPostProcessing(
         return merged;
     };
 
-    // ─── Step 5: 角色外卖订单 ───
-    // 角色不能自己画一张看似订单的普通 HTML；确认下单后输出紧凑标记，由外卖 App
-    // 生成固定小票、写入订单记录并安排送达提醒。这样跟用户在 App 内下单是同一条业务链。
-    // 本地聊天使用请求上下文；主动消息 2.0 的即时回传没有 fullMessages，
-    // 则改用已从本地数据库读取的当前会话历史，确保两条路径都能识别点餐内容。
-    const takeoutConversation = fullMessages.length > 0 ? fullMessages : contextMsgs;
-    const roleTakeout = extractRoleTakeoutOrders(aiContent, takeoutConversation);
-    // 地址确认可以发生在“下单前的一轮”对话里；即使这轮还没有订单，也必须剥掉结构标记并保留已确认的新地址。
-    if (roleTakeout.cleanedContent !== aiContent) aiContent = roleTakeout.cleanedContent;
-    if (roleTakeout.orders.length > 0) {
-        // 外卖订单只允许使用统一电子小票。角色偶尔会同时手写 [html] 卡片，
-        // 那张会与系统小票重复且内容不可靠，因此订单已被识别时直接丢弃。
-        aiContent = aiContent.replace(/\[html\][\s\S]*?\[\/html\]/gi, '').replace(/\n{3,}/g, '\n\n').trim();
-        for (const order of roleTakeout.orders) {
-            saveTakeoutOrder(order);
-            const card = buildTakeoutOrderCard(order);
-            await persistMessage({
-                charId: char.id,
-                role: 'assistant',
-                type: 'html_card',
-                content: '[HTML卡片] 外卖订单已提交',
-                metadata: mergeAssistantMeta({
-                    htmlSource: card.html,
-                    htmlTextPreview: card.textPreview,
-                    source: 'takeout',
-                    order,
-                    placedBy: 'character',
-                    ...(mcdInheritMeta || {}),
-                }),
-            } as any);
-            setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
-
-            const config = char.activeMsg2Config;
-            if (!config?.enabled) {
-                addToast('外卖订单已创建；主动消息 2.0 未开启，无法自动安排送达提醒', 'info');
-                continue;
-            }
-            if (!groups || !realtimeConfig) {
-                addToast('外卖订单已创建；当前会话缺少主动消息配置，未安排送达提醒', 'info');
-                continue;
-            }
-            try {
-                const wallClock = nowInTimeZone(resolveCharTimeZone(char), new Date(order.etaAt));
-                const sendAt = `${wallClock.getFullYear()}-${String(wallClock.getMonth() + 1).padStart(2, '0')}-${String(wallClock.getDate()).padStart(2, '0')}T${String(wallClock.getHours()).padStart(2, '0')}:${String(wallClock.getMinutes()).padStart(2, '0')}:00`;
-                const promptHint = `现在才是你为用户点的外卖预计送达时刻。订单商品：${order.items.map(item => item.name).join('、')}。请自然问用户“外卖到了吗”或“收到了没”；此前及此刻都不能擅自断言已经收到、送达或吃完，必须等待用户确认。`;
-                const takeoutScheduleSession = createAmsg2ToolSession({
-                    char,
-                    userProfile,
-                    groups,
-                    realtimeConfig,
-                    apiConfig: effectiveApi,
-                    // 本地聊天由 OSContext 的 updateCharacter 统一落 React / DB；主动消息回放
-                    // 没有 React 回调时保留 DB 兜底，避免角色业务提醒成为面板看不见的幽灵任务。
-                    updateCharacter: (charId, partial) => {
-                        updateCharacter?.(charId, partial);
-                        if (!updateCharacter) {
-                            void DB.saveCharacter({ ...char, ...partial });
-                        }
-                    },
-                });
-                await scheduleAmsg2TaskAndPersist(takeoutScheduleSession, {
-                    mode: 'prompted',
-                    firstSendTime: sendAt,
-                    recurrenceType: 'none',
-                    promptHint,
-                    expirePolicy: 'force',
-                    // 这是系统替角色安排的送达确认，不消耗角色连续主动发言额度。
-                    selfScheduled: false,
-                });
-            } catch (error) {
-                console.error('[Takeout] character order reminder schedule failed', error);
-                const message = error instanceof Error ? error.message : String(error);
-                const failedConfig = { ...config, lastError: `外卖送达提醒未创建：${message}` };
-                updateCharacter?.(char.id, { activeMsg2Config: failedConfig });
-                if (!updateCharacter) await DB.saveCharacter({ ...char, activeMsg2Config: failedConfig });
-                addToast(`订单已创建，但送达提醒未能安排：${message}`, 'error');
-            }
-        }
-    }
-
-    // ─── Step 5.1: 普通 HTML 卡片 ───
+    // ─── Step 5: 普通 HTML 卡片 ───
     if ((char as any).htmlModeEnabled && /\[html\]/i.test(aiContent)) {
         const { blocks, cleanedContent } = extractHtmlBlocks(aiContent);
         for (const blk of blocks) {
