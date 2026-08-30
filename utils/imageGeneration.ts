@@ -22,7 +22,14 @@ export function isImageGenerationConfigured(config: APIConfig): boolean {
 export function buildImagePrompt(description: string, config: APIConfig, char?: CharacterProfile): string {
   const style = config.imageGeneration?.baseStylePrompt?.trim() || DEFAULT_IMAGE_STYLE_PROMPT;
   const appearance = char?.imageProfile?.appearancePrompt?.trim();
-  return [style, appearance ? `角色外貌辅助约束：${appearance}` : '', `本次照片内容：${description.trim()}`].filter(Boolean).join('\n\n');
+  const identity = char?.imageProfile?.identityProfile?.trim();
+  return [
+    style,
+    identity ? `角色身份锚点（必须保持为同一人，只约束五官与发型）：${identity}` : '',
+    appearance ? `用户补充的角色外貌：${appearance}` : '',
+    identity ? '构图独立要求：保持上述身份锚点，但不要复刻参考照的表情、视线、姿势、服装、背景、光线或镜头角度；本次画面应严格遵从下面的照片内容。' : '',
+    `本次照片内容：${description.trim()}`,
+  ].filter(Boolean).join('\n\n');
 }
 
 export async function generateChatImage(input: { prompt: string; config: APIConfig; char: CharacterProfile; }): Promise<{ dataUrl: string; referenceApplied: boolean }> {
@@ -53,7 +60,7 @@ export async function generateChatImage(input: { prompt: string; config: APIConf
   const payload: any = { model: c.model, prompt, n: 1, size: c.size || '1024x1024', response_format: 'b64_json' };
   if (c.quality) payload.quality = c.quality;
   if (c.outputFormat) payload.output_format = c.outputFormat;
-  const reference = char.imageProfile?.faceReferenceImage;
+  const reference = char.imageProfile?.referenceMode === 'strong' ? char.imageProfile?.faceReferenceImage : undefined;
   let url = `${base}/images/generations`;
   let options: RequestInit = { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` }, body: JSON.stringify(payload) };
   if (reference) {
