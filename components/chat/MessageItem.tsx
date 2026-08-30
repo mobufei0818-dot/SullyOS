@@ -3036,8 +3036,11 @@ const MessageItem = React.memo(({
             );
         }
         const order = meta.order as { fulfillment?: string; items?: Array<{ name?: string }>; address?: string; deliveryDetail?: string; deliveryNote?: string } | undefined;
-        const meituanPending = order?.fulfillment === 'meituan_pending' || meta.meituanPending === true;
-        const meituanAction = meta.source === 'takeout' && meituanPending
+        // 旧卡片/角色预设生成的卡片可能没有 source、fulfillment 两个新字段。
+        // 外卖 App 的订单卡有稳定的正文指纹，因此角色消息只要是外卖订单，就统一给入口；
+        // 不再让一段可丢失的元数据决定按钮是否存在。
+        const roleTakeoutHtml = m.role === 'assistant' && (meta.source === 'takeout' || /外卖订单|角色为你下单|美团外卖/.test(html));
+        const meituanAction = roleTakeoutHtml
             ? { label: '打开美团外卖查看', url: 'https://waimai.meituan.com/', copyText: order ? `美团外卖下单参考\n商品：${(order.items || []).map(item => item.name).filter(Boolean).join('、')}\n收货地址：${[order.address, order.deliveryDetail].filter(Boolean).join(' ')}${order.deliveryNote ? `\n配送备注：${order.deliveryNote}` : ''}` : String(meta.meituanSearchText || '美团外卖下单参考') }
             : undefined;
         // 外链按钮放在 sandbox iframe 外，仅在角色给用户的外卖卡上按需显示。
