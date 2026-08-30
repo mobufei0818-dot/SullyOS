@@ -104,11 +104,12 @@ export function extractRoleTakeoutOrders(content: string, orderedBy?: string, co
   }).replace(/\n{3,}/g, '\n\n').trim();
   // 模型偶尔会把它已经说出口的“我给你点好了”当作普通文字，漏掉结构标记。
   // 这层只认明确的完成时措辞，既避免把“我去点”误判成订单，也让卡片不会凭空消失。
-  const clearlyOrdered = /(?:给|替|帮).{0,8}(?:点好(?:了)?|点上了|点了|下好了单|下单了|叫好(?:了)?)|(?:已经|刚刚).{0,12}(?:点好(?:了)?|点上了|点了|下好了单|下单了)/.test(cleanedContent);
-  if (orders.length === 0 && clearlyOrdered) {
+  const recentUserText = conversation.filter(message => message.role === 'user').slice(-5).map(message => String(message.content || '')).reverse().join('。');
+  const userRequestedFood = /(?:想吃|想喝|要吃|要喝|想要|给我来|帮我点|点一?[份杯个]?|来一?[份杯个]?)/.test(recentUserText);
+  const clearlyOrdered = /(?:给|替|帮).{0,8}(?:点好(?:了)?|点上了|点了|下好了单|下单了|叫好(?:了)?)|(?:已经|刚刚).{0,12}(?:点好(?:了)?|点上了|点了|下好了单|下单了)|(?:安排|点餐|点单|点外卖|下单).{0,8}(?:好了|完成了|搞定了|妥了)/.test(cleanedContent);
+  if (orders.length === 0 && userRequestedFood && clearlyOrdered) {
     // 漏结构标记时，不能从角色最后一句硬猜商品；应回看本轮前的用户话，
     // 因为“想吃什么 / 口味”通常正是在那里说清的。
-    const recentUserText = conversation.filter(message => message.role === 'user').slice(-5).map(message => String(message.content || '')).reverse().join('。');
     const requestedFood = recentUserText.match(/(?:想吃|想喝|要吃|要喝|想要|给我来|帮我点|点一?[份杯个]?|来一?[份杯个]?)[：：\s]*([^。！？!?\n]{2,42})/)?.[1]?.trim();
     const foodHint = requestedFood || cleanedContent.match(/(?:[\u4e00-\u9fffA-Za-z0-9]{0,10})(?:奶茶|咖啡|拿铁|果茶|柠檬茶|炸鸡|汉堡|披萨|米饭|盖饭|米线|面|粥|甜品|蛋糕|沙拉|水果|药)[\u4e00-\u9fffA-Za-z0-9]{0,10}/)?.[0]?.trim();
     // 用户已说明“饮品 + 口味”但没有重复品名时，至少保留正确品类和口味；
