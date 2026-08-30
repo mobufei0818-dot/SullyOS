@@ -2208,6 +2208,11 @@ export async function applyAssistantPostProcessing(
             } as any);
             setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
 
+            if (order.fulfillment === 'meituan_pending') {
+                addToast('角色已生成美团待确认单；请在美团外卖完成真实下单', 'info');
+                continue;
+            }
+
             const config = char.activeMsg2Config;
             if (!config?.enabled) {
                 addToast('外卖订单已创建；主动消息 2.0 未开启，无法自动安排送达提醒', 'info');
