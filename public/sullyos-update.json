@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "versionCode": 30408,
-  "versionName": "3.4.8",
-  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.8/SullyOS-Android-v3.4.8.apk",
-  "sha256": "6af6d563dead8d48d88249dcaa9672f2d21d156f60744bff84d1e0bd14317b53",
-  "sizeBytes": 37109938,
-  "publishedAt": "2026-08-29T20:27:28Z",
+  "versionCode": 30409,
+  "versionName": "3.4.9",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.9/SullyOS-Android-v3.4.9.apk",
+  "sha256": "a9d3842325688c2657a5a00e4a5c5a8010d7a335a38c312fe2c6a32bd0c97257",
+  "sizeBytes": 37110087,
+  "publishedAt": "2026-08-30T05:31:52Z",
   "releaseNotes": [
-    "对齐最新 master 9f720928（含 PR #612）",
-    "升级二进制 Blob 存储、图片去重清理、批量优化与备份恢复",
-    "新增角色协同工作台、协同文件交付与上下文能力",
-    "增强主动消息任务恢复、跨午夜一次性消息与诊断轨迹",
+    "修复更新缓存目录已存在时出现 DirectoryExists、无法继续下载的问题",
+    "重复更新会清理旧 APK、重新下载并校验摘要、包名、签名与版本",
+    "只忽略目录已存在状态，真实权限或文件系统错误仍会正常提示",
+    "3.4.8 用户若仍遇到旧错误，请从 Release 手动覆盖安装 3.4.9 一次",
     "延续固定签名、UnifiedPush / ntfy、Android PDF 导入、Umami 与应用内更新"
   ]
 }
