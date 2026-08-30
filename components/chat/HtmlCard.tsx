@@ -10,9 +10,7 @@ import { CaretDown, Check, CopySimple } from '@phosphor-icons/react';
  * 假边框"贴在卡片周围 —— 聊天里卡片约定是直接贴在聊天背景上、无背景无边框,
  * 这里在渲染端兜底 (对已落库的旧卡片同样生效), 提示词端同步不再教模型加外层阴影。
  */
-export type HtmlCardAction = { label: string; url: string; copyText?: string };
-
-const HtmlCard: React.FC<{ html: string; action?: HtmlCardAction }> = ({ html, action }) => {
+const HtmlCard: React.FC<{ html: string }> = ({ html }) => {
     const [sourceExpanded, setSourceExpanded] = useState(false);
     const [copyState, setCopyState] = useState<'idle' | 'ok' | 'error'>('idle');
     const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -60,18 +58,6 @@ const HtmlCard: React.FC<{ html: string; action?: HtmlCardAction }> = ({ html, a
         feedbackTimerRef.current = setTimeout(() => setCopyState('idle'), 1600);
     };
 
-    const launchAction = (event: React.MouseEvent<HTMLButtonElement>) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (!action) return;
-        // 复制请求和 App Scheme 都要在同一次点击手势内触发。不能 await，否则 iOS
-        // 会把后续唤起视为弹窗并拦截；也不能跳网页，因为这条入口的语义就是打开 App。
-        if (action.copyText && navigator.clipboard?.writeText) {
-            void navigator.clipboard.writeText(action.copyText).catch(() => undefined);
-        }
-        window.location.href = action.url;
-    };
-
     return (
         <div className="w-[280px] max-w-full rounded-[18px] overflow-hidden bg-transparent">
             <iframe
@@ -116,7 +102,6 @@ const HtmlCard: React.FC<{ html: string; action?: HtmlCardAction }> = ({ html, a
                     } catch { /* 同源也读不到时静默 */ }
                 }}
             />
-            {action && <button type="button" onClick={launchAction} className="mt-2 w-full rounded-xl bg-[#ff6b18] px-3 py-2.5 text-sm font-semibold text-white shadow-sm active:scale-[.99]">{action.label}</button>}
             {/* The source action deliberately lives outside the iframe. Card
                 labels, checkboxes, text selection and other embedded gestures
                 therefore keep their native long-press behavior. */}
