@@ -31,6 +31,43 @@ export type TakeoutOrder = {
 const ORDER_STORAGE_KEY = 'nmj-takeout-orders';
 const escapeHtml = (value: string) => value.replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char] || char));
 
+/**
+ * 聊天模型偶尔会漏掉 [[TAKEOUT_ORDER]]，但它自然地说出“已经给你点好了”时，
+ * 仍必须落回外卖 App 的统一订单链路。这里刻意只识别「用户明确要了食物」+「角色
+ * 明确完成下单」两个条件，不把“要不要点 / 我去看看”误当成订单。
+ */
+function findRecentFoodRequest(conversation: Array<{ role?: string; content?: string }>): string | null {
+  const userMessages = conversation
+    .filter(message => message.role === 'user')
+    .slice(-8)
+    .reverse()
+    .map(message => String(message.content || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+  const patterns = [
+    /(?:帮我|给我|替我)?\s*(?:点|来|买|下单)\s*(?:一(?:份|杯|个|碗|盒|瓶))?\s*([^。！？!?，,\n]{2,48})/,
+    /(?:想吃|想喝|要吃|要喝|想要)\s*(?:一(?:份|杯|个|碗|盒|瓶))?\s*([^。！？!?，,\n]{2,48})/,
+  ];
+  for (const text of userMessages) {
+    for (const pattern of patterns) {
+      const candidate = text.match(pattern)?.[1]
+        ?.replace(/^(?:一(?:份|杯|个|碗|盒|瓶))\s*/, '')
+        .replace(/^(?:的|个|份)\s*/, '')
+        .trim();
+      if (candidate) return candidate;
+    }
+  }
+  return null;
+}
+
+function hasCompletedTakeoutOrder(content: string): boolean {
+  const normalized = content.replace(/\s+/g, ' ');
+  return [
+    /(?:给你|替你|帮你).{0,14}(?:点好了?|点上了?|下好了?单|下单了?|买好了?|安排好了?|按下去了)/,
+    /(?:已经|刚刚|直接|这就).{0,16}(?:点好了?|点上了?|下好了?单|下单了?|买好了?|安排好了?|按下去了)/,
+    /(?:订单|外卖).{0,12}(?:已经|已).{0,8}(?:下单|点好|安排好|提交)/,
+  ].some(pattern => pattern.test(normalized));
+}
+
 export function saveTakeoutOrder(order: TakeoutOrder): void {
   if (typeof localStorage === 'undefined') return;
   try {
@@ -93,17 +130,11 @@ export function extractRoleTakeoutOrders(content: string, conversation: Array<{ 
   // 正常路径由模型给出结构标记；但角色常会自然地说“给你点了”，而漏掉隐藏标记。
   // 此时只在用户最近明确提出餐品、且角色明确表示已完成下单时兜底创建订单，
   // 不会把“我去点”“要不要点”这种未完成意图误判成订单。
-  const recentUserText = conversation
-    .filter(message => message.role === 'user')
-    .slice(-5)
-    .map(message => String(message.content || ''))
-    .reverse()
-    .join('。');
-  const requestedFood = recentUserText.match(/(?:想吃|想喝|要吃|要喝|想要|给我来|帮我点|点一?[份杯个]?|来一?[份杯个]?)[：：\s]*([^。！？!?\n]{2,42})/)?.[1]?.trim();
-  const orderCompleted = /(?:给|替|帮).{0,8}(?:点好(?:了)?|点上了|点了|下好了单|下单了|叫好(?:了)?|按下去了)|(?:已经|刚刚).{0,12}(?:点好(?:了)?|点上了|点了|下好了单|下单了)|(?:点餐|点单|点外卖|下单|安排).{0,8}(?:好了|完成了|搞定了|妥了)/.test(cleanedContent);
+  const requestedFood = findRecentFoodRequest(conversation);
+  const orderCompleted = hasCompletedTakeoutOrder(cleanedContent);
   if (orders.length === 0 && requestedFood && orderCompleted) {
     const specs = cleanedContent.match(/(?:正常冰|少冰|去冰|热饮|全糖|半糖|少糖|无糖|三分糖|五分糖|七分糖|大杯|中杯|小杯|标准份|加量)/g) || [];
-    const foodName = requestedFood.replace(/^(?:一(?:杯|份|个|碗))\s*/, '').trim();
+    const foodName = requestedFood.trim();
     if (foodName) {
       const createdAt = Date.now();
       const deliveryMinutes = 25 + Math.floor(Math.random() * 11);
