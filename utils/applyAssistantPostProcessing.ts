@@ -25,7 +25,7 @@
  * Phase 2 会让 worker 端把识别出的副作用 (RECALL/SEARCH/...) 结构化传 directives, 这里只重放。
  */
 
-import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, RealtimeConfig, GroupProfile, ActiveMsg2TaskRecord } from '../types';
+import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, RealtimeConfig, GroupProfile } from '../types';
 import { DB } from './db';
 import { ChatParser, type FrozenMusicSong } from './chatParser';
 import { nowInTimeZone, resolveCharTimeZone } from './timezone';
@@ -54,8 +54,7 @@ import { normalizeAssistantActionFormatting } from './assistantActionFormat';
 import { markAmsgStateDirty } from './amsgStateSync';
 import { announceScheduleChanges, applyAssistantScheduleChanges } from './scheduleChange';
 import { isBlobRef } from './blobRef';
-import { ActiveMsgClient } from './activeMsgClient';
-import { applyScheduledTask } from './amsg2Tasks';
+import { createAmsg2ToolSession, scheduleAmsg2TaskAndPersist } from './amsg2ToolBridge';
 import { buildTakeoutOrderCard, extractRoleTakeoutOrders, saveTakeoutOrder } from './takeoutOrder';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
@@ -2230,40 +2229,37 @@ export async function applyAssistantPostProcessing(
                 const wallClock = nowInTimeZone(resolveCharTimeZone(char), new Date(order.etaAt));
                 const sendAt = `${wallClock.getFullYear()}-${String(wallClock.getMonth() + 1).padStart(2, '0')}-${String(wallClock.getDate()).padStart(2, '0')}T${String(wallClock.getHours()).padStart(2, '0')}:${String(wallClock.getMinutes()).padStart(2, '0')}:00`;
                 const promptHint = `现在才是你为用户点的外卖预计送达时刻。订单商品：${order.items.map(item => item.name).join('、')}。请自然问用户“外卖到了吗”或“收到了没”；此前及此刻都不能擅自断言已经收到、送达或吃完，必须等待用户确认。`;
-                const result = await ActiveMsgClient.scheduleCharacterTask({
+                const takeoutScheduleSession = createAmsg2ToolSession({
                     char,
-                    config,
-                    task: { mode: 'prompted', firstSendTime: sendAt, recurrenceType: 'none', promptHint, expirePolicy: 'force', selfScheduled: false },
                     userProfile,
                     groups,
                     realtimeConfig,
                     apiConfig: effectiveApi,
+                    // 本地聊天由 OSContext 的 updateCharacter 统一落 React / DB；主动消息回放
+                    // 没有 React 回调时保留 DB 兜底，避免角色业务提醒成为面板看不见的幽灵任务。
+                    updateCharacter: (charId, partial) => {
+                        updateCharacter?.(charId, partial);
+                        if (!updateCharacter) {
+                            void DB.saveCharacter({ ...char, ...partial });
+                        }
+                    },
                 });
-                const task: ActiveMsg2TaskRecord = {
-                    taskUuid: result.uuid,
-                    clientTaskId: result.clientTaskId,
+                await scheduleAmsg2TaskAndPersist(takeoutScheduleSession, {
                     mode: 'prompted',
-                    firstSendTime: result.firstSendAt,
+                    firstSendTime: sendAt,
                     recurrenceType: 'none',
                     promptHint,
                     expirePolicy: 'force',
-                    anchorLastUserMsgAt: result.anchorMs,
-                    source: 'character',
-                    status: 'scheduled',
-                    createdAt: Date.now(),
-                };
-                const updatedChar: CharacterProfile = {
-                    ...char,
-                    activeMsg2Config: { ...config, tasks: applyScheduledTask(config.tasks || [], task, {}, Date.now()), lastSyncedAt: Date.now(), lastError: undefined },
-                };
-                await DB.saveCharacter(updatedChar);
-                // 仅写 DB 会让当前打开的主动消息 2.0 面板继续使用旧角色快照，
-                // 表现为任务远端已建、面板却没有新增。同步 React 状态后任务立即可见。
-                updateCharacter?.(char.id, { activeMsg2Config: updatedChar.activeMsg2Config });
-                if (groups) markAmsgStateDirty({ char: updatedChar, userProfile, groups, realtimeConfig });
+                    // 这是系统替角色安排的送达确认，不消耗角色连续主动发言额度。
+                    selfScheduled: false,
+                });
             } catch (error) {
                 console.error('[Takeout] character order reminder schedule failed', error);
-                addToast('订单已创建，但送达提醒未能安排；请检查主动消息 2.0 配置', 'error');
+                const message = error instanceof Error ? error.message : String(error);
+                const failedConfig = { ...config, lastError: `外卖送达提醒未创建：${message}` };
+                updateCharacter?.(char.id, { activeMsg2Config: failedConfig });
+                if (!updateCharacter) await DB.saveCharacter({ ...char, activeMsg2Config: failedConfig });
+                addToast(`订单已创建，但送达提醒未能安排：${message}`, 'error');
             }
         }
     }
