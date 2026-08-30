@@ -2957,8 +2957,6 @@ export interface CharacterProfile {
   chatVoiceLang?: string;
   /** 允许角色在聊天中发送照片占位卡。 */
   chatImageEnabled?: boolean;
-  /** 收到照片占位卡后立刻合成；失败只提示一次，不自动重试。 */
-  chatImageAutoGenerate?: boolean;
   dateVoiceEnabled?: boolean;
   dateVoiceLang?: string;
   // Call (voice phone) — remembered translation language for this character
