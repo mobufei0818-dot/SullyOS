@@ -2951,10 +2951,16 @@ const Chat: React.FC = () => {
             return;
         }
         imageGenerationInFlightRef.current.add(message.id);
-        setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata: { ...(m.metadata || {}), imageGeneration: { ...(m.metadata?.imageGeneration || {}), status: 'generating' } } } : m));
+        const generatingMetadata = {
+            ...(message.metadata || {}),
+            imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'generating', prompt },
+        };
+        // 先落库再请求：聊天后台刷新或切换页面时不能把刚点下去的“正在合成”覆盖回待点击状态。
+        setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata: generatingMetadata } : m));
         try {
+            await DB.updateMessageMetadata(message.id, () => generatingMetadata);
             const generated = await generateChatImage({ prompt, config: apiConfig, char });
-            const metadata = { ...(message.metadata || {}), imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'ready', prompt, referenceApplied: generated.referenceApplied } };
+            const metadata = { ...generatingMetadata, imageGeneration: { ...generatingMetadata.imageGeneration, status: 'ready', referenceApplied: generated.referenceApplied } };
             await DB.updateMessage(message.id, generated.dataUrl);
             await DB.updateMessageMetadata(message.id, () => metadata);
             setMessages(prev => prev.map(m => m.id === message.id ? { ...m, content: generated.dataUrl, metadata } : m));
@@ -2967,11 +2973,6 @@ const Chat: React.FC = () => {
             showError('生图失败', details || '未知错误，请检查 API 配置与 API 调用记录。');
         } finally { imageGenerationInFlightRef.current.delete(message.id); }
     }, [apiConfig, char, addToast, showError]);
-
-    useEffect(() => {
-        if (!char?.chatImageEnabled || !char.chatImageAutoGenerate || !isImageGenerationConfigured(apiConfig)) return;
-        messages.filter(m => m.role === 'assistant' && m.type === 'image' && m.metadata?.imageGeneration?.status === 'pending' && Date.now() - Number(m.metadata?.imageGeneration?.createdAt || 0) < 60_000).forEach(m => { void handleGeneratePhoto(m); });
-    }, [messages, char?.id, char?.chatImageEnabled, char?.chatImageAutoGenerate, apiConfig, handleGeneratePhoto]);
 
     const handleQuickReply = useCallback((message: Message) => {
         setReplyTarget({
@@ -3940,8 +3941,6 @@ const Chat: React.FC = () => {
                 }}
                 chatImageEnabled={!!char.chatImageEnabled}
                 onToggleChatImage={() => updateCharacter(char.id, { chatImageEnabled: !char.chatImageEnabled })}
-                chatImageAutoGenerate={!!char.chatImageAutoGenerate}
-                onToggleChatImageAutoGenerate={() => updateCharacter(char.id, { chatImageAutoGenerate: !char.chatImageAutoGenerate })}
                 voiceAvailable={characterHasVoice(char, apiConfig)}
                 onGenerateVoice={selectedMessage ? () => handleManualTts(selectedMessage) : undefined}
                 voiceDownloadable={!!(selectedMessage?.id && voiceDataMap[selectedMessage.id])}
