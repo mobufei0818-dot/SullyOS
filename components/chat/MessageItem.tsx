@@ -3035,7 +3035,6 @@ const MessageItem = React.memo(({
                 </div>
             );
         }
-        // 渲染逻辑抽到共享组件 components/chat/HtmlCard.tsx（群聊共用），行为不变
         return commonLayout(<HtmlCard html={html} />);
     }
 

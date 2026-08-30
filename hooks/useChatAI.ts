@@ -2075,6 +2075,7 @@ export const useChatAI = ({
                     setDiaryStatus,
                     setXhsStatus,
                     updateTokenUsage,
+                    updateCharacter,
                     // 整组 musicHooks 由 MusicProvider 注册到模块级 slot, 本地 fetch 路径和
                     // instant push 路径 (activeMsgRuntime) 共享同一份, 见 MusicContext.loadMusicHooks.
                     musicHooks: loadMusicHooks() ?? undefined,

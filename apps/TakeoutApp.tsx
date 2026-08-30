@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { createRoot } from 'react-dom/client';
 import { ArrowLeft, ArrowsClockwise, CaretLeft, CaretRight, FloppyDisk, GearSix, MagnifyingGlass, MapPin, Plus, ShoppingCartSimple, X } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
@@ -7,11 +8,13 @@ import { applyScheduledTask } from '../utils/amsg2Tasks';
 import { safeFetchJson } from '../utils/safeApi';
 import { nowInTimeZone, resolveCharTimeZone } from '../utils/timezone';
 import { buildTakeoutOrderCard, saveTakeoutOrder } from '../utils/takeoutOrder';
+import TakeoutAddressSettings from '../components/takeout/TakeoutAddressSettings';
+import { loadTakeoutAddressBook, persistTakeoutAddressBook, resolveTakeoutAddress, testAmapPoi } from '../utils/takeoutAddressBook';
+import type { TakeoutAddressBook } from '../utils/takeoutAddressBook';
 import type { APIConfig, ActiveMsg2TaskRecord, CharacterProfile } from '../types';
 
 type Category = '美食' | '甜点饮品' | '超市便利' | '蔬菜水果' | '看病买药' | '早餐' | '拼好饭' | '跑腿';
 type Item = { id: string; name: string; shop: string; price: number; desc: string; category: Category; image: string; options: string[] };
-type LocationConfig = { mode: 'virtual' | 'real'; address: string; mappedAddress: string; amapKey: string };
 type SecondaryConfig = APIConfig;
 const TAKEOUT_KEY = 'nmj-takeout-catalog-v2';
 const CATEGORIES: { name: Category; icon: string; tint: string }[] = [
@@ -30,7 +33,6 @@ const RECIPES: Record<Category, Array<[string, string, number, string, string[]]
   拼好饭: [['拼好饭·卤肉饭','今日拼团',12,'限时特价，预计 30 分钟',['微辣','不要辣']],['拼好饭·韩式拌饭','今日拼团',14,'剩余 8 份',['加泡菜','不加泡菜']],['拼好饭·鸡腿饭','饭点拼团',13,'第二件更优惠',['加卤蛋','不加青菜']],['拼好饭·酸辣粉','午餐拼团',10,'拼单已省 6 元',['微辣','中辣']],['拼好饭·番茄面','好饭研究所',11,'热卖拼单款',['加煎蛋','不要香菜']]],
   跑腿: [['帮买咖啡/奶茶','同城跑腿',10,'填写商品和取货地址后下单',['即时取送','预约送达']],['帮取快递','同城跑腿',12,'取件码仅用于本次服务',['送到门口','放驿站']],['帮送文件','闪送小哥',15,'同城文件急送',['普通件','加急件']],['代排队取号','城市跑腿',18,'医院、餐厅取号服务',['即时','预约']],['帮买日用品','邻里跑腿',11,'备注需要购买的商品',['即时取送','预约送达']]],
 };
-const locationDefaults: LocationConfig = { mode: 'virtual', address: '上海静安区', mappedAddress: '上海市静安区', amapKey: '' };
 const makeItems = (category: Category, count: number, start = 0, prefix = 'seed'): Item[] => Array.from({ length: count }, (_, offset) => {
   const index = start + offset; const recipe = RECIPES[category][index % RECIPES[category].length]; const c = CATEGORIES.find(x => x.name === category)!;
   return { id: `${prefix}-${category}-${index}-${Date.now()}`, category, name: index < RECIPES[category].length ? recipe[0] : `${recipe[0]} ${['精选款','人气款','推荐套餐','限定组合'][Math.floor(index / RECIPES[category].length) % 4]}`, shop: `${recipe[1]} · ${index % 2 ? '附近热卖' : '今日推荐'}`, price: recipe[2] + (index % 4) * 2, desc: recipe[3], options: recipe[4], image: c.icon };
@@ -44,7 +46,9 @@ const specChoices = (category: Category): Array<[string, number]> => category ==
 
 export default function TakeoutApp() {
   const { closeApp, characters, addToast, showError, activeCharacterId, userProfile, groups, realtimeConfig, apiConfig, updateCharacter } = useOS();
-  const [location, setLocation] = useState<LocationConfig>(() => ({ ...locationDefaults, ...JSON.parse(localStorage.getItem('nmj-takeout-location') || '{}') }));
+  const [addressBook, setAddressBook] = useState<TakeoutAddressBook>(loadTakeoutAddressBook);
+  const [deliveryRecipient, setDeliveryRecipient] = useState<{ kind: 'user' } | { kind: 'character'; characterId: string }>(() => activeCharacterId ? { kind: 'character', characterId: activeCharacterId } : { kind: 'user' });
+  const location = useMemo(() => resolveTakeoutAddress(addressBook, deliveryRecipient), [addressBook, deliveryRecipient]);
   const [home, setHome] = useState<Item[]>(() => savedCatalog().home || homeSeed());
   const [catalogs, setCatalogs] = useState<Record<Category, Item[]>>(() => ({ ...initialCatalogs(), ...(savedCatalog().catalogs || {}) }));
   const [category, setCategory] = useState<Category | null>(null); const [page, setPage] = useState(0);
@@ -85,25 +89,46 @@ export default function TakeoutApp() {
     oldOptions.parentElement?.insertBefore(block, oldOptions.nextSibling); const addButton = [...sheet.querySelectorAll('button')].find(button => button.textContent?.includes('加入购物车')); if (addButton) addButton.textContent = `¥${detail.price + selectedSpec[1]} 加入购物车`;
     return () => block.remove();
   }, [detail, selected, selectedSpec]);
-  useEffect(() => { localStorage.setItem('nmj-takeout-location', JSON.stringify(location)); localStorage.setItem('nmj-takeout-api', useSecondary ? 'secondary' : 'main'); localStorage.setItem('nmj-takeout-secondary-api', JSON.stringify(secondary)); localStorage.setItem(TAKEOUT_KEY, JSON.stringify({ home, catalogs, searchResults, searchQuery: query })); }, [location, useSecondary, secondary, home, catalogs, searchResults, query]);
+  useEffect(() => { persistTakeoutAddressBook(addressBook); localStorage.setItem('nmj-takeout-api', useSecondary ? 'secondary' : 'main'); localStorage.setItem('nmj-takeout-secondary-api', JSON.stringify(secondary)); localStorage.setItem(TAKEOUT_KEY, JSON.stringify({ home, catalogs, searchResults, searchQuery: query })); }, [addressBook, useSecondary, secondary, home, catalogs, searchResults, query]);
   const visible = useMemo(() => searchResults ?? (category ? catalogs[category] : home), [searchResults, category, catalogs, home]);
   const totalPages = Math.max(1, Math.ceil(visible.length / 5)); const displayItems = visible.slice(page * 5, page * 5 + 5);
   useEffect(() => setPage(0), [category, searchResults]);
   const currentConfig = () => useSecondary ? secondary : apiConfig;
+  const openAddressSettings = () => {
+    const host = document.createElement('div');
+    host.className = 'takeout-address-settings-host';
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const close = () => { root.unmount(); host.remove(); };
+    root.render(<TakeoutAddressSettings book={addressBook} recipient={deliveryRecipient} characters={characters} onRecipientChange={setDeliveryRecipient} onChange={setAddressBook} onClose={close} addToast={addToast}/>);
+  };
+  useEffect(() => {
+    const button = document.querySelector<HTMLButtonElement>('.takeout-mobile-root header > div:first-child button:nth-of-type(2)');
+    if (!button) return;
+    const intercept = (event: MouseEvent) => { event.preventDefault(); event.stopImmediatePropagation(); openAddressSettings(); };
+    button.addEventListener('click', intercept, true);
+    return () => button.removeEventListener('click', intercept, true);
+  }, [addressBook, deliveryRecipient, characters, addToast]);
+  useEffect(() => {
+    const label = deliveryRecipient.kind === 'user' ? (userProfile.name || '用户') : (characters.find(char => char.id === deliveryRecipient.characterId)?.name || '角色');
+    const addressLabel = document.querySelector<HTMLElement>('.takeout-mobile-root header > div:first-child button:nth-of-type(2) span');
+    if (addressLabel) addressLabel.textContent = `${label} · ${location.address || '输入收货地址'}`;
+  }, [deliveryRecipient, location.address, characters, userProfile.name]);
   const scheduleTakeoutArrival = async (char: CharacterProfile, order: { etaAt: number; items: Item[]; target: string }) => {
     const config = char.activeMsg2Config;
     if (!config?.enabled) throw new Error(`「${char.name}」的主动消息 2.0 未开启，无法创建送达提醒。`);
     const wallClock = nowInTimeZone(resolveCharTimeZone(char), new Date(order.etaAt));
     const sendAt = `${wallClock.getFullYear()}-${String(wallClock.getMonth()+1).padStart(2,'0')}-${String(wallClock.getDate()).padStart(2,'0')}T${String(wallClock.getHours()).padStart(2,'0')}:${String(wallClock.getMinutes()).padStart(2,'0')}:00`;
-    const promptHint = `现在才是外卖预计送达时刻。订单商品：${order.items.map(x => x.name).join('、')}；${order.target === `${char.name} 代付` ? '你已代付。' : '这是送给你的外卖。'}自然提醒用户取餐；此前绝不能声称已经收到、送达或吃完。`;
+    const promptHint = `现在才是外卖预计送达时刻。订单商品：${order.items.map(x => x.name).join('、')}；${order.target === `${char.name} 代付` ? '你已代付。' : '这是送给你的外卖。'}请自然问用户“外卖到了吗”或“收到了没”；此前及此刻都不能擅自断言已经收到、送达或吃完，必须等待用户确认。`;
     const result = await ActiveMsgClient.scheduleCharacterTask({ char, config, task: { mode: 'prompted', firstSendTime: sendAt, recurrenceType: 'none', promptHint, expirePolicy: 'force', selfScheduled: false }, userProfile, groups, realtimeConfig, apiConfig });
     const task: ActiveMsg2TaskRecord = { taskUuid: result.uuid, clientTaskId: result.clientTaskId, mode: 'prompted', firstSendTime: result.firstSendAt, recurrenceType: 'none', promptHint, expirePolicy: 'force', anchorLastUserMsgAt: result.anchorMs, source: 'user', status: 'scheduled', createdAt: Date.now() };
     updateCharacter(char.id, { activeMsg2Config: { ...config, tasks: applyScheduledTask(config.tasks || [], task, {}, Date.now()), lastSyncedAt: Date.now(), lastError: undefined } });
   };
   const poiContext = async () => {
-    if (!location.amapKey) return '';
-    const region = location.mode === 'real' ? location.address : location.mappedAddress;
-    try { const data = await fetch(`https://restapi.amap.com/v5/place/text?key=${encodeURIComponent(location.amapKey)}&keywords=${encodeURIComponent(category || query || '餐饮')}&region=${encodeURIComponent(region)}&city_limit=true&page_size=10`); const json = await data.json(); const pois = json?.pois || []; return pois.slice(0, 5).map((p: any) => `${p.name}(${p.address || region})`).join('；'); } catch { return ''; }
+    if (!addressBook.amapKey) return '';
+    const result = await testAmapPoi(addressBook.amapKey, location, category || query || '餐饮');
+    setAddressBook(book => ({ ...book, lastPoiTest: { ...result, at: Date.now() } }));
+    return result.success ? (result.poiNames || []).join('；') : '';
   };
   const requestItems = async (purpose: 'home' | 'category' | 'search') => {
     const cfg = currentConfig();
@@ -111,7 +136,8 @@ export default function TakeoutApp() {
     setRefreshing(true);
     try {
       const poi = await poiContext(); const target = purpose === 'home' ? '八类混合推荐，返回正好10项' : purpose === 'search' ? `搜索“${query}”，返回正好10项且都必须与搜索词直接相关` : `分类“${category}”，返回正好10项且全部属于该分类`;
-      const prompt = `你是外卖推荐引擎。用户显示地址：${location.address}；用于附近商户匹配的地址：${location.mode === 'real' ? location.address : location.mappedAddress}。${poi ? `高德附近 POI：${poi}。` : ''}${target}。严格只输出 JSON 数组，不要 markdown。每项字段：category（只能为${CATEGORIES.map(c=>c.name).join('、')}之一）、name、shop、price（数字）、desc、options（符合该商品的真实规格字符串数组）。商品彼此必须不同，饮品给糖度/冰量，餐食给辣度/加料等。`;
+      const poiRegion = location.mode === 'real' ? location.address : location.mappedAddress;
+      const prompt = `你是外卖推荐引擎。收货地址：${location.address}；用于附近商户匹配的地址：${poiRegion}。${poi ? `高德附近 POI：${poi}。` : ''}${target}。严格只输出 JSON 数组，不要 markdown。每项字段：category（只能为${CATEGORIES.map(c=>c.name).join('、')}之一）、name、shop、price（数字）、desc、options（符合该商品的真实规格字符串数组）。商品彼此必须不同，饮品给糖度/冰量，餐食给辣度/加料等。`;
       const data = await safeFetchJson(`${cleanBaseUrl(cfg.baseUrl)}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` }, body: JSON.stringify({ model: cfg.model, stream: false, messages: [{ role: 'user', content: prompt }] }) }, 2, 45000, { appId: 'takeout', appName: '外卖', purpose: purpose === 'search' ? '外卖搜索' : '外卖推荐刷新' });
       const raw = data?.choices?.[0]?.message?.content || ''; const parsed = parseArray(raw); if (!Array.isArray(parsed) || parsed.length < 10) throw new Error('API 没有返回 10 个有效推荐，请检查模型输出。');
       const fresh = parsed.slice(0, 10).map((x: any, i: number): Item => { const valid = CATEGORIES.find(c => c.name === x.category)?.name || category || '美食'; return { id: `api-${Date.now()}-${i}`, category: valid, name: String(x.name || '推荐商品'), shop: String(x.shop || '附近店铺'), price: Math.max(1, Number(x.price) || 20), desc: String(x.desc || ''), options: Array.isArray(x.options) && x.options.length ? x.options.map(String) : ['标准'], image: CATEGORIES.find(c => c.name === valid)!.icon }; });
@@ -184,9 +210,11 @@ export default function TakeoutApp() {
   const pay = async (target: string) => {
     const deliveryMinutes = 25 + Math.floor(Math.random() * 11);
     const fee = 3 + Math.floor(Math.random() * 5);
-    const order = { id: Date.now(), target, items: cart, address: location.address, createdAt: Date.now(), deliveryMinutes, fee, etaAt: Date.now() + deliveryMinutes * 60000, placedBy: 'user' as const };
-    saveTakeoutOrder(order);
     const targetChar = characters.find(c => target === c.name || target === `${c.name} 代付`);
+    const recipient = target === '自己' || target.endsWith('代付') ? { kind: 'user' as const } : targetChar ? { kind: 'character' as const, characterId: targetChar.id } : deliveryRecipient;
+    const destination = resolveTakeoutAddress(addressBook, recipient);
+    const order = { id: Date.now(), target, items: cart, address: destination.address, deliveryDetail: destination.detail, deliveryNote: destination.note, createdAt: Date.now(), deliveryMinutes, fee, etaAt: Date.now() + deliveryMinutes * 60000, placedBy: 'user' as const };
+    saveTakeoutOrder(order);
     const { html, textPreview } = buildTakeoutOrderCard(order);
     const recipientId = targetChar?.id || activeCharacterId;
     if (recipientId) await DB.saveMessage({ charId: recipientId, role: 'user', type: 'html_card', content: '[HTML卡片] 外卖订单已提交', metadata: { htmlSource: html, htmlTextPreview: textPreview, source: 'takeout', order } });
