@@ -185,7 +185,10 @@ export const CollaborationStore = {
     rows.forEach(({ session, messages }) => {
       messages.forEach(message => {
         (message.attachments || []).forEach(attachment => {
-          if (!attachment.assetId || attachment.kind === 'installable') return;
+          // Installable beautification/card/worldbook works are real canonical
+          // assets too. Keep them in the same cabinet instead of hiding them:
+          // ChatApp can then deliver the existing asset without making a copy.
+          if (!attachment.assetId) return;
           const file: CollaborationLibraryFile = {
             ...attachment,
             sessionId: session.id,

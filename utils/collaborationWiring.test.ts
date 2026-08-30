@@ -79,10 +79,13 @@ describe('collaboration sidecar wiring', () => {
     const types = read('types.ts');
     expect(store).toContain('listLibraryFiles');
     expect(store).toContain('deduplicated by assetId');
+    expect(store).not.toContain("attachment.kind === 'installable'");
     expect(parser).toContain("type: 'collaboration_file'");
     expect(parser).toContain('collaborationFileMessageMetadata(file)');
     expect(parser).not.toContain('saveAsset({ id: file.assetId');
     expect(item).toContain('sully-collaboration-file');
+    expect(item).toContain('可安装作品');
+    expect(read('apps/Chat.tsx')).toContain('requestedPreviewAssetId={collaborationPreviewAssetId}');
     expect(types).toContain("'collaboration_file'");
   });
 

@@ -95,10 +95,34 @@ describe('downloadAndVerifyAndroidUpdate', () => {
       url: validManifest.apkUrl,
       path: 'updates/SullyOS-update.apk',
       directory: 'CACHE',
-      recursive: true,
     }));
+    expect(filesystemMocks.downloadFile.mock.calls[0]?.[0]).not.toHaveProperty('recursive');
     expect(filesystemMocks.mkdir.mock.invocationCallOrder[0]).toBeLessThan(
       filesystemMocks.downloadFile.mock.invocationCallOrder[0],
     );
+  });
+
+  it('continues when a previous update already created the cache directory', async () => {
+    filesystemMocks.mkdir.mockRejectedValueOnce(Object.assign(
+      new Error('Directory exists'),
+      { code: 'DirectoryExists' },
+    ));
+
+    await expect(downloadAndVerifyAndroidUpdate(validManifest)).resolves.toBe(
+      'file:///cache/updates/SullyOS-update.apk',
+    );
+
+    expect(filesystemMocks.deleteFile).toHaveBeenCalledWith({
+      path: 'updates/SullyOS-update.apk',
+      directory: 'CACHE',
+    });
+    expect(filesystemMocks.downloadFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not hide real cache directory creation failures', async () => {
+    filesystemMocks.mkdir.mockRejectedValueOnce(new Error('Permission denied'));
+
+    await expect(downloadAndVerifyAndroidUpdate(validManifest)).rejects.toThrow('Permission denied');
+    expect(filesystemMocks.downloadFile).not.toHaveBeenCalled();
   });
 });

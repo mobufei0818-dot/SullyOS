@@ -39,6 +39,29 @@ const ApkInstaller = registerPlugin<ApkInstallerPlugin>('ApkInstaller');
 const UPDATE_DIRECTORY = 'updates';
 const UPDATE_PATH = 'updates/SullyOS-update.apk';
 
+const isDirectoryExistsError = (error: unknown): boolean => {
+  const record = error && typeof error === 'object' ? error as Record<string, unknown> : null;
+  const detail = [record?.code, record?.message, error instanceof Error ? error.message : error]
+    .filter(value => typeof value === 'string')
+    .join(' ');
+  return /directory\s*(?:does\s+already\s*)?exists|directoryexists|\beexist\b/i.test(detail);
+};
+
+const ensureUpdateDirectory = async (): Promise<void> => {
+  try {
+    await Filesystem.mkdir({
+      path: UPDATE_DIRECTORY,
+      directory: Directory.Cache,
+      recursive: true,
+    });
+  } catch (error) {
+    // Capacitor Filesystem rejects mkdir even with recursive=true when the
+    // directory already exists. A previous update attempt leaving this cache
+    // directory behind is the normal repeat-download path, not a failure.
+    if (!isDirectoryExistsError(error)) throw error;
+  }
+};
+
 export const getAndroidUpdateManifestUrl = (): string =>
   String(import.meta.env.VITE_APK_UPDATE_MANIFEST_URL || '').trim();
 
@@ -93,11 +116,7 @@ export const downloadAndVerifyAndroidUpdate = async (
   manifest: AndroidUpdateManifest,
   onProgress?: (fraction: number) => void,
 ): Promise<string> => {
-  await Filesystem.mkdir({
-    path: UPDATE_DIRECTORY,
-    directory: Directory.Cache,
-    recursive: true,
-  });
+  await ensureUpdateDirectory();
 
   try {
     await Filesystem.deleteFile({ path: UPDATE_PATH, directory: Directory.Cache });
@@ -117,7 +136,6 @@ export const downloadAndVerifyAndroidUpdate = async (
       url: manifest.apkUrl,
       path: UPDATE_PATH,
       directory: Directory.Cache,
-      recursive: true,
       progress: Boolean(onProgress),
     });
   } finally {
