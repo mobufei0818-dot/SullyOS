@@ -123,6 +123,8 @@ interface ChatModalsProps {
     voiceAvailable?: boolean; // true if char has voiceProfile configured
     onDownloadVoice?: () => void;
     voiceDownloadable?: boolean; // true if the selected message already has generated voice
+    onDownloadImage?: () => void;
+    imageDownloadable?: boolean;
     voiceCollectable?: boolean; // true for a generated voice or an unsynthesized <语音> message
     onToggleVoiceFavorite?: () => void;
     voiceFavorited?: boolean;
@@ -267,7 +269,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     htmlModeEnabled, onToggleHtmlMode, htmlModeCustomPrompt, setHtmlModeCustomPrompt,
     chatVoiceEnabled, onToggleChatVoice, chatVoiceAutoPlay, onToggleChatVoiceAutoPlay, chatVoiceLang, onSetChatVoiceLang,
     chatImageEnabled, onToggleChatImage, chatImageAutoGenerate, onToggleChatImageAutoGenerate,
-    onGenerateVoice, voiceAvailable, onDownloadVoice, voiceDownloadable, voiceCollectable, onToggleVoiceFavorite, voiceFavorited,
+    onGenerateVoice, voiceAvailable, onDownloadVoice, voiceDownloadable, onDownloadImage, imageDownloadable, voiceCollectable, onToggleVoiceFavorite, voiceFavorited,
     scheduleData, isScheduleGenerating, onScheduleEdit, onScheduleDelete, onScheduleReroll, onScheduleCoverChange,
     onScheduleStyleChange, onPlayTheater,
     isScheduleFeatureEnabled, onToggleScheduleFeature,
@@ -1037,6 +1039,12 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                         <button onClick={() => { onDownloadVoice(); setModalType('none'); }} className="w-full py-3 bg-sky-50 text-sky-600 font-medium rounded-2xl active:bg-sky-100 transition-colors flex items-center justify-center gap-2">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
                             下载语音
+                        </button>
+                    )}
+                    {imageDownloadable && onDownloadImage && (
+                        <button onClick={() => { onDownloadImage(); setModalType('none'); }} className="w-full py-3 bg-sky-50 text-sky-600 font-medium rounded-2xl active:bg-sky-100 transition-colors flex items-center justify-center gap-2">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" /></svg>
+                            保存图片到本地
                         </button>
                     )}
                     {voiceCollectable && selectedMessage?.role === 'assistant' && onToggleVoiceFavorite && (

@@ -827,8 +827,6 @@ const LifeRecordCard: React.FC<{
     commonLayout: (content: React.ReactNode) => JSX.Element;
     selectionMode: boolean;
     onResolveLifeRecord?: (m: Message, action: 'confirmed' | 'rejected') => void;
-    /** 照片占位卡被点击后，聊天页负责调用真实生图接口。 */
-    onGeneratePhoto?: (m: Message) => void;
 }> = ({ m, charName, commonLayout, selectionMode, onResolveLifeRecord }) => {
     const meta = m.metadata || {};
     const style = LIFE_CARD_STYLE[meta.module as string] || LIFE_CARD_STYLE.exercise;
@@ -1424,6 +1422,10 @@ interface MessageItemProps {
     onResolveTransfer?: (m: Message, action: 'accepted' | 'returned') => void;
     /** 用户点「生活记录」卡 → 确认 / 否决（角色代记的记录） */
     onResolveLifeRecord?: (m: Message, action: 'confirmed' | 'rejected') => void;
+    /** 照片占位卡被点击后，聊天页负责调用真实生图接口。 */
+    onGeneratePhoto?: (m: Message) => void;
+    /** 点击已生成或已发送的图片时，由聊天页打开原图预览。 */
+    onOpenImage?: (m: Message) => void;
     /** 打开协同文件柜里的原始 Blob；消息本身只保存 assetId 引用。 */
     onOpenCollaborationFile?: (m: Message) => void | Promise<void>;
     /** 思考链卡片视觉与交互 */
@@ -1476,6 +1478,7 @@ const MessageItem = React.memo(({
     onResolveTransfer,
     onResolveLifeRecord,
     onGeneratePhoto,
+    onOpenImage,
     onOpenCollaborationFile,
     thinkingChainOptions,
 }: MessageItemProps) => {
@@ -3375,14 +3378,24 @@ const MessageItem = React.memo(({
         return commonLayout(
             <div className="relative group">
                 {m.content ? (
-                    <TokenImg
-                        value={m.content}
-                        className="max-w-[200px] max-h-[300px] rounded-2xl"
-                        alt="Uploaded"
-                        loading={isLatestMessage ? 'eager' : 'lazy'}
-                        decoding="async"
-                        onLoad={() => onMediaLoad?.(m.id)}
-                    />
+                    <button
+                        type="button"
+                        onClick={(event) => {
+                            event.stopPropagation();
+                            if (!selectionMode) onOpenImage?.(m);
+                        }}
+                        className="block max-w-[200px] rounded-2xl overflow-hidden cursor-zoom-in active:scale-[0.985] transition-transform"
+                        aria-label="查看原图"
+                    >
+                        <TokenImg
+                            value={m.content}
+                            className="max-w-[200px] max-h-[300px] rounded-2xl"
+                            alt="图片，点击查看原图"
+                            loading={isLatestMessage ? 'eager' : 'lazy'}
+                            decoding="async"
+                            onLoad={() => onMediaLoad?.(m.id)}
+                        />
+                    </button>
                 ) : (
                     <div className="px-4 py-6 rounded-2xl bg-slate-100 text-slate-400 text-xs italic text-center min-w-[120px]">[图片已丢失]</div>
                 )}

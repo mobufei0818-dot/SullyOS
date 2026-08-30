@@ -21,7 +21,7 @@ import { XhsMcpClient, extractNotesFromMcpData, normalizeXhsLiteDetail } from '.
 import { extractWebpageContent, detectFirstUrl, detectXhsShortUrl, extractXhsShareTitle, isXhsUrl, extractXhsNoteId, expandShortUrl, type ExtractedWebpage } from '../utils/webpageExtractor';
 import { isVideoShareUrl, parseVideoShareUrl } from '../utils/videoParser';
 import { isDevDebugAvailable } from '../utils/devDebug';
-import { isImageValue, migrateDataUrlToRef, putImageBlob, useBlobRefUrl } from '../utils/blobRef';
+import { getBlobForRef, isBlobRef, isImageValue, migrateDataUrlToRef, putImageBlob, useBlobRefUrl } from '../utils/blobRef';
 import { buildReplySnapshotContent } from '../utils/applyAssistantPostProcessing';
 import { resolveLifeRecordCard } from '../utils/lifeRecords';
 import { isMcdConfigured } from '../utils/mcdMcpClient';
@@ -253,6 +253,8 @@ const Chat: React.FC = () => {
         waterlineAlreadyAhead: boolean;
     } | null>(null);
     const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
+    const [imagePreviewMessage, setImagePreviewMessage] = useState<Message | null>(null);
+    const imagePreviewUrl = useBlobRefUrl(imagePreviewMessage?.content);
     const [selectedEmoji, setSelectedEmoji] = useState<Emoji | null>(null);
     const [selectedCategory, setSelectedCategory] = useState<EmojiCategory | null>(null); // For deletion modal
     const [editContent, setEditContent] = useState('');
@@ -3057,6 +3059,30 @@ const Chat: React.FC = () => {
         setModalType('message-options');
     }, []);
 
+    const handleOpenImage = useCallback((msg: Message) => {
+        if (!msg.content) return;
+        setImagePreviewMessage(msg);
+    }, []);
+
+    const handleDownloadImage = useCallback(async (msg: Message, resolvedUrl?: string) => {
+        const source = resolvedUrl || msg.content;
+        if (!source) return;
+        try {
+            const blob = isBlobRef(msg.content)
+                ? await getBlobForRef(msg.content)
+                : await fetchBlobForShare(source, 'image/png');
+            if (!blob) throw new Error('找不到图片原文件');
+            const mime = blob.type || 'image/png';
+            const extension = mime.includes('jpeg') ? 'jpg' : mime.includes('webp') ? 'webp' : mime.includes('gif') ? 'gif' : 'png';
+            const fileName = `糯米机图片_${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`;
+            const result = await shareOrDownloadBlob({ blob, fileName, shareTitle: '保存聊天图片', preferDownloadOnWeb: true });
+            if (result !== 'cancelled') addToast(result === 'shared' ? '已打开保存方式' : '图片已开始保存', 'success');
+        } catch (error) {
+            console.error('[Chat] image download failed', error);
+            addToast('保存图片失败，请长按图片后重试', 'error');
+        }
+    }, [addToast]);
+
     const handleBatchDelete = async () => {
         const msgIdsToDelete = new Set<number>(selectedMsgIds);
         // 思维链单独勾选、但宿主消息没选 -> 只清 metadata.thinkingChain，保留消息
@@ -3789,6 +3815,40 @@ const Chat: React.FC = () => {
                  </div>
              )}
 
+             {imagePreviewMessage && (
+                 <div
+                    className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-sm"
+                    role="dialog"
+                    aria-modal="true"
+                    aria-label="图片预览"
+                    onClick={() => setImagePreviewMessage(null)}
+                 >
+                    <div className="relative flex h-full w-full max-w-3xl flex-col items-center justify-center" onClick={(event) => event.stopPropagation()}>
+                        <img
+                            src={imagePreviewUrl}
+                            alt="聊天图片原图"
+                            className="max-h-[calc(100dvh-8rem)] max-w-full rounded-xl object-contain shadow-2xl"
+                        />
+                        <div className="mt-3 flex items-center gap-3">
+                            <button
+                                type="button"
+                                onClick={() => void handleDownloadImage(imagePreviewMessage, imagePreviewUrl)}
+                                className="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-700 shadow-lg active:scale-95"
+                            >
+                                保存到本地
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => setImagePreviewMessage(null)}
+                                className="rounded-full bg-white/15 px-4 py-2 text-sm font-semibold text-white ring-1 ring-white/30 active:scale-95"
+                            >
+                                关闭
+                            </button>
+                        </div>
+                    </div>
+                 </div>
+             )}
+
              <ChatModals
                 modalType={modalType} setModalType={setModalType}
                 transferAmt={transferAmt} setTransferAmt={setTransferAmt}
@@ -3868,6 +3928,8 @@ const Chat: React.FC = () => {
                 voiceDownloadable={!!(selectedMessage?.id && voiceDataMap[selectedMessage.id])}
                 voiceCollectable={!!(selectedMessage?.id && (voiceDataMap[selectedMessage.id] || parseVoiceOutput(selectedMessage.content || '').hasVoiceTag))}
                 onDownloadVoice={selectedMessage ? () => handleDownloadVoice(selectedMessage) : undefined}
+                imageDownloadable={!!(selectedMessage?.type === 'image' && selectedMessage.content)}
+                onDownloadImage={selectedMessage?.type === 'image' && selectedMessage.content ? () => handleDownloadImage(selectedMessage) : undefined}
                 voiceFavorited={!!(selectedMessage?.id && chatFavoriteKeys.has(chatFavoriteSourceKey(selectedMessage)))}
                 onToggleVoiceFavorite={selectedMessage ? () => handleToggleVoiceFavorite(selectedMessage) : undefined}
                 scheduleData={scheduleData}
@@ -4184,6 +4246,7 @@ const Chat: React.FC = () => {
                             onResolveTransfer={handleResolveTransfer}
                             onResolveLifeRecord={handleResolveLifeRecord}
                             onGeneratePhoto={handleGeneratePhoto}
+                            onOpenImage={handleOpenImage}
                             onOpenCollaborationFile={handleOpenCollaborationFile}
                             thinkingChainOptions={thinkingChainOptions}
                         />
