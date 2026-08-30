@@ -2185,7 +2185,7 @@ export async function applyAssistantPostProcessing(
     // ─── Step 5: 角色外卖订单 ───
     // 角色不能自己画一张看似订单的普通 HTML；确认下单后输出紧凑标记，由外卖 App
     // 生成固定小票、写入订单记录并安排送达提醒。这样跟用户在 App 内下单是同一条业务链。
-    const roleTakeout = extractRoleTakeoutOrders(aiContent);
+    const roleTakeout = extractRoleTakeoutOrders(aiContent, char.name, fullMessages);
     // 地址确认可以发生在“下单前的一轮”对话里；即使这轮还没有订单，也必须剥掉结构标记并保留已确认的新地址。
     if (roleTakeout.cleanedContent !== aiContent) aiContent = roleTakeout.cleanedContent;
     if (roleTakeout.orders.length > 0) {
