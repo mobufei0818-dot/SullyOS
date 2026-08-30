@@ -3372,7 +3372,12 @@ const MessageItem = React.memo(({
             const generating = photo.status === 'generating';
             const failed = photo.status === 'failed';
             return commonLayout(
-                <button type="button" onClick={() => !generating && onGeneratePhoto?.(m)} className="w-64 text-left overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm active:scale-[0.98] transition-transform disabled:opacity-70" disabled={generating}>
+                <button type="button" onClick={() => !generating && onGeneratePhoto?.(m)} className="relative w-64 text-left overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm active:scale-[0.98] transition-transform disabled:opacity-70" disabled={generating}>
+                    {generating && (
+                        <span className="absolute right-3 top-3 z-10 grid h-7 w-7 place-items-center rounded-full bg-white/90 shadow-sm" aria-label="正在合成照片">
+                            <span className="h-4 w-4 animate-spin rounded-full border-2 border-violet-200 border-t-violet-500" />
+                        </span>
+                    )}
                     <div className="h-40 bg-gradient-to-br from-slate-100 via-violet-50 to-rose-50 flex items-center justify-center p-5">
                         <div className="w-full h-full rounded-xl border border-white/80 bg-white/55 flex items-center justify-center text-center text-xs leading-relaxed text-slate-500">{photo.prompt || '一张照片'}</div>
                     </div>
