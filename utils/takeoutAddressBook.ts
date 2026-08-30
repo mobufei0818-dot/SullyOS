@@ -5,6 +5,10 @@ export type TakeoutAddress = {
   name: string;
   mode: TakeoutAddressMode;
   address: string;
+  /** Detailed building / room information. Never injected into role prompts. */
+  detail?: string;
+  /** Delivery-only note, such as front desk or door-drop preference. */
+  note?: string;
   mappedAddress: string;
   createdAt: number;
 };
