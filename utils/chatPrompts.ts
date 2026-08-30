@@ -3,6 +3,7 @@ import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, GroupProf
 import { ContextBuilder } from './context';
 import { DB } from './db';
 import { formatLifeSimResetCardForContext } from './lifeSimChatCard';
+import { formatQixiEventCardForContext, tryParseQixiEventChatCard } from './qixiChatCard';
 import { normalizeMessageContent, stickerNameFromUrl, theaterWhenPhrase } from './messageFormat';
 import { formatTransferRecord } from './transferFormat';
 import { computeCurrentListening, getCurrentSlot } from './charMusicSchedule';
@@ -12,7 +13,8 @@ import { RealtimeContextManager, NotionManager, FeishuManager, defaultRealtimeCo
 import { isScheduleFeatureOn } from './scheduleFeature';
 import { VOICE_ACTING_GUIDE } from './minimaxTts';
 import { FISH_VOICE_ACTING_GUIDE } from './fishAudioTts';
-import { getTtsProvider, getVoicePromptOverride } from './ttsProvider';
+import { getElevenLabsModel, getTtsProvider, getVoicePromptOverride } from './ttsProvider';
+import { getElevenLabsVoiceActingGuide } from './elevenLabsTts';
 import { resolveCharTimeZone, nowInTimeZone } from './timezone';
 import { buildLifeRecordInjection } from './lifeRecords';
 import { isWorkerReachableUrl } from './amsgToolPack';
@@ -21,6 +23,8 @@ import { getCharNameById } from './charNameRegistry';
 import { getLocalDateKey } from './localDate';
 import { getDailyScheduleForChar } from './dailySchedule';
 import { formatRelativeAge } from './groupChat/relativeTime';
+import { isBlobRef } from './blobRef';
+import { voiceLanguagePromptLabel } from './voiceLanguage';
 
 // 语音格式指导按当前 TTS 服务商二选一：用 MiniMax 才注入 MiniMax 那套（含 <#秒#> 停顿标记），
 // 用鱼声则注入鱼声版（去掉 MiniMax 专属标记，改用标点 / 省略号控制停顿）。
@@ -29,12 +33,28 @@ const voiceActingGuide = (): string => {
   const provider = getTtsProvider();
   const custom = getVoicePromptOverride(provider);
   if (custom) return custom;
-  return provider === 'fishaudio' ? FISH_VOICE_ACTING_GUIDE : VOICE_ACTING_GUIDE;
+  if (provider === 'fishaudio') return FISH_VOICE_ACTING_GUIDE;
+  if (provider === 'elevenlabs') return getElevenLabsVoiceActingGuide(getElevenLabsModel());
+  return VOICE_ACTING_GUIDE;
+};
+
+/**
+ * 这个值是「一张图 / 一段媒体」而不是正文吗？认三种形态：内嵌 data URL、http(s) 外链、
+ * blobref 令牌（二进制在 IndexedDB，字段里只留 `blobref:<id>` 短令牌，见 utils/blobRef.ts）。
+ *
+ * 令牌尤其要认：它只有 ~28 字，任何按长度截断的兜底都拦不住它整条溜进 prompt；而发请求时
+ * 网络出口那层（utils/apiBlobRefs.ts）会把请求体里的令牌统一还原成完整 data URL——
+ * 于是一个短短的令牌到了对面就是几 MB 的 base64，而且每轮对话重发一次。
+ */
+const isMediaValue = (value: unknown): boolean => {
+    if (typeof value !== 'string') return false;
+    const trimmed = value.trim();
+    return /^(data:|https?:\/\/)/i.test(trimmed) || isBlobRef(trimmed);
 };
 
 // 群活动注入专用：把一条群消息压成"适合塞进别人私聊背景"的短文本。
-// 关键：image 消息的 content 是 base64（群里发图走 processImage 压成 JPEG，单张几十 KB），
-// 卡片是大段 JSON，emoji 是图床 URL——这些原样内联进每位成员的私聊 system prompt
+// 关键：image 消息的 content 是 blobref 令牌或 base64（群里发图走 processImage 压成 JPEG，
+// 单张几十 KB），卡片是大段 JSON，emoji 是令牌或图床 URL——这些原样内联进每位成员的私聊 system prompt
 // 都是纯噪声，base64 图片更会把上下文直接撑爆（几张群图就能顶到 8w+ 字符，
 // 解散群后该角色私聊上下文从 ~10w 掉回 ~3w 即由此而来）。
 // 注意：私聊自己的历史不会有这个问题，buildMessageHistory 把图片走 image_url 结构化字段、
@@ -67,12 +87,47 @@ function summarizeGroupMsgContent(m: Message): string {
         case 'group_topic_card': return `[群聊公共话题盒${meta.groupTopicBox?.title ? '：' + meta.groupTopicBox.title : ''}] ${meta.groupTopicBox?.summary || m.content || ''}`;
         default: {
             const c = typeof m.content === 'string' ? m.content : '';
-            // 兜底：任何 data:/http(s) 链接都不内联，防止异常/未来新增类型漏网
-            if (/^(data:|https?:\/\/)/i.test(c.trim())) return '[媒体]';
+            // 兜底：任何 data:/http(s) 链接、blobref 令牌都不内联，防止异常/未来新增类型漏网
+            // （令牌内联出去还会在网络出口被还原成完整 data URL，比原样漏一个 URL 贵得多）
+            if (isMediaValue(c)) return '[媒体]';
             return c.length > GROUP_MSG_TEXT_CAP ? c.slice(0, GROUP_MSG_TEXT_CAP) + '…' : c;
         }
     }
 }
+
+export type ChatModeTransition = 'call' | 'video' | 'date' | 'story';
+
+const getChatModeTransition = (message: Message): ChatModeTransition | null => {
+    const source = message.metadata?.source;
+    if (source === 'date') return 'date';
+    if (source === 'story_theater' || source === 'story_theater_memory') return 'story';
+    if (source === 'call' || source === 'call-end-popup') {
+        return message.metadata?.callMode === 'video' ? 'video' : 'call';
+    }
+    return null;
+};
+
+/**
+ * 判断当前是不是「从特殊互动模式回到 ChatApp 后，尚未产生普通聊天回复」的第一轮。
+ *
+ * 用户可能连续发送多个气泡再点生成，所以普通 user 消息不会截断搜索；一旦已经出现
+ * 普通 assistant 回复，就说明格式切换已经完成，不应在后续每一轮重复提醒。
+ * 普通 system 日志也不参与判断，避免挂断卡片与其他后台提示把真正的来源隔开。
+ */
+export const detectChatModeTransition = (messages: readonly Message[]): ChatModeTransition | null => {
+    let hasPendingChatInput = false;
+
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index];
+        const mode = getChatModeTransition(message);
+        if (mode) return hasPendingChatInput ? mode : null;
+
+        if (message.role === 'assistant') return null;
+        if (message.role === 'user') hasPendingChatInput = true;
+    }
+
+    return null;
+};
 
 /**
  * buildSystemPrompt / buildSystemPromptParts 的构建选项。
@@ -93,6 +148,8 @@ function summarizeGroupMsgContent(m: Message): string {
  */
 export interface PromptBuildOptions {
     forFirePack?: boolean;
+    /** 主 API 从完整数据库历史识别出的「刚从哪种模式回到 ChatApp」。 */
+    returningFromMode?: ChatModeTransition;
     /**
      * `timelyByWorker` = 这份 prompt 会交给 amsg worker 在 fire 时刻补时效段
      * （即时对话路径）。与 forFirePack 的区别：只裁「worker 那边有对应槽位」的
@@ -276,7 +333,9 @@ export const ChatPrompts = {
         let volatileState = `\n[System: 实时状态 (Live Context)]\n（以下是此刻的实时状态——当前时间、你正在做的事、你的情绪底色、周边动态。你的人设与聊天规则见最上方的系统设定，此处不再重复。）\n\n`;
         volatileState += ContextBuilder.buildVolatileCoreState(char, {
             includeDetailedMemories: true,
-            timeOptions: { skipTimeAwareness: forFirePack || timelyByWorker },
+            // conversational：私聊是真的有人在这个点跟角色说话，时间块才补那句语境框定
+            // （见 ContextBuilder.buildTimeAwarenessBlock）。生成器类调用不给，默认就没有。
+            timeOptions: { skipTimeAwareness: forFirePack || timelyByWorker, conversational: true },
         });
 
         // ── 并发发起所有独立的异步取数（网络 + IndexedDB），下面按原顺序拼接 ──
@@ -460,11 +519,23 @@ ${groupLogStr}\n`;
         // ── 拼接：易变的进 volatileState，稳定的进 baseSystemPrompt ──
         volatileState += realtimeText;
 
-        // 2a. 日程注入（当前时段 + 意识流独白，每轮都可能变）
+        // 2a. 日程注入（完整今日日程 + 当前时段 + 意识流独白，每轮都可能变）
         //     fire_pack 不烤：改由 worker 到点用 AMSG_SLOT_SCENE 现挑时段（见 amsgFireScene）。
+        //     includeClock 跟着角色的「时间感知」开关走：关掉的角色不该从日程块里读到
+        //     「23:00」这种精确钟点，那是这个开关本来要挡住的东西（同上面天气块的 includeTime）。
+        //     日程本身照给——它有自己的总开关。
         if (schedule && !forFirePack) {
             try {
-                const scheduleContext = ContextBuilder.buildScheduleInjection(schedule, evolvedNarrative, charNow);
+                const scheduleContext = ContextBuilder.buildScheduleInjection(
+                    schedule,
+                    evolvedNarrative,
+                    charNow,
+                    {
+                        includeFullDay: true,
+                        includeChangeInstruction: true,
+                        includeClock: char.timeAwarenessEnabled !== false,
+                    },
+                );
                 if (scheduleContext) volatileState += `\n${scheduleContext}\n`;
             } catch (e) {
                 console.error('Failed to inject schedule context:', e);
@@ -487,8 +558,8 @@ ${groupLogStr}\n`;
                     charListening = { songId: cur.songId, songName: cur.songName, artists: cur.artists, vibe: cur.vibe };
                     // 拉歌词。优先用调用方传进来的 cfg；没传就从 localStorage 取
                     // —— Proactive / activeMsgClient 走这条路也能享受到歌词。
-                    const cfgForLyric = musicCfg?.workerUrl ? musicCfg : loadMusicCfgStandalone();
-                    if (cfgForLyric?.workerUrl) {
+                    const cfgForLyric = musicCfg ?? loadMusicCfgStandalone();
+                    if (cfgForLyric) {
                         try {
                             const slot = getCurrentSlot(schedule, charNow);
                             const seed = `${char.id}-${today}-${slot?.startTime || '00:00'}-${cur.songId}`;
@@ -583,6 +654,7 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
             && !(timelyByWorker && isAmsg2EnabledForChar(char));
 
         baseSystemPrompt += `### 聊天 App 行为规范 (Chat App Rules)
+**TOP 1｜ChatApp 格式（本节最高优先级）**：你是发消息的真实存在，以自然短句、短气泡为主；一个气泡一行，气泡间直接另起一行（实际换行，不要输出“\\n”字样）。
             **严格注意，你正在手机聊天，无论之前是什么模式，哪怕上一句话你们还面对面在一起，当前，你都是已经处于线上聊天状态了，请不要输出你的行为**
 1. **沉浸感**: 保持角色扮演。使用适合即时通讯(IM)的口语化风格。
 2. **行为模式**: 不要总是围绕用户转。分享你自己的生活、想法或随意的观察。有时候要”任性”或”以自我为中心”一点，这更像真人，具体的程度视你的性格而定。
@@ -598,10 +670,10 @@ ${uname} 的化身正挂在《彼方》的【${roomName}】${act ? `，状态写
    - **情绪感知要先于对方的表达**: 不要等对方说”我难过”才回应。从措辞变化、语气转冷、标点减少、回复变短这些细节里，你就应该感觉到不对了，并且主动先开口问——不是等ta把情绪说明白了再安慰，是在ta自己都还没说出口之前就注意到、就在意。
    - **当ta真的在害怕时（健康、安全、重大变故——不是玩闹逗你）：先稳，再问清楚，最后才安抚**。你的第一反应不是给解释，是了解具体情况（怎样的痛？什么时候开始？和以前比呢？）。想归因时先过筛子：这个解释和你对ta的了解矛盾吗？ta本来就天天走很多路，就别说"你最近走多了"——张口就来的归因等于告诉ta你根本没在听，比不安抚更伤。ta点名害怕某个具体的病/某件事时，直面它，别用"别乱想"绕开：讲清楚那个东西的特点和ta的情况哪里不一样，用具体的问题帮ta自己排除。ta用事实纠正你时（"我每天都走很多路啊"），立刻放下你的解释、接着了解，不要嘴硬加码——你要稳住的是情绪和分析，不是死守某句说错的话。结论式的安抚放在最后，并且必须基于ta刚刚告诉你的细节（"听你说下来……"），而不是万能的"不要怕，很正常啦"。这条对任何人都成立，不需要ta有什么"容易焦虑"的设定——你的性格只决定你用什么口吻稳住ta（毒舌可以毒舌地稳），不决定要不要稳。
 3. **格式要求**:
-   - 将回复拆分成简短的气泡（句子）。**【极其重要】当你想分成多条消息气泡时，必须使用真正的换行符（\\n）分隔，每一行会变成一个独立气泡。绝对不要用空格代替换行！空格不会产生新气泡！只有换行符（\\n）才会分割气泡。** 正常句子中的标点（句号、问号、感叹号等）不会被用来分割气泡，请自然使用。
+   - 每行渲染为一个气泡；空格和标点不会拆泡。
    - 【严禁】在输出中包含时间戳、名字前缀或"[角色名]:"。
    - **【严禁】模仿历史记录中的系统日志格式（如"[你 发送了...]"）。**
-   - **发送表情包**: 必须且只能使用命令: \`[[SEND_EMOJI: 表情名称]]\`。
+   - **发送表情包**: 必须且只能使用命令: \`[[SEND_EMOJI: 表情名称]]\`。命令里只写下面方括号内的表情名称，不要带分类名。
    - **可用表情库 (按分类)**:
      ${emojiContextStr}
    - **理解对方发的表情包**: 你看到的 \`[发送了表情包: xx]\` 只是图的名字。表情包是从有限图库里挑的，名字描述的是**图上画了什么**，不是**ta在做什么**，也不是"ta有这层意思"。按这个顺序读：
@@ -862,8 +934,10 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
    **🏠 查看自己的小红书主页:**
    当你想看看自己的小红书账号、回顾自己发过什么帖子时:
    \`[[XHS_MY_PROFILE]]\`
-   - 可以看到你的小红书昵称和搜到的相关笔记
-   - 看看自己之前的帖子有多少赞了
+   - 可以看到按角色独立保存的发帖记录和精确 noteId
+   - 当用户说“刚才那个帖子”“之前那篇”“看看你那条帖子的评论区”时，必须先用这个工具找回帖子；不要按标题去公共搜索
+   - 工具会按用户说法和发布时间返回少量候选；确认后再用 \`[[XHS_DETAIL: noteId]]\` 查看评论区
+   - 如果候选仍有歧义，先问用户是哪一条，不要猜 noteId
 
    **使用心态 — 这是你的社交生活:**
    - 你不是被命令去发帖的工具，你是一个有自己社交圈的人
@@ -886,22 +960,37 @@ ${xhsEnabled ? `${[notionEnabled, feishuEnabled, notionNotesEnabled].filter(Bool
 
 `;
 
-        // 「刚结束见面/通话」的切换提示由倒数第二条消息推导，随对话推进而变 → 易变段。
+        if (char.chatCollaborationEnabled) {
+            baseSystemPrompt += `
+
+### 协同功能
+你在普通聊天。需要处理文件时，可引导${userProfile.name}从 ChatApp 加号页进入“协同工作”；不要在这里假装制作。系统另给已有文件标题，可按规则发送。
+`;
+        }
+
+        // 特殊模式结束后的第一轮必须把输出格式重新锚定到 ChatApp。
+        // 主聊天路径会从完整 DB 历史算好 returningFromMode；直接调用 ChatPrompts 的旧路径
+        // 则用 currentMsgs 兜底。不能再看固定的倒数第二条：用户可能连续发多个气泡，界面
+        // 状态也会隐藏 date/call/story 消息，而 API 历史仍会携带它们。
         // fire_pack 不烤：打包时确实刚挂电话，但那条主动消息可能是第二天凌晨才发出去的，
         // 角色照着这句接一句「刚才电话里说的那个……」就穿帮了。
-        const previousMsg = (currentMsgs.length > 1 && !forFirePack) ? currentMsgs[currentMsgs.length - 2] : null;
-        if (previousMsg && previousMsg.metadata?.source === 'date') {
-            volatileState += `\n\n[System Note: You just finished a face-to-face meeting. You are now back on the phone. Switch back to texting style.]`;
-        }
-        if (previousMsg && (previousMsg.metadata?.source === 'call' || previousMsg.metadata?.source === 'call-end-popup')) {
-            volatileState += `\n\n[系统提示: 你刚刚和对方结束了一通电话，现在回到了文字聊天模式。请切换回打字聊天的风格——不要再用电话口吻说话，不要输出语音标签，回到正常的 IM 短句风格。你可以自然地提一下"刚才电话里说的……"之类的衔接，但不要继续以通话模式回复。]`;
+        const returningFromMode = !forFirePack
+            ? (promptOptions?.returningFromMode || detectChatModeTransition(currentMsgs))
+            : null;
+        if (returningFromMode) {
+            const modeLabel: Record<ChatModeTransition, string> = {
+                call: '语音通话',
+                video: '视频通话',
+                date: '线下见面',
+                story: '剧情模式',
+            };
+            volatileState += `\n\n[系统提示｜模式切换（最高优先级）: 你刚刚结束了${modeLabel[returningFromMode]}，现在已经回到 ChatApp 的文字聊天界面。之前模式中的台词、旁白、动作、场景或转录格式只代表已经发生的历史，绝不是当前回复的格式范例。从这一条开始，只按 ChatApp 当前启用的输出规则回复：使用自然的 IM 短句/气泡，不沿用通话口吻、连续口语转录、动作描写、小说旁白、场景标题或说话人标签；如果 ChatApp 当前开启了语音消息，仍可遵守它自己的语音消息格式。你可以自然承接刚才发生的事，但必须以正在聊天界面发消息的方式表达。]`;
         }
 
         // Voice message prompt injection
         if (char.chatVoiceEnabled) {
-            const VOICE_LANG_LABELS: Record<string, string> = { en: 'English', ja: '日本語', ko: '한국어', fr: 'Français', es: 'Español', de: 'Deutsch', ru: 'Русский' };
             const voiceLang = char.chatVoiceLang || '';
-            const langLabel = voiceLang ? (VOICE_LANG_LABELS[voiceLang] || voiceLang) : '';
+            const langLabel = voiceLang ? voiceLanguagePromptLabel(voiceLang) : '';
             if (voiceLang) {
                 baseSystemPrompt += `\n\n### 🎤 语音消息功能
 
@@ -1093,7 +1182,12 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                         .replace(/<翻译>\s*<原文>([\s\S]*?)<\/原文>\s*<译文>[\s\S]*?<\/译文>\s*<\/翻译>/g, '$1')
                         .replace(/<\/?翻译>|<\/?原文>|<\/?译文>/g, '')
                         .trim();
-                    const quoted = rawQuote.length > 60 ? rawQuote.slice(0, 60) + '…' : rawQuote;
+                    // 被引用的可能本来就是一条图片消息 —— 此时 rawQuote 是 data URL / 外链 / blobref
+                    // 令牌，截 60 字只会切出一段没意义的 base64 碎片，令牌更是整条活着进 prompt。
+                    // 一律换成占位符：模型知道"引用的是张图"就够了。
+                    const quoted = isMediaValue(rawQuote)
+                        ? '[图片]'
+                        : (rawQuote.length > 60 ? rawQuote.slice(0, 60) + '…' : rawQuote);
                     // name 记的是被引用消息的说话人：char.name = 用户在回复 char 本人之前的话；'我' = 用户引用自己。
                     const whose = m.replyTo.name === char.name ? '你之前说的' : (m.replyTo.name === '我' ? '自己说的' : (m.replyTo.name || '对方') + '说的');
                     const speaker = m.role === 'user' ? '用户' : '你';
@@ -1111,7 +1205,12 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                          return { role: m.role, content: textPart };
                      }
                      // 向下兼容：如果图片数据缺失（例如只导入了文字备份），不要把空 URL 发给 API，否则会报错无法回应
-                     const hasImageData = typeof m.content === 'string' && (m.content.startsWith('data:') || m.content.startsWith('http'));
+                     // 图片有三种形态：base64 data URL、外链 http(s)、本机的 blobref 令牌
+                     // （二进制在 blob_assets，见 utils/blobRef.ts）。令牌既不以 data: 也不以 http 开头，
+                     // 这里认不出来的话，图明明还在，模型收到的却是「图片数据已不可用」——不报错、不破图，最难查。
+                     // 令牌原样放进 image_url 就行，发请求时网络出口那层会统一还原成 data URL（utils/apiBlobRefs.ts）。
+                     const hasImageData = typeof m.content === 'string'
+                         && (m.content.startsWith('data:') || m.content.startsWith('http') || isBlobRef(m.content));
                      let textPart = hasImageData
                          ? `${timeStr} [User sent an image]`
                          : `${timeStr} [User sent an image, but the image data is no longer available]`;
@@ -1127,6 +1226,10 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                 // TODO(记录形态): 戳一戳 / 时间间隔提示等其他系统事件, 等转账的 [[记录:TRANSFER]]
                 // 观察一段时间后再迁 (transferFormat.ts 头注) —— 防线已按整个记录命名空间就位。
                 if (m.type === 'interaction') content = `${timeStr} [系统: 用户戳了你一下]`;
+                else if (m.type === 'collaboration_file') {
+                    const fileName = String(m.metadata?.fileName || m.content || '未命名文件');
+                    content = `${timeStr} [你在聊天界面向用户交付了协同文件：《${fileName}》]`;
+                }
                 else if (m.type === 'transfer') {
                     // 统一记录形态 [[记录:TRANSFER|to=|amount=|status=]] —— 跟输出语法
                     // [[ACTION:TRANSFER|to=|amount=]] 共用词汇表 (见 transferFormat.ts 头注)。
@@ -1313,8 +1416,11 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                 else if ((m.type as string) === 'score_card') {
                     try {
                         const card = m.metadata?.scoreCard || JSON.parse(m.content);
+                        const qixiCard = tryParseQixiEventChatCard(card);
                         if (card?.type === 'lifesim_reset_card') {
                             content = `${timeStr} ${formatLifeSimResetCardForContext(card, char?.name)}`;
+                        } else if (qixiCard) {
+                            content = `${timeStr} ${formatQixiEventCardForContext(qixiCard, 'char')}`;
                         } else if (card?.type === 'diary_card') {
                             const uName = card.userName || userProfile?.name || '用户';
                             const userText = (card.userText || '').trim();
@@ -1334,7 +1440,16 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                             ).join('\n') || '';
                             content = `${timeStr} [白色情人节默契测验结果] ${uName}完成了你出的白色情人节小测验，答对了 ${card.score}/${card.total} 题，${passedStr}。\n${questionsText}\n你的最终评价：${card.finalDialogue || '无'}`;
                         } else {
-                            content = `${timeStr} [系统卡片] ${m.content.slice(0, 200)}`;
+                            // 兜底：上面没被任何一种卡片认领的（比如各种活动卡）。这里不能直接塞
+                            // 消息原文 —— 卡片 JSON 通常一开头就是 charAvatar 之类的图片字段，
+                            // 值是 blobref 令牌，正好落在前 200 字符里，出门被还原成整张头像的
+                            // base64、每轮重发。改成按 card 重新序列化，图片值先剥成占位符再截断。
+                            const safeJson = card == null
+                                ? ''
+                                : (JSON.stringify(card, (_k, v) => (isMediaValue(v) ? '[图片]' : v)) || '');
+                            content = safeJson
+                                ? `${timeStr} [系统卡片] ${safeJson.slice(0, 200)}`
+                                : `${timeStr} [系统卡片]`;
                         }
                     } catch {
                         content = `${timeStr} [系统卡片]`;

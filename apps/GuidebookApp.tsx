@@ -27,6 +27,7 @@ import {
     DiamondsFour,
     Cards,
 } from '@phosphor-icons/react';
+import TokenImg from '../components/os/TokenImg';
 
 // --- Helper: Generate ID ---
 const genId = () => Math.random().toString(36).slice(2, 10);
@@ -147,7 +148,7 @@ const GameHeader: React.FC<{
                 <ArrowLeft size={14} />
             </button>
             {charAvatar && (
-                <img src={charAvatar} className="w-8 h-8 rounded-full object-cover shadow-md" style={{ boxShadow: '0 0 0 2px rgba(180,165,170,0.4)' }} />
+                <TokenImg value={charAvatar} className="w-8 h-8 rounded-full object-cover shadow-md" style={{ boxShadow: '0 0 0 2px rgba(180,165,170,0.4)' }} />
             )}
             <div className="flex-1 min-w-0">
                 <div className="text-sm font-bold truncate" style={{ color: '#5a4a50' }}>{title}</div>
@@ -432,7 +433,7 @@ const EndCard: React.FC<{
                     <div className="absolute top-2 right-3 text-lg" style={{ color: 'rgba(180,165,170,0.3)' }}><FlowerLotus size={18} /></div>
 
                     {charAvatar ? (
-                        <img src={charAvatar} className="w-16 h-16 rounded-2xl object-cover shadow-lg mx-auto mb-2" style={{ boxShadow: '0 0 0 3px rgba(180,165,170,0.35), 0 4px 12px rgba(0,0,0,0.1)' }} />
+                        <TokenImg value={charAvatar} className="w-16 h-16 rounded-2xl object-cover shadow-lg mx-auto mb-2" style={{ boxShadow: '0 0 0 3px rgba(180,165,170,0.35), 0 4px 12px rgba(0,0,0,0.1)' }} />
                     ) : (
                         <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-white text-2xl font-bold shadow-lg mx-auto mb-2" style={{ background: 'linear-gradient(135deg, #b8909a, #a07880)', boxShadow: '0 0 0 3px rgba(180,165,170,0.35)' }}>
                             {charName[0]}
@@ -548,7 +549,7 @@ const SessionCard: React.FC<{
             <div {...longPressHandlers}>
                 <div className="flex items-center gap-3">
                     {char?.avatar ? (
-                        <img src={char.avatar} className="w-11 h-11 rounded-xl object-cover shadow-sm" style={{ boxShadow: '0 0 0 2px rgba(200,185,190,0.4)' }} />
+                        <TokenImg value={char.avatar} className="w-11 h-11 rounded-xl object-cover shadow-sm" style={{ boxShadow: '0 0 0 2px rgba(200,185,190,0.4)' }} />
                     ) : (
                         <div className="w-11 h-11 rounded-xl flex items-center justify-center text-white font-bold shadow-sm" style={{ background: 'linear-gradient(135deg, #b8909a, #a07880)' }}>
                             {char?.name?.[0] || '?'}
@@ -1115,7 +1116,7 @@ const GuidebookApp: React.FC = () => {
                                     <div className="relative h-[100px] overflow-hidden" style={{ borderRadius: '4px' }}>
                                         {/* Background - avatar as cinematic crop or gradient */}
                                         {c.avatar ? (
-                                            <img src={c.avatar}
+                                            <TokenImg value={c.avatar}
                                                 className="absolute inset-0 w-full h-full object-cover"
                                                 style={{
                                                     objectPosition: isEven ? 'center 20%' : 'center 30%',
@@ -1144,7 +1145,7 @@ const GuidebookApp: React.FC = () => {
                                         <div className={`absolute top-1/2 -translate-y-1/2 ${isEven ? 'right-3' : 'left-3'} z-10`}>
                                             {c.avatar ? (
                                                 <div className="relative">
-                                                    <img src={c.avatar}
+                                                    <TokenImg value={c.avatar}
                                                         className="w-[60px] h-[60px] rounded-full object-cover shadow-lg"
                                                         style={{
                                                             border: '2px solid rgba(255,255,255,0.2)',
@@ -1330,7 +1331,7 @@ const GuidebookApp: React.FC = () => {
                             <div className="relative h-[88px] overflow-hidden" style={{ borderRadius: '16px' }}>
                                 {/* Background - avatar cinematic crop */}
                                 {setupChar.avatar ? (
-                                    <img src={setupChar.avatar}
+                                    <TokenImg value={setupChar.avatar}
                                         className="absolute inset-0 w-full h-full object-cover"
                                         style={{ objectPosition: 'center 25%', filter: 'brightness(0.6) contrast(1.1) saturate(1.3) blur(1px)' }}
                                     />
@@ -1345,7 +1346,7 @@ const GuidebookApp: React.FC = () => {
                                 <div className="absolute inset-0 flex items-center gap-3 px-4">
                                     {/* Portrait */}
                                     {setupChar.avatar ? (
-                                        <img src={setupChar.avatar} className="w-14 h-14 rounded-full object-cover shrink-0 shadow-lg"
+                                        <TokenImg value={setupChar.avatar} className="w-14 h-14 rounded-full object-cover shrink-0 shadow-lg"
                                             style={{ border: '2px solid rgba(255,255,255,0.25)', boxShadow: '0 4px 16px rgba(0,0,0,0.3), 0 0 12px rgba(196,139,139,0.2)' }} />
                                     ) : (
                                         <div className="w-14 h-14 rounded-full flex items-center justify-center text-white/70 text-xl font-bold shrink-0 shadow-lg"

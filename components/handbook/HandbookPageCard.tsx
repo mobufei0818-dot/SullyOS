@@ -18,6 +18,7 @@ import {
 } from './stickers';
 import FragmentCollage from './FragmentCollage';
 import { PencilSimple, Trash, Eye, EyeSlash, ArrowsClockwise, FloppyDisk, X } from '@phosphor-icons/react';
+import TokenImg from '../os/TokenImg';
 
 interface PageCardProps {
     page: HandbookPage;
@@ -101,8 +102,8 @@ const HandbookPageCard: React.FC<PageCardProps> = ({
                         {/* 角色头像作主图（大头贴风）*/}
                         {char && (
                             <div className="flex items-center justify-center py-5 px-4">
-                                <img
-                                    src={char.avatar}
+                                <TokenImg
+                                    value={char.avatar}
                                     alt={char.name}
                                     className="rounded-full object-cover"
                                     style={{

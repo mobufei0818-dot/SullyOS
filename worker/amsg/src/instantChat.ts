@@ -5,7 +5,7 @@
  * 结果走 Web Push 回去。这份模块管三件事：
  *   1. `POST /instant-chat` 这条包装层路由（鉴权 → 内部转发 → 202 → 立刻起一跳）
  *   2. 即时对话那条 fire 用的「时效信息」块（当前时间 / 实时世界 / 排程说明拼一起）
- *   3. 收件兜底 outbox 的推送信封定稿（push 丢了客户端能按 messageId 补收）
+ *   3. 推送的通知策略（前台可见时不弹横幅）
  *
  * 为什么要在包装层做而不是让客户端直接调上游的两个端点：两步有严格的先后和
  * 「前面失败就不能落任务」的语义（云端状态没传上去，到点的 fire 读到的还是上一轮的
@@ -19,16 +19,13 @@
  */
 
 import {
-  AMSG_CHAT_OUTBOX_KEY,
   AMSG_FIRE_PACK_KEY,
   amsgStateNamespace,
-  appendChatOutbox,
   buildUserClockHint,
   formatFireTimeFull,
-  type AmsgChatOutbox,
-  type AmsgChatOutboxEntry,
   type AmsgTzRef,
 } from '../../../utils/amsgFirePack';
+import { TIME_FRAMING_CONVERSATIONAL } from '../../../utils/timeFramingNote';
 
 // ─── 时间参数 ───
 
@@ -84,6 +81,11 @@ export const buildInstantTimelyBlock = (args: {
     ? [
         '【此刻的系统信息·仅你可见】',
         `现在是 ${formatFireTimeFull(args.nowMs, args.tz)}。`,
+        // 报时后面跟那句语境框定，跟前台聊天引的是同一份常量。这一轮是用户刚按下发送、
+        // 正等着回复，所以「对方还在跟你说话」是真的；少了它，深夜的那行钟就够让角色
+        // 每轮都往「快睡吧、明天见」上收——本地那条路修好了、云端没修的话，同一个角色
+        // 在两条路上的分寸会不一样。
+        TIME_FRAMING_CONVERSATIONAL,
         // buildUserClockHint 自带前导换行，没时差时返回空串。
         buildUserClockHint(args.nowMs, args.tz, { tzId: args.userTzId }, args.targetName),
       ].join('\n')
@@ -91,112 +93,89 @@ export const buildInstantTimelyBlock = (args: {
   return [head, ...blocks].join('\n');
 };
 
-// ─── 收件兜底 outbox ───
+// ─── 通知策略 ───
 
 /**
- * 前台可见时别弹系统通知（SW 的 shouldRenderNotification 认这个值）。
+ * 推了就一定弹（SW 的 shouldRenderNotification 认这个值）。
  *
- * 用户正盯着聊天窗口等这条回复，锁屏横幅在这时候弹出来纯属打扰——页面自己会把消息
- * 上屏。窗口不可见（切后台、锁屏、关了标签页）时照弹，不然「发完就自由了」这件事
- * 就没人来叫他。判定在 SW 那边按真实的窗口可见性做，worker 只负责表态。
- *
- * 只给即时对话用：主动消息是「到点找人说话」，前台可见时更该弹。
+ * 订阅是按 `userVisibleOnly: true` 建的，等于跟浏览器约好每条 push 都给用户一次可见
+ * 反馈；收了 push 却不弹是违约，Firefox 按配额把订阅退掉，iOS 过了新订阅那几天宽限期
+ * 一条就吊销，而且两边都是静默发生的——服务端只看得到后续推送返回 410。所以口径只有
+ * 两档：要推就一定弹，不想弹就压根别推（内容落服务端收件箱，等客户端上线补拉）。
+ * 即时对话是用户按下发送、正盯着「正在输入…」等的那一轮，必须推，于是选「一定弹」。
  */
-const NOTIFICATION_WHEN_HIDDEN = 'when-hidden';
+const NOTIFICATION_ALWAYS = 'always';
 
 /**
- * 把定稿的推送载荷补齐成「客户端真正会收到的那一份」。
+ * 静音只在用户看得见页面的那一刻生效（SW 的 resolveNotificationSilent 认这个值）。
  *
- * 库在发之前还会补 messageId / sessionId / timestamp / messageIndex / totalMessages
- * 和四个任务身份字段。其中前三个是「没有才补」，所以这里先按库的同一套规则算好写进去，
- * 库那边就会原样沿用——outbox 里留的那份和真发出去的那份于是逐字一致，客户端补收时
- * 按 messageId 对账不会错位。
+ * 用户正盯着聊天窗口时页面自己会把回复画上屏，横幅再响一声纯属打扰；切后台、锁屏、
+ * 关了标签页的那一刻则必须响，不然没人来叫他。判定得等到 SW 收到这条 push 才做——
+ * worker 在发推那一刻并不知道用户此刻在不在前台，写死 `silent: true` 的结果是切后台
+ * 也不响。
  *
- * 顺带把 notification.show 表态成 when-hidden（见上）。载荷本来就没有 notification 时
- * 不凭空造一个：SW 拿不到 title / body 只能弹一条空白横幅，而「没有 notification」这件事
- * 本身在 SW 那边有按 messageKind 的默认行为，替它做主只会把默认行为弄坏。
+ * 老 SW 不认这个字符串，会按 `Boolean('when-visible')` 算成恒静音，也就是退回这档
+ * 能力上线之前的行为，不会弹错也不会漏弹。
  */
-export const finalizeInstantPush = (
+export const NOTIFICATION_SILENT_WHEN_VISIBLE = 'when-visible';
+
+/**
+ * 通知栏折叠用的 tag：同一个角色永远只留最新那一条。
+ *
+ * 一次回复常常分成好几段推，逐条弹会把通知栏刷满；同 tag 的通知互相覆盖，看到的就只有
+ * 最新一条。即时对话的失败通知也用这个 tag（见 index.ts 的 sendInstantErrorPush）：
+ * 同一个角色的最新状态本来就只该留一条，成功的回复把之前那条「没能生成」盖掉正合适。
+ */
+export const instantNotificationTag = (charId: string) => `amsg-instant-${charId}`;
+
+/**
+ * 给即时对话的推送载荷表态通知策略：一定弹，按角色折叠，前台安静、后台叫人。
+ *
+ * 打扰不靠「不弹」来压，靠另外三个字段：
+ *   - `tag`      同一个角色只在通知栏留最新一条；
+ *   - `silent`   `when-visible`，用户看着页面时不响，切后台就照常响铃震动；
+ *   - `renotify` 只给这一轮的第一段。同 tag 的通知默认是静默替换，上一轮的横幅还
+ *                躺在通知栏没点掉时，新一轮的第一段就会被当成替换而不出声——那正是
+ *                用户会说「有时候响有时候不响」的那种情况。一轮响一声：第一段重新
+ *                提醒，后面几段安静地把内容更新掉。
+ *
+ * 只给即时对话用——主动消息是「到点找人说话」，那条路要响铃叫人，既不折叠也不静音。
+ *
+ * 载荷本来就没有 notification 时不凭空造一个：SW 拿不到 title / body 只能弹一条空白
+ * 横幅，而「没有 notification」这件事本身在 SW 那边有按 messageKind 的默认行为，
+ * 替它做主只会把默认行为弄坏。
+ *
+ * 信封的其余部分（messageId / sessionId / 时间戳 / 段号 / 任务身份）一律交给库去补——
+ * 客户端补收现在读的是服务端账本，账本里的那份就是库发出去的那份，没有第二处需要
+ * 逐字对齐的副本了。
+ */
+export const applyInstantNotificationPolicy = (
   payload: Record<string, unknown>,
-  index: number,
-  total: number,
-  ids: {
-    /** 任务行 id（字符串化）；没有时用随机串，跟库的兜底同语义。 */
-    taskRowId: string | null;
-    taskUuid: string | null;
-    occurrenceMs: number;
-    nowMs: number;
-    randomId: string;
-  },
+  charId?: string | null,
+  isFirstSegment = false,
 ): Record<string, unknown> => {
-  const suffix = `@${ids.occurrenceMs}`;
-  const messageIdBase = ids.taskRowId != null
-    ? `msg_task_${ids.taskRowId}${suffix}`
-    : `msg_${ids.randomId}`;
-  const sessionId = ids.taskRowId != null
-    ? `sess_task_${ids.taskRowId}${suffix}`
-    : `sess_${ids.randomId}`;
   const notification = payload.notification;
   const hasNotification = !!notification && typeof notification === 'object' && !Array.isArray(notification);
+  if (!hasNotification) return payload;
+  const meta = payload.metadata;
+  const metaCharId = meta && typeof meta === 'object' && !Array.isArray(meta)
+    ? (meta as Record<string, unknown>).charId
+    : undefined;
+  const target = charId || (typeof metaCharId === 'string' ? metaCharId : '');
   return {
     ...payload,
-    ...(hasNotification
-      ? { notification: { ...(notification as Record<string, unknown>), show: NOTIFICATION_WHEN_HIDDEN } }
-      : {}),
-    messageId: `${messageIdBase}_hook_${index}`,
-    sessionId,
-    timestamp: new Date(ids.nowMs).toISOString(),
-    messageIndex: index + 1,
-    totalMessages: total,
-    // 库的 stampTaskIdentity 会原样覆写这四个，写成一样的值只是让 outbox 那份也带上。
-    // 任务行 id 在 D1 里是整数，转不出数字就照实报 null，别塞一个 NaN 出去。
-    taskId: ids.taskRowId != null && Number.isFinite(Number(ids.taskRowId))
-      ? Number(ids.taskRowId)
-      : null,
-    taskUuid: ids.taskUuid,
-    recurrenceType: 'none',
-    occurrenceMs: ids.occurrenceMs,
+    notification: {
+      ...(notification as Record<string, unknown>),
+      show: NOTIFICATION_ALWAYS,
+      silent: NOTIFICATION_SILENT_WHEN_VISIBLE,
+      // 认不出是哪个角色时就不折叠：通知栏里多几条只是吵，两个角色共用一个 tag 会
+      // 互相顶掉，那是真的丢消息。renotify 跟着 tag 走——没有 tag 时带上它，
+      // showNotification 会直接抛 TypeError。
+      ...(target
+        ? { tag: instantNotificationTag(target), ...(isFirstSegment ? { renotify: true } : {}) }
+        : {}),
+    },
   };
-};
-
-/** 定稿后的载荷 → outbox 条目（messageId / sessionId 已经在载荷上了）。 */
-export const toOutboxEntries = (
-  payloads: Array<Record<string, unknown>>,
-  nowMs: number,
-): AmsgChatOutboxEntry[] =>
-  payloads.map((payload) => ({
-    messageId: String(payload.messageId ?? ''),
-    sessionId: String(payload.sessionId ?? ''),
-    at: nowMs,
-    payload,
-  }));
-
-/**
- * 把这一轮的产物写进角色的 outbox。**不论 push 发得出去发不出去都写**——
- * push 静默丢失正是它要兜的那件事。
- *
- * best-effort：写不进去不能连累这次发送，只是丢了兜底能力，吼一声。
- */
-export const writeChatOutbox = async (
-  writeState: ((
-    namespace: string,
-    entries: Array<{ key: string; value: string | null; updatedAt?: number }>,
-  ) => Promise<unknown>) | undefined,
-  charId: string,
-  current: AmsgChatOutbox | null,
-  entries: AmsgChatOutboxEntry[],
-): Promise<AmsgChatOutbox | null> => {
-  if (typeof writeState !== 'function' || entries.length === 0) return current;
-  const next = appendChatOutbox(current, entries);
-  try {
-    await writeState(amsgStateNamespace(charId), [
-      { key: AMSG_CHAT_OUTBOX_KEY, value: JSON.stringify(next) },
-    ]);
-    return next;
-  } catch (error) {
-    console.warn('[amsg:instant-chat] outbox 写入失败（这次照常发送，但推送丢了客户端补不回来）', error);
-    return current;
-  }
 };
 
 // ─── POST /instant-chat ───
@@ -348,6 +327,34 @@ const STATE_FORWARD_BACKOFF_MS = [0, 400, 1200];
 
 const sleep = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
+/** gzip 流的头两个字节（RFC 1952）。压没压过看这个，不看那个头。 */
+const GZIP_MAGIC = [0x1f, 0x8b];
+
+/**
+ * 把请求正文读成字符串，`Content-Encoding: gzip` 的在这一步还原。
+ *
+ * 跟上游 `readRequestBody` 认同一个头（客户端只有一个请求出口，两边端点得收同一种
+ * 东西），但这份是自己写的：上游那个函数住在 `@rei-standard/amsg-server` 包根，而包根
+ * 顶层 import 了 Node 的 `crypto`，这个 worker 是明确不开 `nodejs_compat` 的。
+ *
+ * 判据是**魔数不是头**。`Content-Encoding` 是标准头，链路上的边缘节点会替你把请求体
+ * 解开却把头留着（SullyOS 在 instant-push 那条路上实测过这件事，那边索性换了个自定义
+ * 头来躲开）——只看头的话，这种时候会拿明文去喂解压器，报出来是一句让人找不着北的
+ * 「请求体不是合法的 JSON」。看魔数则三种情形都对：没解过的解开、替我们解过的原样读、
+ * 压根没压的原样读。
+ */
+const readMaybeGzippedBody = async (request: Request): Promise<string> => {
+  if ((request.headers.get('content-encoding') ?? '').toLowerCase() !== 'gzip') {
+    return request.text();
+  }
+  const raw = new Uint8Array(await request.arrayBuffer());
+  if (raw.length < 2 || raw[0] !== GZIP_MAGIC[0] || raw[1] !== GZIP_MAGIC[1]) {
+    return new TextDecoder().decode(raw);
+  }
+  const stream = new Response(raw).body!.pipeThrough(new DecompressionStream('gzip'));
+  return new Response(stream).text();
+};
+
 /** 客户端预加密的信封形状（上游 parseEncryptedBody 认的就是这三个字段）。 */
 const isEncryptedEnvelope = (value: unknown): boolean => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -396,9 +403,12 @@ export const handleInstantChat = async (args: {
   if (!UUID_V4_RE.test(userId)) return fail(400, 'INVALID_USER_ID_FORMAT', 'X-User-Id 必须是 UUID v4 格式');
 
   // ── 外壳是明文 JSON，里头两个信封是客户端加密好的，包装层只搬不看。
+  //    body 超阈值时客户端会先 gzip 再发（这条路上的正文是整轮聊天，最大的一份），
+  //    所以读之前先过一道解压。
   let body: Record<string, unknown>;
   try {
-    const parsed = await request.json();
+    const text = await readMaybeGzippedBody(request);
+    const parsed = JSON.parse(text);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
     body = parsed as Record<string, unknown>;
   } catch {

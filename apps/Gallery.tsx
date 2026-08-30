@@ -5,7 +5,16 @@ import { DB } from '../utils/db';
 import { GalleryImage, CharacterProfile } from '../types';
 import { safeResponseJson } from '../utils/safeApi';
 import ConfirmDialog from '../components/os/ConfirmDialog';
+import TokenImg from '../components/os/TokenImg';
 import { trackEvent } from '../utils/analytics';
+import { Star } from '@phosphor-icons/react';
+import {
+    CONTENT_FAVORITES_CHANGED_EVENT,
+    getContentFavoriteById,
+    makeImageContentFavoriteId,
+    removeContentFavoriteById,
+    saveGalleryImageContentFavorite,
+} from '../utils/contentFavorites';
 
 const Gallery: React.FC = () => {
     const { closeApp, characters, apiConfig, addToast } = useOS();
@@ -15,6 +24,7 @@ const Gallery: React.FC = () => {
     const [selectedImage, setSelectedImage] = useState<GalleryImage | null>(null);
     const [isReviewing, setIsReviewing] = useState(false);
     const [showChatContext, setShowChatContext] = useState(false);
+    const [imageFavorited, setImageFavorited] = useState(false);
 
     // Long-press delete state
     const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -53,6 +63,42 @@ const Gallery: React.FC = () => {
     const handleImageClick = (img: GalleryImage) => {
         setSelectedImage(img);
         setView('detail');
+    };
+
+    const refreshSelectedFavorite = useCallback(async () => {
+        if (!selectedImage) {
+            setImageFavorited(false);
+            return;
+        }
+        const favorite = await getContentFavoriteById(makeImageContentFavoriteId(selectedImage.url)).catch(() => null);
+        setImageFavorited(!!favorite);
+    }, [selectedImage?.id]);
+
+    useEffect(() => {
+        void refreshSelectedFavorite();
+        window.addEventListener(CONTENT_FAVORITES_CHANGED_EVENT, refreshSelectedFavorite);
+        return () => window.removeEventListener(CONTENT_FAVORITES_CHANGED_EVENT, refreshSelectedFavorite);
+    }, [refreshSelectedFavorite]);
+
+    const handleToggleImageFavorite = async () => {
+        if (!selectedImage) return;
+        const favoriteId = makeImageContentFavoriteId(selectedImage.url);
+        try {
+            if (imageFavorited) {
+                await removeContentFavoriteById(favoriteId);
+                setImageFavorited(false);
+                addToast('已取消收藏图片', 'info');
+                return;
+            }
+            const charName = characters.find(character => character.id === selectedImage.charId)?.name || '未知角色';
+            await saveGalleryImageContentFavorite(selectedImage, charName);
+            setImageFavorited(true);
+            addToast('已收藏图片（仅保存引用）', 'success');
+            trackEvent('收藏相册图片');
+        } catch (error) {
+            console.warn('[Gallery] favorite image failed', error);
+            addToast('收藏失败，请稍后重试', 'error');
+        }
     };
 
     const handleBack = () => {
@@ -264,8 +310,8 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                             </div>
                             {/* Image layer - hidden until loaded to prevent blank rectangles on mobile */}
                             {status !== 'error' && (
-                                <img
-                                    src={char.avatar}
+                                <TokenImg
+                                    value={char.avatar}
                                     alt={char.name}
                                     className={`absolute inset-0 w-full h-full object-cover z-10 transition-opacity duration-300 group-hover:scale-105 ${status === 'loaded' ? 'opacity-90 group-hover:opacity-100' : 'opacity-0'}`}
                                     loading="lazy"
@@ -298,7 +344,9 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                 <div className="grid grid-cols-3 gap-1">
                     {images.map(img => (
                         <div key={img.id} onClick={() => handleImageClick(img)} className="aspect-square bg-slate-100 relative cursor-pointer overflow-hidden rounded-sm">
-                            <img src={img.url} className="w-full h-full object-cover hover:scale-105 transition-transform duration-300" loading="lazy" />
+                            {/* 相册图存的是 blobref 令牌（见 utils/blobRef.ts），TokenImg 会解析成 objectURL；
+                                旧的 base64 / http 图原样透传，两种都显示得出来 */}
+                            <TokenImg value={img.url} className="w-full h-full object-cover hover:scale-105 transition-transform duration-300" loading="lazy" />
                             {img.review && <div className="absolute top-1.5 right-1.5 w-2 h-2 bg-primary rounded-full ring-2 ring-white shadow-sm"></div>}
                             {img.savedDate && <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/50 to-transparent px-1.5 pb-1 pt-3"><span className="text-[8px] text-white/80 font-mono">{img.savedDate}</span></div>}
                         </div>
@@ -315,9 +363,14 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                 <button onClick={() => setView('grid')} className="text-white bg-black/40 backdrop-blur-md p-2 rounded-full pointer-events-auto active:scale-95 transition-transform hover:bg-black/60 border border-white/10">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                 </button>
-                <button onClick={handleDeleteImage} className="text-white bg-black/40 backdrop-blur-md p-2 rounded-full pointer-events-auto active:scale-95 transition-transform hover:bg-red-600/60 border border-white/10">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
-                </button>
+                <div className="flex items-center gap-2 pointer-events-auto">
+                    <button onClick={() => void handleToggleImageFavorite()} className={`text-white backdrop-blur-md p-2 rounded-full active:scale-95 transition-transform border border-white/10 ${imageFavorited ? 'bg-amber-500/80' : 'bg-black/40 hover:bg-black/60'}`} aria-label={imageFavorited ? '取消收藏图片' : '收藏图片'}>
+                        <Star size={20} weight={imageFavorited ? 'fill' : 'regular'} />
+                    </button>
+                    <button onClick={handleDeleteImage} className="text-white bg-black/40 backdrop-blur-md p-2 rounded-full active:scale-95 transition-transform hover:bg-red-600/60 border border-white/10">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
+                    </button>
+                </div>
             </div>
 
             {/* Date badge */}
@@ -329,8 +382,8 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
 
             {/* Main Image */}
             <div className="flex-1 min-h-0 w-full flex items-center justify-center bg-black relative overflow-hidden">
-                <img
-                    src={selectedImage.url}
+                <TokenImg
+                    value={selectedImage.url}
                     className="max-w-full max-h-full object-contain"
                     alt="Detail"
                 />
@@ -341,7 +394,7 @@ CRITICAL: Stay in character. If there's conversation context, your comment shoul
                 {selectedImage.review ? (
                     <div className="p-5 animate-slide-up">
                         <div className="flex items-start gap-3 mb-3">
-                            <img src={characters.find(c => c.id === activeCharId)?.avatar} className="w-9 h-9 rounded-full border border-white/20 object-cover shadow-sm" />
+                            <TokenImg value={characters.find(c => c.id === activeCharId)?.avatar} className="w-9 h-9 rounded-full border border-white/20 object-cover shadow-sm" />
                             <div className="flex-1">
                                 <div className="text-xs font-bold text-white/50 mb-1.5 uppercase tracking-wide">{characters.find(c => c.id === activeCharId)?.name} 的点评</div>
                                 <p className="text-[15px] text-white/90 leading-relaxed font-light select-text">"{selectedImage.review}"</p>

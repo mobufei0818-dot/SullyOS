@@ -9,6 +9,8 @@
  * 调试面板骗人比没有更糟。
  */
 
+import { APP_VERSION, BUILD_LABEL } from './buildInfo';
+
 const TRACE_LOG_KEY = 'instant_push_trace_log_v1';
 const TRACE_LOG_LIMIT = 200;
 
@@ -38,4 +40,32 @@ export const readRecentInstantTraces = (limit: number): InstantTraceEntry[] => {
   } catch {
     return [];
   }
+};
+
+/**
+ * 缓冲里的**全部**条目（最新在最前），给「导出 trace」用。
+ *
+ * 面板上只显示得下最近几条，而排障要的恰恰是「一小时前那会儿发生了什么」——这两百条
+ * 一直存着，缺的只是把它们拿出来的口子。远端用户手上没有 DevTools（iOS 装成 PWA 更是
+ * 一点辙都没有），这是唯一能把现场交出来的途径。
+ */
+export const readAllInstantTraces = (): InstantTraceEntry[] =>
+  readRecentInstantTraces(TRACE_LOG_LIMIT);
+
+/**
+ * 导出成一段能直接贴给开发者的文本。一条都没有时返回空串，调用方据此不做动作。
+ *
+ * 带上构建版本：同一段 trace 在新旧两个构建上的含义可能完全不同（事件名会加、会改），
+ * 不知道是哪个构建打的就只能靠猜，而这份东西存在的意义就是不用猜。
+ */
+export const formatInstantTraceLog = (): string => {
+  const entries = readAllInstantTraces();
+  if (entries.length === 0) return '';
+  return JSON.stringify({
+    exportedAt: new Date().toISOString(),
+    appVersion: APP_VERSION,
+    build: BUILD_LABEL,
+    count: entries.length,
+    entries,
+  }, null, 2);
 };

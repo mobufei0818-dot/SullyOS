@@ -21,6 +21,8 @@ import { DB } from '../../utils/db';
 import { C, Sparkle, MizuHeader, BokehBg, MiniPlayer } from './MusicUI';
 import { ArrowLeft, MusicNote, Heart, Plus, MagnifyingGlass, Trash, Check } from '@phosphor-icons/react';
 import { getDailyScheduleForChar } from '../../utils/dailySchedule';
+import TokenImg from '../../components/os/TokenImg';
+import { isBlobRef } from '../../utils/blobRef';
 import { useLocalDateKey } from '../../hooks/useLocalDateKey';
 import { resolveCharTimeZone } from '../../utils/timezone';
 import { trackEvent } from '../../utils/analytics';
@@ -352,8 +354,9 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
           style={{ boxShadow: `0 10px 40px ${C.glow}15` }}>
           <div className="flex items-center gap-3">
             <div className="relative shrink-0">
-              {char.avatar && char.avatar.startsWith('data:') || char.avatar?.startsWith('http') ? (
-                <img src={char.avatar} alt="" className="w-16 h-16 rounded-2xl object-cover"
+              {/* 头像可能是 base64 / 图床直链 / blobref 令牌，三种都算图；其余当 emoji 或首字兜底。 */}
+              {char.avatar && (char.avatar.startsWith('data:') || char.avatar.startsWith('http') || isBlobRef(char.avatar)) ? (
+                <TokenImg value={char.avatar} alt="" className="w-16 h-16 rounded-2xl object-cover"
                   style={{ border: `2px solid ${C.glow}60`, boxShadow: `0 4px 20px ${C.glow}30` }} />
               ) : (
                 <div className="w-16 h-16 rounded-2xl flex items-center justify-center text-2xl"
@@ -422,7 +425,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
             </div>
             <div className="flex items-center gap-3">
               {profile.currentListening.albumPic ? (
-                <img src={profile.currentListening.albumPic} className="w-12 h-12 rounded-xl object-cover" alt="" />
+                <TokenImg value={profile.currentListening.albumPic} className="w-12 h-12 rounded-xl object-cover" alt="" />
               ) : (
                 <div className="w-12 h-12 rounded-xl flex items-center justify-center"
                   style={{ background: gradientFor('gradient-03'), color: 'white' }}>
@@ -483,7 +486,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
                       <div className="w-12 h-12 rounded-xl shrink-0 flex items-center justify-center overflow-hidden"
                         style={{ background: gradientFor(pl.coverStyle) }}>
                         {pl.songs[0]?.albumPic ? (
-                          <img src={pl.songs[0].albumPic} alt="" className="w-full h-full object-cover" />
+                          <TokenImg value={pl.songs[0].albumPic} alt="" className="w-full h-full object-cover" />
                         ) : (
                           <MusicNote size={20} weight="bold" color="white" />
                         )}
@@ -615,7 +618,7 @@ const CharVisitPage: React.FC<Props> = ({ charId, onBack, onOpenPlayer }) => {
               {profile!.recentPlays.slice(0, 10).map((r, i) => (
                 <div key={`${r.song.id}-${r.at}-${i}`} className="flex items-center gap-2 p-2 rounded-lg">
                   {r.song.albumPic ? (
-                    <img src={r.song.albumPic} alt="" className="w-9 h-9 rounded-md object-cover" />
+                    <TokenImg value={r.song.albumPic} alt="" className="w-9 h-9 rounded-md object-cover" />
                   ) : (
                     <div className="w-9 h-9 rounded-md flex items-center justify-center"
                       style={{ background: gradientFor('gradient-02') }}>

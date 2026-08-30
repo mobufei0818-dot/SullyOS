@@ -10,6 +10,8 @@
 
 import React, { useEffect, useState, useRef, useMemo } from 'react';
 import type { DiveDialogue } from './memoryDiveTypes';
+import { isImageValue } from '../../utils/blobRef';
+import TokenImg from '../../components/os/TokenImg';
 
 interface Props {
   current: DiveDialogue | null;
@@ -135,7 +137,7 @@ const MemoryDiveDialogue: React.FC<Props> = ({
     onAdvance();
   };
 
-  const isEmojiAvatar = !!charAvatar && !charAvatar.startsWith('http') && !charAvatar.startsWith('data:') && !charAvatar.startsWith('/');
+  const isEmojiAvatar = !!charAvatar && !isImageValue(charAvatar);
   const isImageAvatar = !!charAvatar && !isEmojiAvatar;
 
   const advanceGlyph =
@@ -227,7 +229,7 @@ const AvatarFace: React.FC<{
     style={{ imageRendering: 'pixelated' as any }}
   >
     {isImage && (
-      <img src={src} className="w-full h-full object-cover"
+      <TokenImg value={src} className="w-full h-full object-cover"
         style={{ imageRendering: 'pixelated' as any }} draggable={false} alt="" />
     )}
     {isEmoji && <span className="text-3xl">{src}</span>}

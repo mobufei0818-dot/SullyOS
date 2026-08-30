@@ -18,6 +18,25 @@ export interface VRApiCall {
     ok: boolean;
     ms: number;
     error?: string;
+    /** 角色 id。角色被删掉后名字就没了，靠它还能认出是谁的调度在动。 */
+    charId?: string;
+    /**
+     * 这条记的是什么。省略 = 一次真实的模型调用。
+     *   - `skipped`：调度到点了，但这一轮没走到模型（角色没接入、角色已删）
+     *   - `throttled`：来得太密，被最小间隔闸拦下。出现这一行就说明有东西在催调度
+     *   - `tripped`：连续失败攒够，自主登入被停掉
+     */
+    kind?: 'skipped' | 'throttled' | 'tripped';
+    /** kind 非空时的一句话说明，直接显示给用户。 */
+    note?: string;
+    /**
+     * 发起这次调用的**那一刻**读到的接入状态。
+     *
+     * 「界面上明明全关了，调用记录还在涨」这类反馈，光看请求本身分不清是谁的锅：
+     * 是这一轮绕过了接入判断，还是界面和实际跑的是两份数据。把当时读到的值一起记下来，
+     * 一眼就能分开。
+     */
+    charEnabled?: boolean;
 }
 
 // 旧版本曾把数据放在 localStorage，这里做一次性迁移到 IndexedDB。

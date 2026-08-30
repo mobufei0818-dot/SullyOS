@@ -10,7 +10,7 @@
  * 5. 返回完整的活动记录
  */
 
-import { CharacterProfile, UserProfile, XhsActivityRecord, XhsFreeRoamSession, APIConfig, RealtimeConfig } from '../types';
+import { CharacterProfile, UserProfile, XhsActivityRecord, XhsFreeRoamSession, XhsOwnedPost, APIConfig, RealtimeConfig } from '../types';
 import { ContextBuilder } from './context';
 import { nowInTimeZone, resolveCharTimeZone } from './timezone';
 import {
@@ -21,6 +21,12 @@ import {
     normalizeXhsLiteDetail,
 } from './xhsMcpClient';
 import { DB } from './db';
+import {
+    collectOwnedPostsFromActivities,
+    extractPublishedNoteId,
+    mergeOwnedNotes,
+    ownedPostToNote,
+} from './xhsFreeRoamOwnership';
 
 // ==================== Types ====================
 
@@ -216,6 +222,7 @@ const buildDetailReactionPrompt = (
     noteContent: string,
     comments: any[],
     commentsUnavailable = false,
+    canInteract = false,
 ): string => {
     const commentsList = comments.slice(0, 15).map((c: any, i: number) => {
         const commentId = c.commentId || c.comment_id || c.id || '';
@@ -237,8 +244,9 @@ ${comments.length > 0
 
 你怎么看这条帖子和评论区？
 
-⚠️ 重要：如果这是**你自己发的帖子**，你可以回复评论区的人、或留个新评论。
-如果这是**别人的帖子**，只看不评论——在陌生人帖子下留AI评论会打扰真实用户。
+${canInteract
+        ? '✅ 系统已通过唯一 note_id 确认：这是你自己发的帖子。你可以回复评论区的人。'
+        : '⛔ 系统无法确认这是你自己的帖子。只看不评论，不要填写 wantToReply 或 wantToComment。'}
 
 用JSON回答:
 \`\`\`json
@@ -249,7 +257,9 @@ ${comments.length > 0
 }
 \`\`\`
 
-如果是别人的帖子，wantToReply 和 wantToComment 都不要填。只有自己的帖子才可以互动。`;
+${canInteract
+        ? '只回复上方真实评论区里存在的 commentId；不要编造 commentId。'
+        : 'wantToReply 和 wantToComment 都不要填。'} `;
 };
 
 const buildProfileReactionPrompt = (profileInfo: string, notes: any[]): string => {
@@ -309,6 +319,7 @@ const handleViewDetail = async (
     char: CharacterProfile,
     session: XhsFreeRoamSession,
     callbacks: FreeRoamCallbacks,
+    canInteract: boolean,
 ): Promise<void> => {
     callbacks.onStatus(`${char.name}在查看帖子「${noteTitle}」的详情...`);
 
@@ -354,7 +365,7 @@ const handleViewDetail = async (
     const reactionRaw = await callLlm(
         apiConfig,
         systemPrompt,
-        buildDetailReactionPrompt(noteTitle, noteContent, comments, commentsUnavailable),
+        buildDetailReactionPrompt(noteTitle, noteContent, comments, commentsUnavailable, canInteract),
     );
     const reaction = parseJson<LlmDetailReaction>(reactionRaw);
 
@@ -384,7 +395,11 @@ const handleViewDetail = async (
     callbacks.onActivity(detailRecord);
 
     // If character wants to reply to a comment
-    if (reaction?.wantToReply?.commentId && reaction.wantToReply.reply) {
+    const requestedReplyCommentId = reaction?.wantToReply?.commentId;
+    const replyTargetExists = !!requestedReplyCommentId && comments.some((comment: any) =>
+        (comment.commentId || comment.comment_id || comment.id) === requestedReplyCommentId
+    );
+    if (canInteract && replyTargetExists && reaction?.wantToReply?.reply) {
         // XHS 反爬: get-feed-detail 刚用过 xsec_token 打开笔记页，
         // 紧接着 post-comment 再次打开同一页面会被临时封锁("笔记不可访问")。
         // 等几秒让 xsec_token 冷却，避免触发反爬。
@@ -403,7 +418,7 @@ const handleViewDetail = async (
             timestamp: Date.now(),
             actionType: 'comment',
             content: {
-                commentTarget: { noteId, title: noteTitle },
+                commentTarget: { noteId, title: noteTitle, commentId: reaction.wantToReply.commentId },
                 commentText: `回复${reaction.wantToReply.authorName}: ${reaction.wantToReply.reply}`,
             },
             thinking: `想回复${reaction.wantToReply.authorName}的评论`,
@@ -415,7 +430,7 @@ const handleViewDetail = async (
     }
 
     // If character wants to leave a new comment on the note
-    if (reaction?.wantToComment?.comment) {
+    if (canInteract && reaction?.wantToComment?.comment) {
         // 同上: 避免 xsec_token 重复访问触发反爬
         callbacks.onStatus(`${char.name}在想怎么评论...`);
         await new Promise(r => setTimeout(r, 5000));
@@ -529,6 +544,26 @@ export const XhsFreeRoamEngine = {
                     images: images.length > 0 ? images : undefined,
                     tags: decision.tags,
                 });
+                const publishedNoteId = postResult.success ? extractPublishedNoteId(postResult) : '';
+                if (publishedNoteId) {
+                    const now = Date.now();
+                    const ownedPost: XhsOwnedPost = {
+                        id: `${char.id}:${publishedNoteId}`,
+                        characterId: char.id,
+                        noteId: publishedNoteId,
+                        title: decision.title || '无题',
+                        body: decision.content || '',
+                        tags: decision.tags,
+                        publishedAt: now,
+                        updatedAt: now,
+                    };
+                    try {
+                        // 立即保存，避免后续 LLM/日志步骤失败时丢失已经发布成功的帖子归属。
+                        await DB.saveXhsOwnedPost(ownedPost);
+                    } catch (error) {
+                        console.warn('[FreeRoam] 保存角色小红书主页失败:', error);
+                    }
+                }
 
                 const postRecord: XhsActivityRecord = {
                     id: `xa_${Date.now()}`,
@@ -536,6 +571,7 @@ export const XhsFreeRoamEngine = {
                     timestamp: Date.now(),
                     actionType: 'post',
                     content: {
+                        noteId: publishedNoteId || undefined,
                         title: decision.title,
                         body: decision.content,
                         tags: decision.tags,
@@ -613,51 +649,75 @@ export const XhsFreeRoamEngine = {
                             reaction.wantToViewDetail.noteId,
                             reaction.wantToViewDetail.title || '',
                             notes, char, session, callbacks,
+                            false,
                         );
                     }
                 }
             }
             else if (decision.action === 'check_profile') {
-                // 查看自己的主页
-                // 方法1: getUserProfile（Bridge 已用 CDP 直连，不需要 xsec_token）
-                // 方法2: 降级到搜索昵称
+                // 角色伪主页以独立的 owned-posts 表为准；真实账号主页只刷新已归属帖子的互动数据。
+                // 同一个真实账号可以被多个角色共用，绝不能把账号下全部笔记自动认领给当前角色。
                 callbacks.onStatus(`${char.name}在查看自己的主页...`);
                 const loggedInUserId = realtimeConfig.xhsMcpConfig?.loggedInUserId;
                 const userXsecToken = realtimeConfig.xhsMcpConfig?.userXsecToken;
-                let rawNotes: any[] = [];
-                let profileSuccess = false;
-                let profileError = '';
+                const allActivities = await DB.getXhsActivities(char.id);
+                let ownedPosts = await DB.getXhsOwnedPosts(char.id);
 
-                if (loggedInUserId) {
+                // v71 首次运行时，把旧活动里已记录过 note_id 的帖子迁移进独立主页。
+                const knownPostIds = new Set(ownedPosts.map(post => post.noteId));
+                const migratedPosts = collectOwnedPostsFromActivities(allActivities)
+                    .filter(post => !knownPostIds.has(post.noteId));
+                for (const post of migratedPosts) await DB.saveXhsOwnedPost(post);
+                if (migratedPosts.length > 0) {
+                    ownedPosts = [...ownedPosts, ...migratedPosts]
+                        .sort((a, b) => b.publishedAt - a.publishedAt);
+                }
+
+                let ownedNotes: any[] = ownedPosts.map(post => ownedPostToNote(post, char.name));
+                let profileRefreshError = '';
+
+                if (loggedInUserId && ownedNotes.length > 0) {
                     console.log(`[FreeRoam] check_profile: 用 getUserProfile(${loggedInUserId})...`);
                     try {
                         const profileResult = await XhsMcpClient.getUserProfile(mcpUrl, loggedInUserId, userXsecToken);
                         if (profileResult.success && profileResult.data) {
-                            rawNotes = extractNotesFromMcpData(profileResult.data);
-                            console.log(`[FreeRoam] check_profile: getUserProfile 提取到 ${rawNotes.length} 条笔记`);
-                            if (rawNotes.length > 0) profileSuccess = true;
+                            const remoteNotes = extractNotesFromMcpData(profileResult.data).map(normalizeNote);
+                            const notesStatus = profileResult.data?.notes_status || profileResult.data?.data?.notes_status;
+                            console.log(`[FreeRoam] check_profile: getUserProfile 提取到 ${remoteNotes.length} 条笔记`);
+                            if (notesStatus === 'unavailable') {
+                                profileRefreshError = profileResult.data?.notes_error || profileResult.data?.data?.notes_error || '';
+                            } else {
+                                // 只更新当前角色已经拥有的 note_id，忽略共享账号下其他角色的帖子。
+                                ownedNotes = mergeOwnedNotes(ownedNotes, remoteNotes, false);
+                                const ownedPostById = new Map(ownedPosts.map(post => [post.noteId, post]));
+                                await Promise.all(ownedNotes.map(async note => {
+                                    const current = ownedPostById.get(note.noteId);
+                                    if (!current) return;
+                                    await DB.saveXhsOwnedPost({
+                                        ...current,
+                                        title: note.title || current.title,
+                                        body: note.desc || current.body,
+                                        xsecToken: note.xsecToken || current.xsecToken,
+                                        likes: note.likes,
+                                        collects: note.collects,
+                                        commentCount: note.commentCount,
+                                        shareCount: note.shareCount,
+                                        updatedAt: Date.now(),
+                                    });
+                                }));
+                            }
                         }
-                        if (!profileResult.success) profileError = profileResult.error || '';
+                        if (!profileResult.success) profileRefreshError = profileResult.error || '';
                     } catch (e: any) {
                         console.warn(`[FreeRoam] check_profile: getUserProfile 失败:`, e.message);
-                        profileError = e.message;
+                        profileRefreshError = e.message;
                     }
                 }
 
-                // 降级: getUserProfile 没拿到数据时用搜索
-                if (rawNotes.length === 0) {
-                    console.log(`[FreeRoam] check_profile: 降级到搜索「${char.name}」...`);
-                    callbacks.onStatus(`${char.name}在搜索自己的帖子...`);
-                    const searchResult = await XhsMcpClient.search(mcpUrl, char.name);
-                    if (searchResult.success) {
-                        rawNotes = extractNotesFromMcpData(searchResult.data);
-                        profileSuccess = true;
-                    } else {
-                        profileError = searchResult.error || '搜索失败';
-                    }
-                }
-
-                const notes = rawNotes.map(normalizeNote);
+                const notes = ownedNotes.map(normalizeNote);
+                const trustedOwnedNoteIds = new Set(
+                    ownedNotes.map(note => normalizeNote(note).noteId).filter(Boolean)
+                );
 
                 const profileRecord: XhsActivityRecord = {
                     id: `xa_${Date.now()}`,
@@ -669,17 +729,18 @@ export const XhsFreeRoamEngine = {
                         notesViewed: notes.slice(0, 8),
                     },
                     thinking: decision.thinking,
-                    result: profileSuccess ? 'success' : 'failed',
-                    resultMessage: profileSuccess ? `查看主页，找到 ${notes.length} 条帖子` : (profileError || '查看主页失败'),
+                    result: 'success',
+                    resultMessage: `查看角色主页，找到 ${notes.length} 条帖子${profileRefreshError ? '（真实账号互动数据刷新失败，已使用本地记录）' : ''}`,
                 };
                 session.activities.push(profileRecord);
                 callbacks.onActivity(profileRecord);
 
                 // Let character react if we found notes
                 if (notes.length > 0) {
-                    callbacks.onStatus(`${char.name}在看搜索结果...`);
+                    callbacks.onStatus(`${char.name}在看自己的帖子...`);
                     const reactionRaw = await callLlm(apiConfig, systemPrompt, buildProfileReactionPrompt(
-                        `通过搜索「${char.name}」查看自己的帖子`, notes
+                        '这是按角色独立保存的个人主页；真实小红书账号可能与其他角色共用',
+                        notes
                     ));
                     const reaction = parseJson<LlmReaction & { wantToViewDetail?: { noteId: string; title: string } }>(reactionRaw);
                     if (reaction?.thinking) {
@@ -692,6 +753,7 @@ export const XhsFreeRoamEngine = {
                             reaction.wantToViewDetail.noteId,
                             reaction.wantToViewDetail.title || '',
                             notes, char, session, callbacks,
+                            trustedOwnedNoteIds.has(reaction.wantToViewDetail.noteId),
                         );
                     }
                 }

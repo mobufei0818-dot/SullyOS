@@ -10,6 +10,7 @@ import { incrementDigestRound, runCognitiveDigestion } from '../utils/memoryPala
 import { getRoomLabel } from '../utils/memoryPalace/types';
 import { safeResponseJson, extractContent } from '../utils/safeApi';
 import Modal from '../components/os/Modal';
+import TokenImg from '../components/os/TokenImg';
 import DateSession from '../components/date/DateSession';
 import DateSettings from '../components/date/DateSettings';
 import { armDateResumeAttempt, clearDateResumeAttempt, takeCrashedDateResume } from '../utils/dateSessionRecovery';
@@ -22,6 +23,7 @@ import StoryTheater from '../components/date/story/StoryTheater';
 import { dateLaunch } from '../utils/dateLaunch';
 import { materializeVisionDescriptions } from '../utils/visionApi';
 import { shareOrDownloadFile } from '../utils/shareExport';
+import { buildInPersonContinueInstruction } from '../utils/meetingContinue';
 import {
     buildDateHistoryGroups,
     formatDateHistoryDate,
@@ -401,7 +403,7 @@ const DateApp: React.FC = () => {
     }, [memoryPalaceConfig, apiConfig, userProfile?.name, updateCharacter, addToast]);
 
     // --- Session API Logic ---
-    const handleSendMessage = async (text: string): Promise<string> => {
+    const handleSendMessage = async (text: string, kind?: 'continue'): Promise<string> => {
         if (!char) throw new Error("No char");
 
         // 重发场景：如果 DB 里最后一条已经是这条 user 消息（上一轮发送后 API 失败 / 网络抖动等），
@@ -411,10 +413,19 @@ const DateApp: React.FC = () => {
             && recentCheck[0].role === 'user'
             && recentCheck[0].content === text
             && recentCheck[0].metadata?.source === 'date';
+        // API 中断后的重试只会带回显示文本；从已落库标记恢复“继续”的完整语义。
+        const isContinueTurn = kind === 'continue'
+            || (isRetry && recentCheck[0].metadata?.meetingContinue === true);
 
         if (!isRetry) {
             // 1. Save User Msg
-            await DB.saveMessage({ charId: char.id, role: 'user', type: 'text', content: text, metadata: { source: 'date' } });
+            await DB.saveMessage({
+                charId: char.id,
+                role: 'user',
+                type: 'text',
+                content: text,
+                metadata: { source: 'date', ...(isContinueTurn ? { meetingContinue: true } : {}) },
+            });
             markDateTurnDirty(char);
         }
 
@@ -428,12 +439,15 @@ const DateApp: React.FC = () => {
         setDateMessages(await loadRecentDateMessages(char.id));
 
         const emojis = await DB.getEmojis();
+        const modelText = isContinueTurn
+            ? buildInPersonContinueInstruction(userProfile?.name, char.name)
+            : text;
         const { messages } = await DatePrompts.buildSessionPayload({
             char,
             userProfile,
             allMsgs: preparedAllMsgs,
             emojis,
-            userText: text,
+            userText: modelText,
             variant: 'send',
             useVisionDescriptions: apiConfig.visionApi?.enabled === true,
         });
@@ -817,7 +831,7 @@ const DateApp: React.FC = () => {
                                                 <div className="absolute inset-[8px] rounded-full" style={{ border: `1px solid ${th.ring1}` }} />
                                                 <div className="absolute inset-[12px] rounded-full" style={{ border: `1px solid ${th.ring2}` }} />
                                                 <div className="w-[70px] h-[70px] rounded-full overflow-hidden" style={{ boxShadow: `0 0 18px ${th.avGlow}` }}>
-                                                    <img src={c.avatar} className="w-full h-full object-cover" alt={c.name} />
+                                                    <TokenImg value={c.avatar} className="w-full h-full object-cover" alt={c.name} />
                                                 </div>
                                                 {c.savedDateState && (
                                                     <div title="有存档" className="absolute bottom-0 right-1.5 w-[22px] h-[22px] rounded-full flex items-center justify-center" style={{ background: '#fbbf24', boxShadow: '0 1px 5px rgba(180,120,20,0.4)' }}>

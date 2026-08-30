@@ -72,7 +72,7 @@
 |---|------|---------|
 | E1 🔴 | 主代理 `worker/index.js`：3771 行单文件纯 JS | 无 TS、无 wrangler.toml、靠面板粘贴部署，却是改动最热的后端文件（11 天 7 commits）；承载 10+ 类能力（搜索/WebDAV/GitHub/Notion/飞书/MCP/XHS Lite…）；`worker/xhs-lite/` 目录里只有文档和测试，代码已并入 index.js——目录名指向的代码不在目录里 |
 | E2 🟡 | 死目标仍在仓库且文档当作活的 | `worker/proactive-push/` 已被前端 `FORCE_DISABLED=true` 全局停用但 README:299 仍教人部署；`netlify/functions/webdav-proxy.ts` 零调用方；`cloudflare/` 两文件是已并入 index.js 的参考副本 |
-| E3 🟡 | 后端地址配置碎成约 8 套机制 | 中心代理 localStorage key、网易云单独持久化、XHS 派生 + 死域名改写补丁、instant-push 用户自填、AMSG 走环境变量、post-office 与 loyal-recruitment 各自硬编码 `noir2.cc.cd`…… |
+| E3 🟡 | 后端地址配置碎成约 7 套机制 | 中心代理 localStorage key、网易云单独持久化、XHS 派生 + 死域名改写补丁、instant-push 用户自填、AMSG 走环境变量、post-office 硬编码 `noir2.cc.cd`…… |
 | E4 🟡 | 后端蔓延无地图 | `api/`、`server/`、`netlify/`、`cloudflare/` 在 README 与 docs/ **零提及**；mcp-proxy README 链接的 `docs/mcp-integration.md` 不存在；.gitignore 注释里的脚本名也是过时的 |
 | E5 🟢 | workspace 卫生 | pnpm-workspace 声明 `worker/*` 但 6 个 worker 只有 1 个有 package.json、0 个有 tsconfig；Netlify 服务端依赖混在前端根 package.json；7 个构建产物 bundle 提交进 git 且 `public/instant-worker.deno.bundle.js` 与 worker/ 下那份字节相同的双份入库；浏览器 Service Worker（`sw-keep-alive.ts` 710 行）放在服务端 worker 目录下 |
 

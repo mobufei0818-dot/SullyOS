@@ -1,0 +1,469 @@
+name: 隐私审计 · 外部检查
+
+# 第一档：keyless。零 secret，不碰服务器，只验证「从公网能看到什么」。
+#
+# 刻意不挂 pull_request —— fork 出去的 PR 一旦能触发这个 workflow，
+# 等第二档把 SSH 私钥放进 secret 之后，就要处理 fork / pull_request_target /
+# secret 可见性的一整套麻烦。现在就不给它这个机会。
+#
+# push 触发用 paths 限定这个文件自己：改业务代码不该顺手对线上做一次探测。
+
+on:
+  schedule:
+    # 03:40 UTC。服务器侧 umami-backup.timer 是 03:20 UTC（pg_dump + 内部自检），
+    # 留 20 分钟余量，让外部审计跑在它后面。GitHub 的 schedule 常有延迟，无所谓。
+    - cron: '40 3 * * *'
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+    paths:
+      - '.github/workflows/privacy-audit.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: privacy-audit
+  cancel-in-progress: false
+
+jobs:
+  external:
+    name: keyless 外部检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # 交叉核对用。vars 不是 secret，fork 里拿不到值 —— 拿不到就跳过这两条，不算失败。
+      VAR_SCRIPT_URL: ${{ vars.UMAMI_SCRIPT_URL }}
+      VAR_WEBSITE_ID: ${{ vars.UMAMI_WEBSITE_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 外部隐私断言
+        shell: bash
+        run: |
+          # 刻意不用 set -e：每条 check 都要跑完，最后统一报。
+          # 半路夭折的话第一条挂了后面全看不见，而「还有哪些也挂了」恰恰是最要紧的信息。
+          set -uo pipefail
+
+          fails=()
+          rows=()
+
+          check() { # check <描述> <期望值> <实际值>
+            if [[ "$2" == "$3" ]]; then
+              printf '  ✅ %-44s %s\n' "$1" "$3"
+              rows+=("| ✅ | $1 | \`$3\` | |")
+            else
+              printf '  ❌ %-44s 期望 %s，实际 %s\n' "$1" "$2" "$3"
+              fails+=("$1（期望 $2，实际 $3）")
+              rows+=("| ❌ | $1 | \`$3\` | 期望 \`$2\` |")
+            fi
+          }
+
+          # ─────────────────────────────────────────────────────────────
+          # 0. 事实来源：仓库里的 docs/analytics.md
+          #
+          # 实例地址和站点 id 刻意不写在源码里（见 analytics.md「数据发到哪」一节：
+          # 硬编码的话 fork 一构建，他的用户就会朝这个地址发请求）。全仓库唯一写着
+          # 这两个值的地方就是那份文档 —— 而它同时也是对外的公开承诺，拿它当事实来源
+          # 正好：审计的对象本来就是「文档里写的那个实例，行为是否符合文档里的承诺」。
+          #
+          # 副作用是这段解析跟文档措辞耦合。措辞一改这里就红 —— 那是想要的行为，
+          # 不是 bug：文档必须始终写明数据发去哪。
+          # ─────────────────────────────────────────────────────────────
+          DOC=docs/analytics.md
+          line=$(grep -m1 '自托管的 umami 实例' "$DOC" || true)
+          BASE=$(printf '%s' "$line" | grep -oE 'https://[A-Za-z0-9.-]+' | head -1 || true)
+          WID=$(printf '%s' "$line" \
+                | grep -oiE '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}' \
+                | head -1 || true)
+
+          if [[ -z "$BASE" || -z "$WID" ]]; then
+            echo "::error file=$DOC::没能解析出实例地址 / 站点 id。文档措辞是不是改了？"
+            {
+              echo "## 隐私审计 · 外部检查"
+              echo
+              echo "❌ 无法从 \`$DOC\` 解析出实例地址或站点 id，审计没有事实来源，直接判失败。"
+              echo
+              echo "匹配到的行：\`${line:-（没匹配到）}\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          HOST=${BASE#https://}
+          echo "事实来源 $DOC → 实例 $BASE ｜ 站点 $WID"
+          echo
+
+          # ─────────────────────────────────────────────────────────────
+          # 1. 文档写的实例，和实际构建注入的，是不是同一个
+          # ─────────────────────────────────────────────────────────────
+          echo "### 事实来源一致性 ###"
+          if [[ -n "${VAR_SCRIPT_URL:-}" ]]; then
+            var_host=$(printf '%s' "$VAR_SCRIPT_URL" | sed -E 's#^https?://##; s#/.*##')
+            check "Variables 与文档同一实例" "$HOST" "$var_host"
+          else
+            echo "  ⏭  UMAMI_SCRIPT_URL 未配置或不可见（fork），跳过"
+          fi
+          if [[ -n "${VAR_WEBSITE_ID:-}" ]]; then
+            check "Variables 与文档同一站点 id" "$WID" "$VAR_WEBSITE_ID"
+          else
+            echo "  ⏭  UMAMI_WEBSITE_ID 未配置或不可见（fork），跳过"
+          fi
+          echo
+
+          # ─────────────────────────────────────────────────────────────
+          # 1b. 线上产物核对：CI 审计的实例，就是用户浏览器真正在请求的那个
+          #
+          # 上面那两条只证明「文档 == Variables」，而 Variables 只是构建的输入。
+          # 用户实际加载的是 GitHub Pages 上那些文件 —— 中间隔着一次构建。
+          # 所以这里直接把线上产物抓下来，在里面找这两个值。
+          #
+          # 具体怎么抓、为什么要抓全站而不是只看入口那一个文件，见脚本里的说明。
+          # 判定逻辑放在 scripts/ 下有测试守着（scripts/audit-online-bundle.test.ts），
+          # 省得它哪天悄悄退化成「只看一个文件、看不见就报没有」。
+          #
+          # 只在 Variables 读得到时跑：读不到就说明这是 fork 或没配统计的仓库，
+          # 它的 Pages 上本来就不该有这些值，没有可核对的对象。
+          # ─────────────────────────────────────────────────────────────
+          if [[ -n "${VAR_SCRIPT_URL:-}" && -n "${VAR_WEBSITE_ID:-}" ]]; then
+            echo "### 线上产物核对 ###"
+            owner=${GITHUB_REPOSITORY%%/*}
+            repo=${GITHUB_REPOSITORY##*/}
+            PAGES="https://${owner}.github.io/${repo}/"
+            echo "  Pages: $PAGES ｜ node $(node --version)"
+
+            # 人看的进度走 stderr（直接落进日志），stdout 是给这里解析的 JSON。
+            bundle_json=$(node scripts/audit-online-bundle.mjs \
+              --base "$PAGES" \
+              --public-dir public \
+              --website-id "$WID" \
+              --script-url "$VAR_SCRIPT_URL") || true
+
+            before=${#rows[@]}
+            while IFS=$'\t' read -r name expected actual; do
+              if [[ -n "$name" ]]; then
+                check "$name" "$expected" "$actual"
+              fi
+            done < <(printf '%s' "$bundle_json" | jq -r '.checks[]? | [.name, .expected, .actual] | @tsv' 2>/dev/null || true)
+
+            # 脚本自己崩了 / 输出解析不出来时，上面那个循环一条都读不到，
+            # 于是「线上产物」这一整块悄无声息地消失，整份审计照样绿。
+            # 这种时候必须留下一条红的。
+            if (( ${#rows[@]} == before )); then
+              check "线上产物核对脚本跑通" "yes" "no（没有可解析的输出，看上面的报错）"
+            fi
+            echo
+          fi
+
+          # ─────────────────────────────────────────────────────────────
+          # 2. DNS 留痕（不做断言，只让每次 run 的日志里存下当时解析到哪）
+          #
+          # 顺带一提：Caddyfile 要求这个域名在 Cloudflare 上是灰云 / DNS only。
+          # 走橙云的话 Caddy 看到的是 CF 边缘 IP，/24 截断会静默失效。
+          # 这里打出来的 IP 如果哪天变成 CF 段，就是那件事发生了。
+          # ─────────────────────────────────────────────────────────────
+          echo "### DNS 解析留痕 ###"
+          if command -v dig >/dev/null 2>&1; then
+            echo "  dig $HOST A    -> $(dig +short "$HOST" A    | paste -sd' ' - || true)"
+            echo "  dig $HOST AAAA -> $(dig +short "$HOST" AAAA | paste -sd' ' - || true)"
+          else
+            echo "  （无 dig，退回 getent）$(getent ahosts "$HOST" | awk '{print $1}' | sort -u | paste -sd' ' - || true)"
+          fi
+          echo
+
+          # ─────────────────────────────────────────────────────────────
+          # 3. 约束 #3：后台没被公开
+          # ─────────────────────────────────────────────────────────────
+          echo "### 后台访问控制 ###"
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$BASE/api/websites" || echo ERR)
+          check "后台未登录访问被拒" "401" "$code"
+          echo
+
+          # ─────────────────────────────────────────────────────────────
+          # 4. 约束 #2：断外联的开关还在（照抄 assert-privacy.sh 第 6 条）
+          # ─────────────────────────────────────────────────────────────
+          echo "### 断外联开关 ###"
+          cfg=$(curl -sS --max-time 10 "$BASE/api/config" || echo '{}')
+          for k in privateMode telemetryDisabled updatesDisabled; do
+            val=$(printf '%s' "$cfg" | jq -r --arg k "$k" '(.[$k] // false) | tostring' 2>/dev/null || echo ERR)
+            check "$k" "true" "$val"
+          done
+          # 约束 #5：tracker 脚本名没被改成规避拦截器的名字。
+          # 缺失和显式 null 都算 null —— 与 assert-privacy.sh 的判定保持一致。
+          tsn=$(printf '%s' "$cfg" | jq -c '.trackerScriptName' 2>/dev/null || echo ERR)
+          check "tracker 脚本名未被改动" "null" "$tsn"
+          echo
+
+          # ─────────────────────────────────────────────────────────────
+          # 5. 约束 #4：数据库 / 应用端口不对公网
+          #
+          # 从 GitHub runner 这个纯外部视角探。连不通有两种：
+          # 立刻 refused，或者被防火墙丢包一直到 timeout —— 都算 closed。
+          #
+          # ⚠️ 先探 443 做正对照，这条不能删。
+          # 「连不上 5432」这种否定断言，在一个出站被拦、或者走 HTTP 代理的环境里
+          # 会无条件成立 —— 探测机制自己坏掉，和端口真的关着，从结果上长得一模一样，
+          # 而且坏的那一侧是绿的。443 必须探得通，才说明这台 runner 的 TCP 出站是直连的、
+          # 下面两条 closed 才有意义。（实测：某些沙箱环境里 /dev/tcp 任何端口都返回
+          # 成功，macOS 的 nc -z -w 对被 DROP 的端口超时后也照样退 0。）
+          # ─────────────────────────────────────────────────────────────
+          echo "### 端口暴露面 ###"
+          probe() { # probe <端口> -> open / closed
+            if timeout 5 bash -c "exec 3<>/dev/tcp/$HOST/$1" 2>/dev/null; then
+              echo open
+            else
+              echo closed
+            fi
+          }
+          check "探测通路自检（443 应可达）"        "open"   "$(probe 443)"
+          check "外部连不上 $HOST:5432（postgres）" "closed" "$(probe 5432)"
+          check "外部连不上 $HOST:3000（umami）"   "closed" "$(probe 3000)"
+          echo
+
+          # ─────────────────────────────────────────────────────────────
+          # 6. 汇总到 run 页面
+          # ─────────────────────────────────────────────────────────────
+          {
+            echo "## 隐私审计 · 外部检查"
+            echo
+            echo "实例 \`$BASE\` ｜ 站点 \`$WID\` ｜ $(date -u +%FT%TZ)"
+            echo
+            echo "| | 检查项 | 实际 | 备注 |"
+            echo "|---|---|---|---|"
+            printf '%s\n' "${rows[@]}"
+            echo
+            if (( ${#fails[@]} == 0 )); then
+              echo "**${#rows[@]} 项全部通过。**"
+            else
+              echo "### ❌ 失败 ${#fails[@]} 项"
+              echo
+              printf -- '- %s\n' "${fails[@]}"
+              echo
+              echo "> 在修好之前，不要对外声称这些承诺仍然成立。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo
+          if (( ${#fails[@]} == 0 )); then
+            echo "全部通过（${#rows[@]} 项）。"
+            exit 0
+          fi
+          printf '::error::隐私外部审计失败 %d 项：%s\n' "${#fails[@]}" "${fails[*]}"
+          exit 1
+
+  # ═══════════════════════════════════════════════════════════════════
+  # 第二档：SSH 内部检查
+  #
+  # 用一把专用 ed25519（只为这件事生成，不复用任何登录钥匙）。服务器那侧
+  # authorized_keys 写的是 restrict,command=".../audit-entry.sh"：
+  # restrict 关掉 pty / 端口转发 / agent 转发，command= 让「请求执行什么」
+  # 这件事失去意义 —— 客户端发过去的命令原文只会落进 SSH_ORIGINAL_COMMAND，
+  # 由 audit-entry.sh 当作 nonce 做三道校验。钥匙泄露的场景下，
+  # 攻击者能做的全部就是「触发一次自检」。
+  #
+  # 和 external 刻意不设 needs：一档挂了另一档照样要出结果，
+  # 「哪些同时挂了」是排查时最要紧的信息。
+  # ═══════════════════════════════════════════════════════════════════
+  internal:
+    name: SSH 内部检查
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # fork 里既没有 Variables 也没有 secret，跳过而不是红。
+    if: ${{ vars.UMAMI_SCRIPT_URL != '' }}
+    permissions:
+      contents: read
+    env:
+      VAR_SCRIPT_URL: ${{ vars.UMAMI_SCRIPT_URL }}
+      VAR_WEBSITE_ID: ${{ vars.UMAMI_WEBSITE_ID }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 装审计钥匙
+        env:
+          AUDIT_KEY: ${{ secrets.AUDIT_SSH_KEY }}
+        run: |
+          set -uo pipefail
+          mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"
+          printf '%s\n' "$AUDIT_KEY" > "$HOME/.ssh/audit_key"
+          chmod 600 "$HOME/.ssh/audit_key"
+          # 主机指纹钉死在仓库里，不用 ssh-keyscan 现抓 —— 现抓等于每次都接受
+          # 当时碰到的是谁，中间人换了台机器也照样绿。
+          cp infra/known_hosts "$HOME/.ssh/audit_known_hosts"
+          echo "已装载，指纹："
+          ssh-keygen -lf "$HOME/.ssh/audit_known_hosts"
+
+      - name: 发脏头探针并触发内部自检
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          HOST=$(printf '%s' "$VAR_SCRIPT_URL" | sed -E 's#^https?://##; s#/.*##')
+          BASE="https://$HOST"
+          owner=${GITHUB_REPOSITORY%%/*}
+          repo=${GITHUB_REPOSITORY##*/}
+          EV="ci_probe_${GITHUB_RUN_ID}"
+
+          # ── 探针 ──────────────────────────────────────────────────
+          # 这一发是整套审计里唯一「主动制造证据」的动作：故意夹带一堆伪造的
+          # 真实-IP 头和地理头，然后到库里看它们有没有渗进去。
+          #
+          # 两个坑（都踩过）：
+          #   · hostname 必须和 umami 里 website 的 domain 对得上，否则事件归不到站点上
+          #   · 必须带浏览器 UA。umami 的 bot 过滤是**静默丢弃**，照样回 200 ——
+          #     所以 http_code 不能当作落库的证据，落没落库只能查库。
+          payload=$(jq -nc \
+            --arg w "$VAR_WEBSITE_ID" \
+            --arg h "${owner}.github.io" \
+            --arg u "/${repo}/" \
+            --arg n "$EV" \
+            '{type:"event",payload:{website:$w,hostname:$h,language:"en-US",
+              referrer:"",screen:"1920x1080",title:"CI privacy probe",url:$u,name:$n}}')
+
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+            -X POST "$BASE/api/send" \
+            -H 'Content-Type: application/json' \
+            -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+            -H 'X-Forwarded-For: 203.0.113.7' \
+            -H 'X-Real-IP: 198.51.100.9' \
+            -H 'CF-Connecting-IP: 203.0.113.7' \
+            -H 'True-Client-IP: 203.0.113.7' \
+            -H 'CF-IPCity: Mordor' \
+            -H 'CF-IPCountry: XX' \
+            -H 'CF-Region-Code: Shire' \
+            --data "$payload" || echo ERR)
+          echo "探针 $EV 已发出（HTTP $code；注意这个码不代表落库）"
+
+          # ── SSH ───────────────────────────────────────────────────
+          # 请求执行的「命令」就是 run id 本身，服务器那边只把它当 nonce 收。
+          set +e
+          ssh -i "$HOME/.ssh/audit_key" \
+              -o UserKnownHostsFile="$HOME/.ssh/audit_known_hosts" \
+              -o StrictHostKeyChecking=yes \
+              -o BatchMode=yes \
+              -o ConnectTimeout=20 \
+              "audit@$HOST" "$GITHUB_RUN_ID" > /tmp/audit.out 2>&1
+          rc=$?
+          set -e
+          echo "ssh 退出码 $rc"
+          echo "$rc" > /tmp/audit.rc
+
+          # 自检正文进日志；schema 那几百行折叠起来，不然正文被淹了。
+          sed -n '1,/^===== SCHEMA-BEGIN =====$/p' /tmp/audit.out | sed '$d'
+          echo "::group::pg_dump --schema-only（原文）"
+          awk '/^===== SCHEMA-BEGIN =====$/{f=1;next} /^===== SCHEMA-END =====$/{f=0} f' /tmp/audit.out
+          echo "::endgroup::"
+
+          awk '/^===== SCHEMA-BEGIN =====$/{f=1;next} /^===== SCHEMA-END =====$/{f=0} f' \
+            /tmp/audit.out > /tmp/umami-schema.sql
+          echo "schema 行数：$(wc -l < /tmp/umami-schema.sql)"
+
+      - name: 核对配置指纹并汇总
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          fails=()
+          rows=()
+          check() {
+            if [[ "$2" == "$3" ]]; then
+              printf '  ✅ %-46s\n' "$1"
+              rows+=("| ✅ | $1 | |")
+            else
+              printf '  ❌ %-46s 期望 %s，实际 %s\n' "$1" "$2" "$3"
+              fails+=("$1")
+              rows+=("| ❌ | $1 | 期望 \`$2\`，实际 \`$3\` |")
+            fi
+          }
+
+          rc=$(cat /tmp/audit.rc)
+          check "内部自检整体通过（audit-entry 退出码）" "0" "$rc"
+
+          # ── schema 账本（第三档）─────────────────────────────────
+          # 只比对、只报告，不往仓库里写。master 要求走 PR，bot 直推会被
+          # 分支保护弹回来（GH013），红的原因还跟隐私无关，纯粹是推不上去。
+          # 账本本身留在 artifact + Actions 历史里（90 天）。
+          #
+          # schema 变了就红，是故意的：新增一张表 / 一个列，正是「多了个能存
+          # 敏感数据的地方」最可能的样子。确认过没问题的话，把新版存进
+          # infra/umami-schema.sql 提交一次，下一轮就恢复绿。
+          if [[ -s /tmp/umami-schema.sql ]]; then
+            if diff -q infra/umami-schema.sql /tmp/umami-schema.sql >/dev/null 2>&1; then
+              check "数据库 schema 与仓库账本一致" "same" "same"
+            else
+              check "数据库 schema 与仓库账本一致" "same" "changed"
+              echo "::group::schema diff"
+              diff -u infra/umami-schema.sql /tmp/umami-schema.sql | head -200 || true
+              echo "::endgroup::"
+              {
+                echo
+                echo "<details><summary>schema diff（前 200 行）</summary>"
+                echo
+                echo '```diff'
+                diff -u infra/umami-schema.sql /tmp/umami-schema.sql | head -200 || true
+                echo '```'
+                echo
+                echo "</details>"
+                echo
+                echo "> 确认无害后，把本次 run 的 \`umami-schema\` artifact 存回 \`infra/umami-schema.sql\` 提交一次即可。"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          else
+            check "数据库 schema 与仓库账本一致" "same" "（没拿到 schema）"
+          fi
+
+          # ── 配置即代码 ────────────────────────────────────────────
+          # 判定刻意放在这一侧：服务器只负责报出自己那几个文件的 sha256，
+          # 基线存在仓库里。谁想让配置漂移而不被发现，就得同时改服务器和 GitHub，
+          # 而这两处的痕迹是分开留的。
+          echo "### 线上配置 vs 仓库 infra/ ###"
+          for f in Caddyfile docker-compose.yml assert-privacy.sh audit-entry.sh umami-privacy-trigger.expected.txt; do
+            want=$(sha256sum "infra/$f" 2>/dev/null | awk '{print $1}')
+            got=$(grep -m1 "^CONFIG-SHA256 $f " /tmp/audit.out | awk '{print $3}')
+            check "线上 $f 与仓库副本一致" "${want:-（仓库里没有）}" "${got:-（没拿到）}"
+          done
+
+          {
+            echo "## 隐私审计 · 内部检查"
+            echo
+            echo "nonce \`$GITHUB_RUN_ID\` ｜ $(date -u +%FT%TZ)"
+            echo
+            echo "| | 检查项 | 备注 |"
+            echo "|---|---|---|"
+            printf '%s\n' "${rows[@]}"
+            echo
+            echo "<details><summary>服务器自检原文</summary>"
+            echo
+            echo '```'
+            sed -n '1,/^===== SCHEMA-BEGIN =====$/p' /tmp/audit.out | sed '$d'
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            if (( ${#fails[@]} == 0 )); then
+              echo "**全部通过。**"
+            else
+              echo "### ❌ 失败 ${#fails[@]} 项"
+              echo
+              printf -- '- %s\n' "${fails[@]}"
+              echo
+              echo "> 在修好之前，不要对外声称这些承诺仍然成立。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if (( ${#fails[@]} == 0 )); then
+            echo "全部通过。"
+            exit 0
+          fi
+          printf '::error::隐私内部审计失败 %d 项：%s\n' "${#fails[@]}" "${fails[*]}"
+          exit 1
+
+      # 不往仓库写之后，这个 artifact 就是 schema 账本本身了，
+      # 保留期跟 Actions 历史窗口对齐。
+      - name: 存档 schema
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: umami-schema
+          path: /tmp/umami-schema.sql
+          retention-days: 90

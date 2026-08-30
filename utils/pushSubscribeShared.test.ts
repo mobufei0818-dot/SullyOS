@@ -105,6 +105,47 @@ describe('subscribeWithRetry 的失败落盘', () => {
   });
 });
 
+// 安卓 Firefox 上的实测：subscribe() 既不抛错也不给订阅，直接兑现成 null。之前的代码
+// 只防了抛错，紧接着读 endpoint 就抛 TypeError——用户看到的是「can't access property
+// "endpoint", r is null」，而面板上一条失败记录都留不下。
+describe('subscribe() 兑现成空值', () => {
+  it('拿不到订阅就按失败处理，不去读它的 endpoint', async () => {
+    const registration = makeRegistration(async () => null);
+
+    const result = await subscribeWithRetry(registration, FAKE_VAPID, '[test]');
+
+    expect(result.sub).toBeNull();
+    expect(result.failure?.kind).toBe('no-subscription');
+    // 落了盘面板才说得出原因——这一条正是原来那个报错吞掉的东西。
+    expect(readSubscribeFailure()?.kind).toBe('no-subscription');
+    expect(readSubscribeFailure()?.text).toBe(result.failure?.text);
+  });
+
+  it('只说事实和下一步，不替浏览器猜原因', async () => {
+    const text = (await subscribeWithRetry(makeRegistration(async () => null), FAKE_VAPID, '[test]')).failure?.text || '';
+
+    // 浏览器一个错误对象都没给，说是谷歌服务没装、还是 Mozilla 那边连不上，都是编的。
+    expect(text).not.toContain('GMS');
+    expect(text).not.toContain('Mozilla');
+    // 但得留下能动手的下一步，否则用户对着「没拿到订阅」还是干瞪眼。
+    expect(text).toContain('换个网络');
+    expect(text).toContain('换个浏览器');
+  });
+
+  it('跟「连不上推送服务商」分开归类', async () => {
+    // 面板的说法、上报的代号都按这个分。混成一格的话，Firefox 这种空值就永远藏在
+    // 「没装谷歌服务」的统计里，看不出有多少人是另一种坏法。
+    const empty = await subscribeWithRetry(makeRegistration(async () => null), FAKE_VAPID, '[test]');
+    const thrown = await subscribeWithRetry(
+      makeRegistration(async () => { throw namedError('AbortError'); }),
+      FAKE_VAPID,
+      '[test]',
+    );
+
+    expect(empty.failure?.kind).not.toBe(thrown.failure?.kind);
+  });
+});
+
 describe('readSubscribeFailure 的容错', () => {
   it('存的东西坏了就当没有，不抛', () => {
     localStorage.setItem('push_last_subscribe_failure_v1', '{不是 JSON');

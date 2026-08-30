@@ -796,7 +796,7 @@ export const buildMcpFireTools = <S extends McpFireServer>(
  *
  * native 模式（默认）：tools 参数已随请求声明，这里只列来源和纪律——与前台
  * buildMcpSystemBlock 的口径一致，不教正文语法（教了反而勾引模型往正文里写）。
- * text 模式（用户在设置里关掉「兼容模式」开关 = 中转拒 tools 时）：请求不带
+ * text 模式（用户在设置里关掉「原生 tools」开关 = 中转拒 tools 时）：请求不带
  * tools 参数，这里教正文协议 tool_name({...})，签名格式与前台
  * buildMcpRejectedToolsFallbackBody 对齐——同一个模型两端见到的长一个样。
  */
@@ -830,6 +830,8 @@ export const buildMcpFireBlock = <S extends McpFireServer>(
         `【外部工具 —— ${userName} 在设置里给你连了 MCP 工具服务器，主动消息里也可以用】`,
         howTo,
         '纪律：不需要就别硬调；没收到系统返回前不要声称工具成功，也不要编造结果；工具失败就换个方式或如实带过；结果只挑相关部分用角色语气转述，别复读 JSON。',
+        '多步任务：先做必要检查，随后立刻调用能推进目标的动作工具；不要反复读取同一份说明或状态。执行动作后可以再次检查新状态，并继续到目标完成或工具明确失败。',
+        `副作用操作：${userName} 本轮已经明确要求执行的视为已确认；没有明确要求时才先确认。`,
         '可用工具：',
         ...lines,
         '---',

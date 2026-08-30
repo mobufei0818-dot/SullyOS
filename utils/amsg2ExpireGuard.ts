@@ -7,16 +7,23 @@
  * 浏览器 / DB / React 依赖（与 utils/agenticTools.ts 同一约束）。
  *
  * 语义（设计：claude-notes/2026-07-21-amsg2-liveness-design.md「防穿帮闸」）：
- *   - expire（默认）：到点时对话已前进 → 作废，转「排程现状块」告知；
- *   - force：闹钟型，照发；
- *   - 一次性任务「对话前进」= 创建锚点之后出现真实用户消息；
- *   - 循环任务只看「到点前 ACTIVE_CHAT_WINDOW_MS 内是否在聊」——用锚点的话，
- *     昨天聊过天就会永久作废今天的早安。
+ *   - expire（默认）：到点那会儿用户正在聊天 → 作废，转「排程现状块」告知；
+ *   - force：闹钟型，照发。
+ *
+ * 这道闸只判一件确定的事：**到点前后 ACTIVE_CHAT_WINDOW_MS 内，用户在不在聊天**。
+ * 一次性任务和循环任务同一条规则，窗口都锚在触发时刻，两边都锚——左右界都是触发时刻
+ * 加减这个窗宽，跟排程现状块的检出（detectExpiredOccurrences）用的是同一个对称窗。
+ *
+ * 「这件事是不是已经聊过了」不归它管——那是语义问题，判据在角色自己手上（提示词里
+ * 那段「开口之前」：已经发生过的事就一个字都不要输出，走 worker 的 skip-push 出口）。
+ * 早先这里对一次性任务用的是锚点规则「排完任务之后用户只要再开过一次口就作废」，
+ * 它没有时间窗，跨夜任务几乎必然中招：角色半夜说「明早九点半叫你起床」，用户回一句
+ * 「晚安」，第二天的早安就被判死。锚在触发时刻的窗口没有这个毛病，任务排了多久都不影响。
  */
 
 export type AmsgExpirePolicy = 'expire' | 'force';
 
-/** 循环任务的「正在聊天」窗口：到点前 10 分钟内有真实用户消息就算热聊。 */
+/** 「正在聊天」窗口：触发时刻前后 10 分钟内有真实用户消息就算热聊。 */
 export const ACTIVE_CHAT_WINDOW_MS = 10 * 60_000;
 
 /** 触发时刻附近的推理/送达宽限（fire 后 10-30s 才送达，判定窗口向后放这么多）。 */
@@ -35,47 +42,41 @@ export const recurrencePeriodMs = (recurrenceType: string | undefined): number |
 
 export interface ExpireFireInput {
   policy: string | undefined;
-  recurrenceType: string | undefined;
-  /** 任务创建时最后一条真实用户消息的时间戳；没有为 0 / null。 */
-  anchorMs: number | null | undefined;
   /** 判定时刻已知的最后一条真实用户消息时间戳。 */
   lastUserMessageAt: number | null | undefined;
   nowMs: number;
   /**
-   * 本次触发时刻。循环任务的「正在聊天」窗口锚定它而不是 nowMs——生成+送达可能比到点
-   * 晚十几分钟，拿判定时刻算 10 分钟窗会把撞上对话的消息误放行。worker 在到点当时判定
-   * （两者几乎相等），客户端送达兜底则晚得多，所以必须显式给。
+   * 本次触发时刻。「正在聊天」窗口锚定它而不是 nowMs——生成+送达可能比到点晚十几分钟，
+   * 拿判定时刻算 10 分钟窗会把撞上对话的消息误放行。worker 在到点当时判定（两者几乎
+   * 相等），客户端送达兜底则晚得多，所以必须显式给。
    */
   occurrenceMs: number | null | undefined;
 }
 
 /**
  * fire 时刻该不该作废这次触发。worker onBeforeFire（数据来自 fire_pack /
- * task metadata）与客户端送达兜底（数据来自本地历史 / push metadata）共用。
- * 判不了（缺策略 / 缺数据）一律放行——宁可让兜底层再拦，不误杀。唯一的例外是
- * 「排程时有对话、现在一条都没有」，那不是缺数据而是对话被清空了，见函数末尾。
+ * task metadata）与客户端送达兜底（数据来自本地历史 / push metadata）共用，
+ * 一次性和循环任务同一条规则：到点前后十分钟内用户在不在聊天。
+ *
+ * 判不了（缺策略 / 缺触发时刻 / 一条用户消息都没有）一律放行——这道闸只挡它能确定的
+ * 那一档，剩下的交给角色自己在提示词里判（见文件头）。
  */
 export function shouldExpireFire(input: ExpireFireInput): boolean {
   if (input.policy !== 'expire') return false;
-  // 任务身份整组缺失（既没有 recurrenceType 也没有 occurrenceMs）：判不了，放行。
-  // 客户端送达兜底闸会碰上——老版本 SW 落的收件箱行没有这两个顶层字段，循环任务会被
-  // 当成一次性走锚点规则，只要用户在排任务之后聊过天就恒吞，每天的早安一条都到不了。
-  // worker 侧走不到这条：occurrenceMs 由 onBeforeFire 解析校验过，恒为有限数。
-  if (input.recurrenceType == null && input.occurrenceMs == null) return false;
+  // 缺触发时刻就算不出窗口，放行。客户端送达兜底闸会碰上（老版本 SW 落的收件箱行
+  // 没有这个顶层字段）；worker 侧走不到，occurrenceMs 由 onBeforeFire 校验过。
+  if (input.occurrenceMs == null) return false;
   const last = input.lastUserMessageAt;
-  if (input.recurrenceType === 'daily' || input.recurrenceType === 'weekly') {
-    if (last == null) return false;
-    // 缺触发时刻就算不出窗口，跟缺锚点一样放行——这道闸宁可让兜底层再拦，不误杀。
-    if (input.occurrenceMs == null) return false;
-    return last > input.occurrenceMs - ACTIVE_CHAT_WINDOW_MS && last <= input.nowMs;
-  }
-  const anchor = input.anchorMs;
-  if (anchor == null) return false;
-  // 排程那一刻对话是存在的（anchor > 0），到点却一条真实用户消息都找不到 = 用户把聊天
-  // 记录清空了。这时候还发，出来就是一条指着不存在的对话往下说的消息，按作废处理（走
-  // 既有 skip + 回执链路，面板照实说明）。anchor 为 0 是「从没聊过就排的任务」，照发。
-  if (last == null) return anchor > 0;
-  return last > anchor;
+  if (last == null) return false;
+  // 两边都锚在触发时刻，跟 detectExpiredOccurrences 的对称窗同一个口径。
+  // 右界要是拿 nowMs：worker 在到点当时判（now≈到点）看不出差别，客户端送达兜底 /
+  // 48h 补收却是 now=Date.now()，窗口会一路撑成 (到点-10min, 现在]——用户到点之后
+  // 随便哪个时刻开过一次口，晚送到的定时消息就被吞掉、销账、连云端自述日志一起撤销，
+  // 而检出那边用对称窗根本查不到这次吞没，作废回执整段失联。
+  return last > input.occurrenceMs - ACTIVE_CHAT_WINDOW_MS
+    && last <= input.occurrenceMs + ACTIVE_CHAT_WINDOW_MS
+    // last 是过去的消息时间戳，这条理论上恒真；留着挡时钟歪掉时冒出来的未来时间戳。
+    && last <= input.nowMs;
 }
 
 export interface RealUserMessageLike {
@@ -142,7 +143,6 @@ export interface DetectExpiredInput {
   recurrenceType: string | undefined;
   /** ISO 字符串，任务首次触发时间。 */
   firstSendTime: string;
-  anchorMs: number | null | undefined;
   messages: RealUserMessageLike[];
   nowMs: number;
   lookbackMs?: number;
@@ -161,11 +161,13 @@ export function detectExpiredOccurrences(input: DetectExpiredInput): ExpiredNoti
   const periodMs = recurrencePeriodMs(input.recurrenceType);
   if (periodMs === null) {
     if (first > input.nowMs || first < horizon) return [];
-    if (input.anchorMs == null) return [];
-    // 窗口放宽到 nowMs：worker 的 skip 只看「锚点后有没有用户消息」，与 Cron 何时
-    // 消费无关（可能晚到点几分钟才 fire）——窄窗会在 Cron 迟到时漏掉回执。
+    // 跟循环那支同一个对称窗，因为闸本身已经是同一条规则了（见 shouldExpireFire）。
+    // 两边必须一致：这里说「作废了」而闸其实放行了的话，角色会为一条用户明明收到的
+    // 消息道歉——比不说还糟。
     // 「其实已正常送达」由调用方用 hasDeliveredProactiveNear 按任务归属排除。
-    if (!hasRealUserMessageBetween(input.messages, input.anchorMs, input.nowMs)) return [];
+    if (!hasRealUserMessageBetween(
+      input.messages, first - ACTIVE_CHAT_WINDOW_MS, first + ACTIVE_CHAT_WINDOW_MS,
+    )) return [];
     return [{ id: input.taskUuid, occurrenceMs: first }];
   }
 

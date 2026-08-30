@@ -6,6 +6,7 @@ import { resolveCharTimeZone, tzShortLabel } from '../../utils/timezone';
 import { useOS } from '../../context/OSContext';
 import { resolveScheduleCardPalette } from '../../utils/scheduleAppearance';
 import ScheduleAppearanceButton, { ScheduleCustomCssStyle } from './ScheduleAppearanceButton';
+import TokenImg from '../os/TokenImg';
 
 interface ScheduleCardProps {
     schedule: DailySchedule | null;
@@ -228,8 +229,8 @@ const ScheduleCard: React.FC<ScheduleCardProps> = ({
                 {/* Character Image Banner */}
                 <div className="sully-schedule-cover relative w-full h-32 overflow-hidden flex-shrink-0">
                     {(coverImage || charAvatar) ? (
-                        <img
-                            src={coverImage || charAvatar}
+                        <TokenImg
+                            value={coverImage || charAvatar}
                             alt=""
                             className="absolute inset-0 w-full h-full object-cover opacity-70"
                             style={{ objectPosition: 'center 30%' }}

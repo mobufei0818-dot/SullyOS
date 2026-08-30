@@ -6,6 +6,8 @@ import { BankFullState, BankTransaction, SavingsGoal, ShopStaff, BankGuestbookIt
 import { safeResponseJson } from '../utils/safeApi';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import Modal from '../components/os/Modal';
+import TokenImg from '../components/os/TokenImg';
+import { isBlobRef } from '../utils/blobRef';
 import BankShopScene from '../components/bank/BankShopScene';
 import BankDollhouse from '../components/bank/BankDollhouse';
 import BankGameMenu from '../components/bank/BankGameMenu';
@@ -15,6 +17,7 @@ import { processImage } from '../utils/file';
 import { ContextBuilder } from '../utils/context';
 import { Coffee, ClipboardText, ChartBar, Coin, Target, UserCircle, BookOpen, Lightning, Storefront } from '@phosphor-icons/react';
 import { addLocalDays, getLocalDateKey } from '../utils/localDate';
+import { roundMoney, sumMoney } from '../utils/format';
 import { useLocalDateKey } from '../hooks/useLocalDateKey';
 import { trackEvent } from '../utils/analytics';
 
@@ -284,7 +287,7 @@ const BankApp: React.FC = () => {
         }
 
         const todayTx = txs.filter(t => t.dateStr === today);
-        const spent = todayTx.reduce((sum, t) => sum + t.amount, 0);
+        const spent = sumMoney(todayTx.map(t => t.amount));
         const appeal = calculateAppeal(currentState.shop.staff.length, currentState.shop.unlockedRecipes);
 
         const finalState = { ...currentState, todaySpent: spent, shop: { ...currentState.shop, appeal } };
@@ -324,7 +327,7 @@ const BankApp: React.FC = () => {
         trackEvent('记一笔账');
 
         const cur = stateRef.current;
-        const newSpent = cur.todaySpent + amount;
+        const newSpent = roundMoney(cur.todaySpent + amount);
         const newState = { ...cur, todaySpent: newSpent };
         stateRef.current = newState;
         setState(newState);
@@ -353,7 +356,7 @@ const BankApp: React.FC = () => {
         let newSpent = cur.todaySpent;
         const today = getLocalDateKey();
         if (tx.dateStr === today) {
-            newSpent = Math.max(0, cur.todaySpent - tx.amount);
+            newSpent = Math.max(0, roundMoney(cur.todaySpent - tx.amount));
         }
 
         const newState = { ...cur, todaySpent: newSpent };
@@ -1102,8 +1105,9 @@ ${previousGuestbook}
                                 className="w-24 h-24 rounded-2xl bg-gradient-to-br from-[#FFF8E1] to-[#FFE0B2] border-2 border-[#E8DCC8] flex items-center justify-center text-5xl relative overflow-hidden group cursor-pointer shadow-inner"
                                 onClick={() => staffImageInputRef.current?.click()}
                             >
-                                {editingStaff.avatar.startsWith('http') || editingStaff.avatar.startsWith('data')
-                                    ? <img src={editingStaff.avatar} className="w-full h-full object-cover" />
+                                {/* 店员头像可能是图床直链 / base64 / blobref 令牌，三种都算图；其余当 emoji 显示。 */}
+                                {editingStaff.avatar.startsWith('http') || editingStaff.avatar.startsWith('data') || isBlobRef(editingStaff.avatar)
+                                    ? <TokenImg value={editingStaff.avatar} className="w-full h-full object-cover" />
                                     : editingStaff.avatar
                                 }
                                 <div className="absolute inset-0 bg-black/30 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">

@@ -21,6 +21,7 @@ import {
   keepUncancelledTasks,
   parseRemoteTaskLastError,
   pruneFiredTasks,
+  REMOTE_ERROR_REASON_MAX,
   pruneStaleTasks,
   reconcileTasksWithRemote,
   shortTaskId,
@@ -333,8 +334,29 @@ describe('describeRemoteLastError', () => {
 
   it('reason 是一长串原始报错时截断，别把整段堆栈糊上卡片', () => {
     const text = describeRemoteLastError({ reason: 'x'.repeat(500) }, fmt)!;
-    expect(text.length).toBeLessThan(120);
+    // 对着常量算，别写死数字：截断长度会随上游报错的形态调整，写死的话调一次常量
+    // 就假挂一次，而这条测试真正要钉的是「500 字的原文不会整段糊上来」。
+    expect(text.length).toBeLessThan(REMOTE_ERROR_REASON_MAX + 40);
     expect(text).toContain('上次到点没发出去');
+  });
+
+  // 上游拒了请求时 reason 是「状态行 —— 上游原话」两段，而唯一能照着改的东西
+  // （模型名写错、余额不够）全在破折号后面。老的 60 字截断正好把它整段切掉。
+  it('LLM 上游那句话取破折号后面那段，不把状态行占满整行', () => {
+    const reason = 'AI API error: 401 Unauthorized. Request URL: https://api.example.com/v1/chat/completions\n'
+      + '  — Incorrect API key provided: sk-[redacted]. (provider code: invalid_api_key)';
+    const text = describeRemoteLastError({ reason }, fmt)!;
+    expect(text).toContain('Incorrect API key provided');
+    expect(text).toContain('invalid_api_key');
+    expect(text).not.toContain('Request URL');
+  });
+
+  it('推送订阅失效（pushStatus 410 / 404）说该去重置订阅，不报原始错误', () => {
+    const text = describeRemoteLastError(
+      { reason: 'Web Push delivery failed: 410 Gone — …', pushStatus: 410 }, fmt,
+    )!;
+    expect(text).toContain('重置订阅');
+    expect(text).not.toContain('410 Gone');
   });
 
   it('没有 occurrence 退回 at；两个都没有就不带时间；null → null', () => {
@@ -373,8 +395,41 @@ describe('describeInstantChatFailure', () => {
   });
 
   it('一长串原始报错照样截断；没有 lastError → null', () => {
-    expect(describeInstantChatFailure({ reason: 'x'.repeat(500) })!.length).toBeLessThan(120);
+    expect(describeInstantChatFailure({ reason: 'x'.repeat(500) })!.length)
+      .toBeLessThan(REMOTE_ERROR_REASON_MAX + 40);
     expect(describeInstantChatFailure(null)).toBeNull();
+  });
+
+  // ── 机读字段（amsg-server 2.6.0-next.21 起）：这三条守的是「按 errorCode /
+  //    pushStatus 分流，不去正则匹配 reason 那句人话」。上游改个措辞，reason 就变了，
+  //    而这几句「接下来该做什么」不能跟着失效。
+
+  it('errorCode LLM_CALL_FAILED → 说是模型接口拒了，别让人以为本地生成挂了', () => {
+    const reason = 'AI API error: 404 Not Found. Request URL: https://api.example.com/v1/chat/completions\n'
+      + '  — The model `gpt-4o-typo` does not exist. (provider code: model_not_found)';
+    const text = describeInstantChatFailure({ reason, errorCode: 'LLM_CALL_FAILED' })!;
+    expect(text).toContain('模型接口拒了这次请求');
+    // 模型名是这一档最关键的信息，上游不再脱敏它，这边也不能截断截掉。
+    expect(text).toContain('gpt-4o-typo');
+    expect(text).not.toContain('生成失败');
+  });
+
+  it('errorCode PUSH_PAYLOAD_TOO_LARGE → 说这条太长，不套「生成失败」', () => {
+    expect(describeInstantChatFailure({ reason: 'push payload 4200 bytes', errorCode: 'PUSH_PAYLOAD_TOO_LARGE' }))
+      .toBe('这条回复太长，一条推送装不下');
+  });
+
+  it('pushStatus 410 → 引导重新登记订阅（重发多少次都是同一个结果）', () => {
+    const text = describeInstantChatFailure(
+      { reason: 'Web Push delivery failed: 410 Gone', pushStatus: 410 }, 3,
+    )!;
+    expect(text).toContain('重置订阅');
+    expect(text).toContain('重试 3 次后放弃');
+  });
+
+  it('认不出来的 errorCode 走通用文案，不吞掉底层报错', () => {
+    expect(describeInstantChatFailure({ reason: '上游 502', errorCode: 'SOMETHING_NEW' }))
+      .toBe('生成失败：上游 502');
   });
 });
 

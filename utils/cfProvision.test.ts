@@ -18,6 +18,7 @@ import {
     verifyToken,
     isAccountScopedToken,
     uploadWorkerScript,
+    ensureSubdomain,
     type AmsgSecrets,
 } from './cfProvision';
 
@@ -340,6 +341,99 @@ describe('explainCfError', () => {
     it('认不出来的错至少把 CF 的原话带上', () => {
         const msg = explainCfError(500, { errors: [{ code: 12345, message: 'Something odd' }] });
         expect(msg).toContain('Something odd');
+    });
+
+    // 下面三条钉住「翻译之外一定留原文」。翻译是兜底猜的，猜错时用户得有东西可查——
+    // 尤其 401/403 那条：不留原文的话，中转层和 WAF 的 403 都长得跟「token 缺权限」
+    // 一模一样，人会被指使着反复去改一枚本来就没问题的 token。
+    it('权限提示后面带着 CF 原文、code 和 HTTP 状态', () => {
+        const msg = explainCfError(403, { errors: [{ code: 9109, message: 'Unauthorized' }] });
+
+        expect(msg).toContain('Unauthorized');
+        expect(msg).toContain('9109');
+        expect(msg).toContain('403');
+    });
+
+    it('中转层自己回的 403 也要露出原话，别看着像 token 缺权限', () => {
+        // 中转的错误体是 { error }，不是 CF 的 errors 数组，得单独捞。
+        const msg = explainCfError(403, {
+            error: 'This proxy only relays account-scoped Cloudflare API paths',
+        });
+
+        expect(msg).toContain('This proxy only relays');
+    });
+
+    it('响应根本不是 JSON 时，至少把 HTTP 状态说出来', () => {
+        const msg = explainCfError(403, null);
+
+        expect(msg).toContain('403');
+    });
+
+    it('带上出事的那个请求，认得出卡在哪一步', () => {
+        const msg = explainCfError(403, null, 'POST /accounts/acc-1/d1/database');
+
+        expect(msg).toContain('POST /accounts/acc-1/d1/database');
+    });
+});
+
+describe('ensureSubdomain', () => {
+    /** 按路径派响应的假中转，返回它收到的「方法 + 路径」清单。 */
+    const stubRelay = (
+        handler: (path: string, method: string) => { payload: unknown; status?: number },
+    ) => {
+        const seen: string[] = [];
+        vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+            const path = new URL(String(url)).searchParams.get('path') || '';
+            const headers = (init?.headers || {}) as Record<string, string>;
+            const method = headers['X-CF-Method'] || 'GET';
+            seen.push(`${method} ${path}`);
+            const { payload, status = 200 } = handler(path, method);
+            return new Response(JSON.stringify(payload), {
+                status,
+                headers: { 'Content-Type': 'application/json' },
+            });
+        }));
+        return seen;
+    };
+
+    afterEach(() => {
+        vi.unstubAllGlobals();
+        vi.restoreAllMocks();
+    });
+
+    it('账号已经有子域名就直接用', async () => {
+        stubRelay(() => ({ payload: { success: true, result: { subdomain: 'kaede' } } }));
+
+        expect(await ensureSubdomain('tok', 'acc-1')).toEqual({ ok: true, subdomain: 'kaede' });
+    });
+
+    it('读子域名被 403 时说权限，而不是请用户再起一个名字', async () => {
+        // 读都读不动，注册那一步同样过不去。当成新账号劝人换名字，用户会一直换下去。
+        const seen = stubRelay(() => ({
+            payload: { success: false, errors: [{ code: 9109, message: 'Unauthorized' }] },
+            status: 403,
+        }));
+
+        const result = await ensureSubdomain('tok', 'acc-1', 'kaede');
+
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+            expect(result.code).toBe('CF_ERROR');
+            expect(result.error).toContain('Unauthorized');
+        }
+        // 注定失败的注册请求也不该发
+        expect(seen).toEqual(['GET /accounts/acc-1/workers/subdomain']);
+    });
+
+    it('403 之外的读失败照旧当新账号处理，别把还没建过子域名的人堵死', async () => {
+        const seen = stubRelay((_path, method) => (method === 'GET'
+            ? { payload: { success: false, errors: [{ code: 10007, message: 'not found' }] }, status: 404 }
+            : { payload: { success: true, result: {} } }));
+
+        const result = await ensureSubdomain('tok', 'acc-1', 'kaede');
+
+        expect(result).toEqual({ ok: true, subdomain: 'kaede' });
+        expect(seen).toContain('PUT /accounts/acc-1/workers/subdomain');
     });
 });
 

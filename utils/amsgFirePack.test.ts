@@ -2,22 +2,18 @@ import { describe, it, expect } from 'vitest';
 import {
   AMSG_SLOT_AWAY_HINT,
   AMSG_SLOT_CURRENT_TIME,
+  AMSG_SLOT_SCENE,
   AMSG_SLOT_SELF_LOG,
   AMSG_SLOT_TASK_INSTRUCTION,
   AMSG_SLOT_TIME_SINCE_USER,
   AMSG_SLOT_USER_CLOCK,
   AmsgFirePack,
   AmsgSelfLog,
-  CHAT_OUTBOX_MAX_ENTRIES,
-  CHAT_OUTBOX_MAX_SESSIONS,
   FIRE_PACK_VERSION,
   describeFirePackVersion,
   SELF_LOG_MAX_ENTRIES,
   SELF_LOG_TEXT_MAX,
-  appendChatOutbox,
   appendSelfLogEntry,
-  createChatOutbox,
-  parseChatOutbox,
   buildAwayHint,
   buildUserClockHint,
   countUnansweredSends,
@@ -814,63 +810,43 @@ describe('fire_pack v7 的 chat 段', () => {
   });
 });
 
-// ─── 即时对话的收件兜底 outbox ───
-describe('chat_outbox', () => {
-  const entry = (id: string, sessionId = 's') => ({ messageId: id, sessionId, at: 1, payload: { message: id } });
+// 「此刻在做什么」那一段的钟点跟着角色的「时间感知」开关走。开关的值 worker 从
+// tool_pack.timeAwarenessEnabled 读（与今日节日同源），经 renderFirePack 透传到
+// renderFireSceneBlock。断的是「透传」这一环：渲染本身在 amsgFireScene.test.ts 里钉过。
+describe('renderFirePack — 把 includeClock 透传给场景块', () => {
+  const scenePack: AmsgFirePack = {
+    v: FIRE_PACK_VERSION,
+    builtAt: 1_700_000_000_000,
+    pendingTasks: [],
+    selfScheduleEnabled: true,
+    template: AMSG_SLOT_SCENE,
+    lastUserMessageAt: null,
+    tzId: 'Asia/Shanghai',
+    userTzId: 'Asia/Shanghai',
+    targetName: '小明同学',
+    scene: {
+      charId: 'char-clock',
+      dateKey: '2026-08-02',
+      schedule: {
+        slots: [
+          { startTime: '08:00', activity: '起床做早饭' },
+          { startTime: '22:00', activity: '睡觉' },
+        ],
+      },
+      songPool: [],
+    },
+  } as AmsgFirePack;
 
-  it('单轮再长也整轮保留（按条数掐会把长回复掐头，补收只能拿到后半截）', () => {
-    let outbox = createChatOutbox();
-    for (let i = 0; i < 12; i += 1) {
-      outbox = appendChatOutbox(outbox, [entry(`m${i}`, 'sess-0')]);
-    }
-    expect(outbox.entries).toHaveLength(12);
-    expect(outbox.entries[0].messageId).toBe('m0');
+  /** 2026-08-02 上海 23:10。 */
+  const at = Date.UTC(2026, 7, 2, 23 - 8, 10);
+
+  it('不传时照常报钟点（老行为）', () => {
+    expect(renderFirePack(scenePack, at, '指令')).toContain('当前时段：22:00 你正在睡觉');
   });
 
-  it('按轮保留最近 CHAT_OUTBOX_MAX_SESSIONS 轮，更老的整轮丢', () => {
-    let outbox = createChatOutbox();
-    for (let s = 0; s < CHAT_OUTBOX_MAX_SESSIONS + 2; s += 1) {
-      outbox = appendChatOutbox(outbox, [entry(`m${s}-a`, `sess-${s}`), entry(`m${s}-b`, `sess-${s}`)]);
-    }
-    const sessions = [...new Set(outbox.entries.map((e) => e.sessionId))];
-    expect(sessions).toEqual(['sess-2', 'sess-3', 'sess-4']);
-    expect(outbox.entries).toHaveLength(CHAT_OUTBOX_MAX_SESSIONS * 2);
-  });
-
-  it('总条数护栏：超出 CHAT_OUTBOX_MAX_ENTRIES 从最老丢起', () => {
-    let outbox = createChatOutbox();
-    for (let s = 0; s < 3; s += 1) {
-      outbox = appendChatOutbox(
-        outbox,
-        Array.from({ length: 25 }, (_, i) => entry(`m${s}-${i}`, `sess-${s}`)),
-      );
-    }
-    expect(outbox.entries).toHaveLength(CHAT_OUTBOX_MAX_ENTRIES);
-    expect(outbox.entries[0].messageId).toBe('m0-15');
-    expect(outbox.entries.at(-1)!.messageId).toBe('m2-24');
-  });
-
-  it('同 messageId 覆盖不叠加（fire 重跑会重新生成同样的 id）', () => {
-    const once = appendChatOutbox(null, [entry('m1'), entry('m2')]);
-    const again = appendChatOutbox(once, [entry('m1'), entry('m2')]);
-    expect(again.entries.map((e) => e.messageId)).toEqual(['m1', 'm2']);
-  });
-
-  it('空的一批原样返回（没东西可记就别白写一次库）', () => {
-    const outbox = appendChatOutbox(null, []);
-    expect(outbox.entries).toEqual([]);
-  });
-
-  it('形状不对 → null，按「没有」处理（兜底通道不硬失败）', () => {
-    expect(parseChatOutbox('')).toBeNull();
-    expect(parseChatOutbox(undefined)).toBeNull();
-    expect(parseChatOutbox('not json')).toBeNull();
-    expect(parseChatOutbox(JSON.stringify({ v: 2, entries: [] }))).toBeNull();
-    expect(parseChatOutbox(JSON.stringify({ v: 1, entries: [{ messageId: 'm' }] }))).toBeNull();
-  });
-
-  it('合法的读回来原样', () => {
-    const outbox = appendChatOutbox(null, [entry('m1')]);
-    expect(parseChatOutbox(JSON.stringify(outbox))).toEqual(outbox);
+  it('includeClock=false 时钟点消失，活动还在', () => {
+    const out = renderFirePack(scenePack, at, '指令', { includeClock: false });
+    expect(out).toContain('你正在睡觉');
+    expect(out).not.toContain('22:00');
   });
 });

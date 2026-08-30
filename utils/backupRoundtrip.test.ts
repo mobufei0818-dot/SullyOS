@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { createHash } from 'node:crypto';
 import JSZip from 'jszip';
 import { DB, openDB } from './db';
+import { putImageBlob, dataUrlToBlob, getBlobForRef } from './blobRef';
+import { collectBlobRefs, writeBlobsToZip, readBlobsIndex, restoreBlobsFromZip, BLOBS_INDEX_FILE } from './backupBlobs';
 import { encodeVectorsForBackup, encodeVectorsForBackupChunked, MemoryVectorDB } from './memoryPalace/db';
 import { writeV2Backup, assembleV2Backup, shardFileName, type ShardLimits } from './backupFormat';
 import { ActiveMsgStore } from './activeMsgStore';
@@ -168,8 +170,36 @@ describe('v2 真实链路：分片 → 组装 → importFullData', () => {
 
         // media_only 形状：没有 characters 字段（关键！），只有 mediaAssets + 过滤后的 image 消息
         const backupData = {
-            mediaAssets: [{ charId: 'c1', avatar: 'new-avatar', backgrounds: {} }],
-            messages: [{ id: 2, charId: 'c1', type: 'image', content: 'img' }],
+            mediaAssets: [{
+                charId: 'c1',
+                avatar: 'new-avatar',
+                companionAvatar: { version: 1, source: 'upload', imageRef: 'blobref:static-companion' },
+                companionTouchSettings: {
+                    enabledZones: ['head'],
+                    reactions: { head: [{ id: 'touch-1', text: '别揉乱啦', performance: { emotion: 'happy', gesture: 'idle' }, voiceAssetId: 'companion-touch-voice:c1:pack:head:0' }] },
+                    touchPresets: [{
+                        id: 'touch-preset-1',
+                        name: '摸头',
+                        enabledZones: ['head'],
+                        reactions: { head: [{ id: 'touch-1', text: '别揉乱啦', performance: { emotion: 'happy', gesture: 'idle' }, voiceAssetId: 'companion-touch-voice:c1:pack:head:0' }] },
+                        createdAt: 1,
+                        updatedAt: 1,
+                    }],
+                    activeTouchPresetId: 'touch-preset-1',
+                },
+                backgrounds: {},
+            }],
+            messages: [
+                { id: 2, charId: 'c1', type: 'image', content: 'img' },
+                {
+                    id: 3,
+                    charId: 'c1',
+                    role: 'user',
+                    type: 'text',
+                    content: 'video turn',
+                    metadata: { source: 'call', callSessionId: 'call-1', cameraSnapshotExpired: true },
+                },
+            ],
         };
         const zip = new FakeZip();
         const manifest = await writeV2Backup(zip, backupData, {});
@@ -182,9 +212,13 @@ describe('v2 真实链路：分片 → 组装 → importFullData', () => {
         expect(c1.name).toBe('Alice');        // 文字字段存活
         expect(c1.bio).toBe('text-bio');      // 文字字段存活
         expect(c1.avatar).toBe('new-avatar'); // 媒体被 patch
+        expect(c1.companionAvatar).toEqual({ version: 1, source: 'upload', imageRef: 'blobref:static-companion' });
+        expect(c1.companionTouchSettings.activeTouchPresetId).toBe('touch-preset-1');
+        expect(c1.companionTouchSettings.touchPresets[0].reactions.head[0].voiceAssetId)
+            .toBe('companion-touch-voice:c1:pack:head:0');
         // 老文字消息 id1 没被清，新 image id2 加上（patch/merge，不 clear）
         const msgIds = (await DB.getRawStoreData('messages')).map((m: any) => m.id).sort();
-        expect(msgIds).toEqual([1, 2]);
+        expect(msgIds).toEqual([1, 2, 3]);
     });
 
     it('空数组按 shape 还原：clear-and-add 清、merge 不动、单例省略不动（test 9）', async () => {
@@ -268,12 +302,12 @@ describe('v2 真实链路：分片 → 组装 → importFullData', () => {
         });
     });
 
-    it('formatVersion 3 在组装阶段 abort，DB 未发生任何写（test 12）', async () => {
+    it('不支持的 formatVersion（如未来 v4）在组装阶段 abort，DB 未发生任何写（test 12）', async () => {
         await seedStore('gallery', [{ id: 'keep', url: 'x' }]);
         const zip = new FakeZip();
         const manifest = await writeV2Backup(zip, { galleryImages: [{ id: 'new' }] }, {});
-        const v3 = { ...manifest, formatVersion: 3 };
-        await expect(assembleV2Backup(zip, v3)).rejects.toThrow(/不支持的备份格式版本/);
+        const v4 = { ...manifest, formatVersion: 4 };
+        await expect(assembleV2Backup(zip, v4)).rejects.toThrow(/不支持的备份格式版本/);
         // 从没调用 importFullData → gallery 原样
         expect((await DB.getRawStoreData('gallery')).map((g: any) => g.id)).toEqual(['keep']);
     });
@@ -493,5 +527,77 @@ describe('v2 真实链路：向量二进制旁路', () => {
         expect(vals).toEqual([
             expect.closeTo(0.11, 6), expect.closeTo(0.22, 6), expect.closeTo(0.33, 6), expect.closeTo(0.44, 6),
         ]);
+    });
+});
+
+describe('v3 blob 旁路：令牌原样进包、二进制随包、按原 id 还原', () => {
+    // v2 时代 songs 掉出 resolveBlobRefsDeep 名单会导出死令牌，专门有条源码锚守卫。
+    // v3 的收集不走名单（onSerialized 从落包文本里提令牌），那类「漏名单」缺陷在结构上
+    // 不存在了；这里改钉三件事：令牌保真（旧行为解析成 data: 时这条会红）、字节保真、
+    // 嵌套 JSON 字符串里的令牌照样被收集（免名单的核心承诺）。
+    const TINY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+    it('songs 封面令牌导出后原样保留，blobs/* 按原 id 还原出同字节同 mime', async () => {
+        const token = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        await seedStore('songs', [{ id: 'song-cover-1', title: '封面测试曲', coverImage: token }]);
+
+        // 导出：与 OSContext 相同的三步 —— onSerialized 收集令牌、写分片、写 blobs 旁路
+        const rawData: any[] = await DB.getRawStoreData('songs');
+        const zip = new FakeZip();
+        const tokens = new Set<string>();
+        const manifest = await writeV2Backup(zip, { songs: rawData } as any, {
+            onSerialized: s => collectBlobRefs(s, tokens),
+        });
+        expect(tokens.has(token)).toBe(true);
+        const { written, missing } = await writeBlobsToZip(zip, tokens, getBlobForRef);
+        expect({ written, missing }).toEqual({ written: 1, missing: [] });
+
+        // 组装：令牌一字不改地回来（v2 旧行为会把它解析成 data:，这条立刻红）
+        const data: any = await assembleV2Backup(zip, manifest);
+        const song = data.songs.find((s: any) => s.id === 'song-cover-1');
+        expect(song.coverImage).toBe(token);
+
+        // 还原：索引校验通过，按原令牌 id 交回 Blob，字节与原图逐一致、mime 保真
+        const entries = await readBlobsIndex(zip);
+        expect(entries).toHaveLength(1);
+        const restored = new Map<string, Blob>();
+        await restoreBlobsFromZip(zip, entries, async (tk, blob) => { restored.set(tk, blob); });
+        const blob = restored.get(token)!;
+        expect(blob.type).toBe('image/png');
+        expect(new Uint8Array(await blob.arrayBuffer()))
+            .toEqual(new Uint8Array(await dataUrlToBlob(TINY_PNG).arrayBuffer()));
+    });
+
+    it('令牌藏在嵌套 JSON 字符串里（assets 表的预设行形态）也会被收集进旁路', async () => {
+        const token = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        // 模拟 assets 表里 appearance_preset_* 行：值是 stringify 过的 JSON，令牌在字符串内部
+        const rows = [{ id: 'appearance_preset_x', data: JSON.stringify({ theme: { wallpaper: token } }) }];
+        const zip = new FakeZip();
+        const tokens = new Set<string>();
+        await writeV2Backup(zip, { assets: rows } as any, { onSerialized: s => collectBlobRefs(s, tokens) });
+        expect(tokens.has(token)).toBe(true);
+    });
+
+    it('令牌对应 Blob 已丢：跳过并计入 missing，不落索引文件（与无 blob 的包同形）', async () => {
+        const zip = new FakeZip();
+        const { written, missing } = await writeBlobsToZip(
+            zip, ['blobref:b_gone_0_aaaaaa'], async () => null);
+        expect({ written, missing }).toEqual({ written: 0, missing: ['blobref:b_gone_0_aaaaaa'] });
+        expect(zip.file(BLOBS_INDEX_FILE)).toBeNull();
+        expect(await readBlobsIndex(zip)).toEqual([]); // 读端把它当 v2 老包，安静走老路
+    });
+
+    it('索引声明的 blob 文件缺失 → 写库前 abort', async () => {
+        const zip = new FakeZip();
+        zip.file(BLOBS_INDEX_FILE, JSON.stringify([{ id: 'b_x_0_aaaaaa', type: 'image/png', size: 3 }]));
+        await expect(readBlobsIndex(zip)).rejects.toThrow(/blobs\/b_x_0_aaaaaa/);
+    });
+
+    it('blob 字节数与索引声明不符（截断包）→ 还原中止', async () => {
+        const zip = new FakeZip();
+        zip.file('blobs/b_y_0_aaaaaa', new Uint8Array([1, 2]));
+        zip.file(BLOBS_INDEX_FILE, JSON.stringify([{ id: 'b_y_0_aaaaaa', type: 'image/png', size: 3 }]));
+        const entries = await readBlobsIndex(zip);
+        await expect(restoreBlobsFromZip(zip, entries, async () => {})).rejects.toThrow(/截断/);
     });
 });

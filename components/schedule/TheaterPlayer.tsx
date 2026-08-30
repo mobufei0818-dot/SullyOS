@@ -1,6 +1,8 @@
 
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { CharacterProfile, ScheduleSlot, TheaterLine } from '../../types';
+import TokenImg from '../os/TokenImg';
+import { useBlobRefUrl } from '../../utils/blobRef';
 
 interface TheaterPlayerProps {
     character: CharacterProfile | null;
@@ -37,6 +39,8 @@ const TheaterPlayer: React.FC<TheaterPlayerProps> = ({
 }) => {
     const accent = `hsl(${HUE}, 75%, 72%)`;
     const charName = character?.name || '角色';
+    // 背景那层是 CSS 背景图，没有 <img> 帮忙解析，在组件顶层先把令牌解开
+    const avatarUrl = useBlobRefUrl(character?.avatar);
 
     // 已完整显示的行数；当前正在打字的行 = shownCount（索引）
     const [shownCount, setShownCount] = useState(0);     // 已完成打字的行数
@@ -110,11 +114,11 @@ const TheaterPlayer: React.FC<TheaterPlayerProps> = ({
             style={{ background: `radial-gradient(130% 90% at 50% -5%, hsl(${HUE},42%,15%), hsl(${HUE},48%,7%) 62%, #050409)` }}
         >
             {/* 背景：角色看板图做底，重压暗 + 紫，营造「赛博后台」氛围 */}
-            {character?.avatar && (
+            {avatarUrl && (
                 <div
                     className="absolute inset-0 pointer-events-none"
                     style={{
-                        backgroundImage: `url(${character.avatar})`,
+                        backgroundImage: `url(${avatarUrl})`,
                         backgroundSize: 'cover',
                         backgroundPosition: 'center',
                         filter: 'blur(34px) saturate(0.7)',
@@ -193,7 +197,7 @@ const TheaterPlayer: React.FC<TheaterPlayerProps> = ({
                         <div className="relative w-16 h-16">
                             <div className="absolute -inset-1 rounded-full opacity-70 animate-pulse" style={{ background: `conic-gradient(from 0deg, transparent, ${accent}, transparent 70%)`, filter: 'blur(2px)' }} />
                             {character?.avatar ? (
-                                <img src={character.avatar} alt="" className="relative w-16 h-16 rounded-full object-cover border-2" style={{ borderColor: accent }} />
+                                <TokenImg value={character.avatar} alt="" className="relative w-16 h-16 rounded-full object-cover border-2" style={{ borderColor: accent }} />
                             ) : (
                                 <div className="relative w-16 h-16 rounded-full flex items-center justify-center text-xl font-black border-2" style={{ background: `hsl(${HUE},45%,25%)`, borderColor: accent, color: '#fff' }}>
                                     {charName.slice(0, 1)}

@@ -40,6 +40,17 @@ describe('「浏览器支持」这一行', () => {
     expect(isSupportBad(state)).toBe(true);
   });
 
+  it('浏览器没给出订阅时照实说「没拿到订阅」', () => {
+    // 跟上面那条分开写：同样是建不出订阅，一个知道卡在推送服务商、一个连原因都没有，
+    // 面板上不该长成一句话。
+    const state = baseState({
+      lastSubscribeFailure: { kind: 'no-subscription', text: '浏览器没给出推送订阅……', at: Date.now() },
+    });
+
+    expect(describeSupport(state)).toBe('接口齐全，但没拿到订阅');
+    expect(isSupportBad(state)).toBe(true);
+  });
+
   it('浏览器自称支持但实际建不出订阅时判「否」', () => {
     const state = baseState({
       lastSubscribeFailure: { kind: 'unsupported', text: '当前浏览器不支持网页推送……', at: Date.now() },

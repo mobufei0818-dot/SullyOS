@@ -5,13 +5,15 @@ import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
 import { fetchMiniMaxVoices, MiniMaxVoiceItem } from '../utils/minimaxVoice';
 import { safeResponseJson } from '../utils/safeApi';
 import { minimaxFetch } from '../utils/minimaxEndpoint';
-import { hashTtsParams, getCachedTts, saveCachedTts } from '../utils/ttsCache';
+import { getCachedTts, saveCachedTts } from '../utils/ttsCache';
 import { trackEvent } from '../utils/analytics';
+import { buildMiniMaxTtsCacheKey, buildMiniMaxTtsPayload, getMiniMaxParamVersion, type MiniMaxParamVersion } from '../utils/minimaxTts';
 
 const DEFAULT_MODEL = 'speech-2.8-hd';
 // 多语言试听样例：点一下切换试听文本 + 对应 language_boost，方便听不同语种下的发音
 const PREVIEW_SAMPLES: { code: string; label: string; boost: string; text: string }[] = [
   { code: 'zh', label: '中文', boost: 'Chinese', text: '你好呀，这是捏出来的新声音，听听看喜不喜欢？' },
+  { code: 'yue', label: '粤语', boost: 'Chinese,Yue', text: '你好呀，呢把聲係我啱啱整好嘅，聽下鍾唔鍾意？' },
   { code: 'en', label: 'English', boost: 'English', text: 'Hey, this is the new voice I just put together — what do you think?' },
   { code: 'ja', label: '日本語', boost: 'Japanese', text: 'こんにちは、これは新しく作った声だよ。気に入ってくれるといいな。' },
   { code: 'ko', label: '한국어', boost: 'Korean', text: '안녕, 이건 내가 새로 만든 목소리야. 마음에 들었으면 좋겠다.' },
@@ -92,6 +94,7 @@ const VoiceDesignerApp: React.FC = () => {
   const [pitch, setPitch] = useState(selectedChar?.voiceProfile?.pitch ?? 0);
   const [emotion, setEmotion] = useState(selectedChar?.voiceProfile?.emotion ?? '');
   const [model, setModel] = useState(selectedChar?.voiceProfile?.model || DEFAULT_MODEL);
+  const [minimaxParamVersion, setMinimaxParamVersion] = useState<MiniMaxParamVersion>(() => getMiniMaxParamVersion(selectedChar?.voiceProfile));
 
   // ── Preview ──
   const [previewText, setPreviewText] = useState(PREVIEW_TEXT);
@@ -147,6 +150,39 @@ const VoiceDesignerApp: React.FC = () => {
 
   // ── Build TTS payload ──
   const buildPayload = (text: string, languageBoost?: string) => {
+    const validTimbers = timberWeights.filter(tw => tw.voice_id.trim());
+    if (validTimbers.length === 0) {
+      addToast('请至少添加一个音色', 'error');
+      return null;
+    }
+
+    if (minimaxParamVersion === 'natural-v2') {
+      return buildMiniMaxTtsPayload(text, {
+        ...selectedChar?.voiceProfile,
+        minimaxParamVersion,
+        voiceId: validTimbers.length === 1 ? validTimbers[0].voice_id.trim() : '',
+        model: model || DEFAULT_MODEL,
+        timberWeights: validTimbers.length > 1
+          ? validTimbers.map(tw => ({ voice_id: tw.voice_id.trim(), weight: tw.weight }))
+          : undefined,
+        voiceModify: modifyPitch !== 0 || modifyIntensity !== 0 || modifyTimbre !== 0 || soundEffect
+          ? {
+              ...(modifyPitch !== 0 ? { pitch: modifyPitch } : {}),
+              ...(modifyIntensity !== 0 ? { intensity: modifyIntensity } : {}),
+              ...(modifyTimbre !== 0 ? { timbre: modifyTimbre } : {}),
+              ...(soundEffect ? { sound_effects: soundEffect } : {}),
+            }
+          : undefined,
+        emotion: emotion || undefined,
+        speed,
+        vol: volume,
+        pitch,
+      }, {
+        languageBoost,
+        groupId: (apiConfig.minimaxGroupId || '').trim() || undefined,
+      });
+    }
+
     const payload: any = {
       model: model || DEFAULT_MODEL,
       text,
@@ -157,7 +193,6 @@ const VoiceDesignerApp: React.FC = () => {
     if (languageBoost) payload.language_boost = languageBoost;
 
     // voice_setting with timber_weights or single voice_id
-    const validTimbers = timberWeights.filter(tw => tw.voice_id.trim());
     if (validTimbers.length > 1) {
       payload.voice_setting = {
         voice_id: '',
@@ -180,9 +215,6 @@ const VoiceDesignerApp: React.FC = () => {
         vol: volume,
         pitch: pitch,
       };
-    } else {
-      addToast('请至少添加一个音色', 'error');
-      return null;
     }
 
     // emotion
@@ -217,16 +249,7 @@ const VoiceDesignerApp: React.FC = () => {
     setIsGenerating(true);
     try {
       const groupId = (apiConfig.minimaxGroupId || '').trim();
-      const cacheKey = hashTtsParams({
-        kind: 'minimax-t2a',
-        text: payload.text,
-        model: payload.model,
-        voice_setting: payload.voice_setting,
-        timber_weights: payload.timber_weights,
-        voice_modify: payload.voice_modify,
-        language_boost: payload.language_boost,
-        audio_setting: payload.audio_setting,
-      });
+      const cacheKey = buildMiniMaxTtsCacheKey(payload, minimaxParamVersion);
       const cached = await getCachedTts(cacheKey);
       let url = '';
       if (cached) {
@@ -347,8 +370,10 @@ const VoiceDesignerApp: React.FC = () => {
     const updatedProfile = {
       ...selectedChar,
       voiceProfile: {
+        ...selectedChar.voiceProfile,
         provider: 'minimax' as const,
         voiceId: validTimbers.length === 1 ? validTimbers[0].voice_id.trim() : '',
+        minimaxParamVersion,
         voiceName: validTimbers.length === 1 ? (validTimbers[0].voice_name || validTimbers[0].voice_id) : `混合音色 (${validTimbers.length}个)`,
         source: 'custom' as const,
         model: model || DEFAULT_MODEL,
@@ -431,6 +456,34 @@ const VoiceDesignerApp: React.FC = () => {
 
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
+
+        <div className="bg-white rounded-2xl p-4 border border-violet-100 shadow-sm space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-bold text-slate-700">MiniMax 合成参数</span>
+            <span className="text-[9px] text-slate-400">按角色保存</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">
+            <button
+              type="button"
+              onClick={() => setMinimaxParamVersion('legacy')}
+              className={`rounded-lg px-2 py-2 text-[10px] font-bold transition-colors ${minimaxParamVersion === 'legacy' ? 'bg-white text-slate-700 shadow-sm' : 'text-slate-400'}`}
+            >
+              经典参数
+            </button>
+            <button
+              type="button"
+              onClick={() => setMinimaxParamVersion('natural-v2')}
+              className={`rounded-lg px-2 py-2 text-[10px] font-bold transition-colors ${minimaxParamVersion === 'natural-v2' ? 'bg-violet-500 text-white shadow-sm' : 'text-slate-400'}`}
+            >
+              新版自然参数
+            </button>
+          </div>
+          <p className="text-[10px] leading-relaxed text-slate-400">
+            {minimaxParamVersion === 'natural-v2'
+              ? '试听与聊天、见面、电话统一参数；使用模型原生标点韵律，不再给每个标点自动硬塞停顿。'
+              : '完整保留原有参数、自动停顿和限幅规则，老角色默认继续使用这一档。'}
+          </p>
+        </div>
 
         {/* ── TAB: 混合音色 ── */}
         {tab === 'mix' && (
@@ -612,6 +665,7 @@ const VoiceDesignerApp: React.FC = () => {
           )}
           {soundEffect && <div>音效: {soundEffect}</div>}
           {emotion && <div>情感: {emotion}</div>}
+          <div>参数: {minimaxParamVersion === 'natural-v2' ? '新版自然参数' : '经典参数'}</div>
         </div>
 
         {/* Bottom spacer */}

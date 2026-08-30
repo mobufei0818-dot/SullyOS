@@ -8,6 +8,7 @@ import { Play, Pause, SkipBack, SkipForward } from '@phosphor-icons/react';
 import { isPaperWallpaper, useOS } from '../../context/OSContext';
 import { useMusic } from '../../context/MusicContext';
 import { AppID } from '../../types';
+import { useBlobRefUrl } from '../../utils/blobRef';
 
 const formatTime = (sec: number) => {
   if (!isFinite(sec) || sec < 0) sec = 0;
@@ -25,7 +26,8 @@ const NowPlayingSquareWidget: React.FC<{ contentColor: string }> = ({ contentCol
   const pct = duration > 0 ? (progress / duration) * 100 : 0;
   const hasSong = !!current;
 
-  const albumPic = current?.albumPic;
+  // 用户自己上传的封面存的是 blobref 令牌，得解析成可渲染的地址；网易云那种 http 直链原样透传。
+  const albumPic = useBlobRefUrl(current?.albumPic);
   const title = current?.name || '抽一张来听';
   const artists = current?.artists || '— 轻触，进入';
   const statusText = !hasSong ? 'Standby' : (playing ? 'Now Playing' : 'Paused');

@@ -30,6 +30,13 @@ export interface OpenAIMcpTool {
     };
 }
 
+/**
+ * 前台 MCP 工具循环硬上限。不是固定调用次数：模型正常回复会立即退出；只有仍在调用工具
+ * 才继续，连续原地重复则提前收束。游戏/论坛类多步任务最多可推进到 12 轮。
+ */
+export const MCP_CHAT_MAX_TOOL_LOOPS = 12;
+export const MCP_CHAT_MAX_STALLED_ROUNDS = 2;
+
 /** 名映射条目，server 收窄成前台的完整配置类型（含 proxyUrl 等浏览器侧字段） */
 export type ResolvedMcpTool = McpResolvedToolCore<McpServerConfig>;
 
@@ -91,16 +98,17 @@ ${lines.join('\n')}
 
 **使用纪律**:
 - 需要时直接调工具（系统会自动执行并把结果给你），不需要时正常聊天，**别硬找理由调工具**。
+- 用户明确要求完成游戏、论坛或其他多步任务时，先做必要检查，随后立刻调用能推进目标的动作工具；不要反复读取同一份说明或状态。执行动作后可以再次检查新状态，并继续到目标完成或工具明确失败。
 - 工具必须通过系统的 function calling 接口发起，**绝对不要把工具名和参数写进聊天正文**（比如输出 \`工具名(参数)\` 这种文字），用户会看到乱码一样的东西。
 - 工具结果只挑与对话相关的部分用角色语气转述，别整段复读 JSON。
 - 工具失败就如实说，并根据报错调整参数重试或换个方式，别编造结果。
-- 涉及真实世界副作用的操作（发布内容、下单、删除等），先跟 ${userName} 确认一句再动手。
+- 涉及真实世界副作用的操作（发布内容、下单、删除等），若 ${userName} 本轮已经明确要求执行，即视为已经确认；没有明确要求时才先确认一句再动手。
 ---
 `;
 };
 
 /** 尾部小提醒（注入 messages 末尾，防长对话把纪律冲掉） */
-export const MCP_TAIL_REMINDER = `[MCP 工具 ON · 永远用角色语气回复别空回; 工具只能走 function calling 接口、严禁写成正文文字; 工具结果别复读 JSON; 有副作用的操作先确认再执行]`;
+export const MCP_TAIL_REMINDER = `[MCP 工具 ON · 永远用角色语气回复别空回; 工具只能走 function calling 接口、严禁写成正文文字; 工具结果别复读 JSON; 用户本轮已明确要求的操作视为已确认，否则副作用操作先确认]`;
 
 // ========== 掉格式容错: 正文里的"假工具调用"（解析本体见 mcpFireCore） ==========
 
@@ -147,7 +155,7 @@ export const buildMcpRejectedToolsFallbackBody = (baseReqBody: any): any => {
     }).filter(Boolean);
     followBody.messages = [...followBody.messages, {
         role: 'system',
-        content: `[MCP 兼容模式：当前 API 中转拒绝 function calling 参数。必须根据下方工具的来源、描述和参数选择真正匹配用户意图的工具，禁止因为名字看起来通用就乱选。本轮如果需要工具，请只输出一行 tool_name({"参数":"值"})，系统会代为执行后把结果给你；没有收到系统返回前不要声称工具已经成功，也不要自行编造结果。* 表示必填参数。\n${signatures.join('\n')}]`,
+        content: `[MCP 兼容模式：当前 API 中转拒绝 function calling 参数。必须根据下方工具的来源、描述和参数选择真正匹配用户意图的工具，禁止因为名字看起来通用就乱选。每一步如果需要工具，只输出一行 tool_name({"参数":"值"})，系统会代为执行后把结果给你；收到结果后，若任务还没完成就选择下一步真正能推进目标的工具，不要反复读取同一份说明或状态。没有收到系统返回前不要声称工具已经成功，也不要自行编造结果。* 表示必填参数。\n${signatures.join('\n')}]`,
     }];
     return followBody;
 };

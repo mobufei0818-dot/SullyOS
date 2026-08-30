@@ -28,12 +28,21 @@
  * 所以那一次传丢了就得靠自己补。
  */
 
-import { CharacterProfile, GroupProfile, RealtimeConfig, UserProfile } from '../types';
-import { ActiveMsgClient, owesInstantChatReply } from './activeMsgClient';
+import { APIConfig, CharacterProfile, GroupProfile, RealtimeConfig, UserProfile } from '../types';
+import { ActiveMsgClient, isLlmCredentialsReady, owesInstantChatReply } from './activeMsgClient';
 import { ActiveMsgStore } from './activeMsgStore';
 import { hasActiveAiTask } from './amsg2Tasks';
 import { AmsgChatPresence, CHAT_PRESENCE_HEARTBEAT_MS } from './amsgChatPresence';
+import {
+  buildCharChatCredRow,
+  buildCharEmotionCredRow,
+  knownCredIds,
+  parseCharCredId,
+  pickChangedCredRows,
+  type LlmCredentialRow,
+} from './amsgLlmCredentials';
 import { trackEvent } from './analytics';
+import { DB } from './db';
 
 /** 失败重试的退避起点，逐次翻倍（30s → 60s → 120s）。 */
 const RETRY_BASE_MS = 30_000;
@@ -186,6 +195,9 @@ export const flushAmsgState = async (reason: string): Promise<void> => {
   // 工具凭据欠着的话顺手一起补：它和 fire_pack 一样是「云端那份过时了」，
   // 而且冲刷时机（切后台 / 聊完一轮）正是网络多半又通了的时候。
   void runToolConfigSync(`flush:${reason}`);
+  // LLM 凭据行同理，而且它欠着的后果更硬：云端那份还是旧 Key 的话，已排程的任务
+  // 到点全部 401。
+  void runLlmCredentialSync(`flush:${reason}`);
   // 已经有一次在飞：这次的脏数据留在队列里，等那次落地后由 finally 补跑（直接 return
   // 的话，上传期间打的脏就此搁浅，等不到任何人来传）。
   if (flushing) { reflushRequested = true; return; }
@@ -281,11 +293,15 @@ export const resumePendingAmsgStateSync = (scope: {
   userProfile: UserProfile;
   groups: GroupProfile[];
   realtimeConfig?: RealtimeConfig;
+  /** 启动时那份聊天 API 配置；缺了就补不了 LLM 凭据行的欠账（其余照常补）。 */
+  apiConfig?: APIConfig;
 }) => {
   // 工具凭据的欠账也在这儿补。底账只记「欠着一次」，凭据本体不落 localStorage
   // （那等于把 token 又抄一份到别的地方），补传用启动时这份最新配置——它本来就是
   // 云端此刻该有的那一份。
   if (hasPersistedToolConfigMark()) syncAmsgToolConfig(scope.realtimeConfig);
+  // LLM 凭据行同理（同样只记欠账、不落凭据本体）。
+  if (scope.apiConfig && hasPersistedCredSyncMark()) syncAmsgLlmCredentials(scope.apiConfig);
 
   const pending = readPendingCharIds();
   if (pending.length === 0) return;
@@ -426,6 +442,123 @@ export const syncAmsgToolConfig = (realtimeConfig: RealtimeConfig | undefined): 
   void runToolConfigSync('change');
 };
 
+// ─── LLM 凭据行（credRefs）的重传 ───
+//
+// 云端那张凭据表和 tool_config 处境一样：只在用户改配置那一刻传一次，那一次丢了就再没
+// 人补。而它比 tool_config 更要命——传不上去意味着**已排程的任务到点还在用旧 Key**，
+// 换 Key 之后每条主动消息都是 401。所以退避重试 + localStorage 底账整套跟着 tool_config
+// 那份走，连触发时机（每次冲刷顺手补一次、启动时按底账补一次）都是同一批。
+//
+// 重算哪几行：底账里记着的那些（= 真的用过的那些）。只重算「值是持久化配置的纯函数」的
+// 两种用途——`chat`（定时主动消息）与 `emotion`（情绪评估）。`instant` 那一行不在这里
+// 重算：它的 model 是每一轮聊天的请求体终值（claude 系开思考时带 -thinking 后缀），
+// 靠这里的配置推不出来；那一行由每次发消息的路径自己按当轮终值覆盖（值没变就不发请求）。
+
+export const AMSG2_PENDING_CRED_SYNC_LS_KEY = 'amsg2_pending_llm_creds';
+
+/** 待重传用的那份聊天配置。凭据本体不落 localStorage，底账只记「欠着一次」。 */
+let pendingCredApiConfig: APIConfig | undefined;
+let hasPendingCredSync = false;
+let credSyncing = false;
+let credRetryCount = 0;
+let credRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+const writeCredSyncMark = (pending: boolean) => {
+  // 存储满 / 隐私模式写不进去就算了：底账只是给「重试没等到就被杀」兜底的。
+  try {
+    if (pending) localStorage.setItem(AMSG2_PENDING_CRED_SYNC_LS_KEY, '1');
+    else localStorage.removeItem(AMSG2_PENDING_CRED_SYNC_LS_KEY);
+  } catch { /* 见上 */ }
+};
+
+const hasPersistedCredSyncMark = (): boolean => {
+  try { return localStorage.getItem(AMSG2_PENDING_CRED_SYNC_LS_KEY) === '1'; } catch { return false; }
+};
+
+/**
+ * 按底账里记着的 credId，用当前配置重算出这几行现在该是什么值。
+ * 角色已删 / 凭据配不齐的那些直接跳过——没得算，也不该拿一份残缺的去覆盖云端。
+ */
+export const buildCredentialRowsToResync = async (
+  apiConfig: APIConfig,
+  characters?: CharacterProfile[],
+): Promise<LlmCredentialRow[]> => {
+  const wanted = knownCredIds()
+    .map(parseCharCredId)
+    .filter((parsed): parsed is { charId: string; purpose: 'chat' | 'emotion' } =>
+      !!parsed && (parsed.purpose === 'chat' || parsed.purpose === 'emotion'));
+  if (wanted.length === 0) return [];
+
+  const all = characters ?? await DB.getAllCharacters();
+  const byId = new Map(all.map((char) => [char.id, char]));
+  const rows: LlmCredentialRow[] = [];
+  for (const { charId, purpose } of wanted) {
+    const char = byId.get(charId);
+    if (!char) continue;
+    const row = purpose === 'chat'
+      ? buildCharChatCredRow(char, char.activeMsg2Config, apiConfig)
+      : buildCharEmotionCredRow(charId, char.emotionConfig?.api, apiConfig);
+    if (row) rows.push(row);
+  }
+  return rows;
+};
+
+const runLlmCredentialSync = async (reason: string): Promise<void> => {
+  if (!hasPendingCredSync || credSyncing) return;
+  credSyncing = true;
+  // 记下这次算的是哪一份：上传期间用户又改了配置的话，清账不能把新的那份一起清掉。
+  const snapshot = pendingCredApiConfig;
+  try {
+    const globalConfig = await ActiveMsgStore.getGlobalConfig();
+    // 没配 worker、或这台 worker 还不认凭据表 = 这几行没有去处，不是「传失败」，连底账一起清掉。
+    if (!globalConfig.workerUrl?.trim() || !snapshot || !(await isLlmCredentialsReady())) {
+      hasPendingCredSync = false;
+      pendingCredApiConfig = undefined;
+      writeCredSyncMark(false);
+      return;
+    }
+    const rows = await buildCredentialRowsToResync(snapshot);
+    // 值一个都没变（多半是这次保存改的不是 API 那几项）：不发请求，直接销账。
+    if (pickChangedCredRows(rows).length > 0) await ActiveMsgClient.putLlmCredentials(rows);
+    if (pendingCredApiConfig === snapshot) {
+      hasPendingCredSync = false;
+      pendingCredApiConfig = undefined;
+      writeCredSyncMark(false);
+    }
+    credRetryCount = 0;
+  } catch (error) {
+    if (credRetryCount < MAX_RETRIES) {
+      const delay = RETRY_BASE_MS * 2 ** credRetryCount;
+      credRetryCount += 1;
+      console.warn(`${HEADER} llm_credentials(${reason}) 上传失败，${Math.round(delay / 1000)}s 后重试（第 ${credRetryCount}/${MAX_RETRIES} 次）`, error);
+      if (credRetryTimer != null) clearTimeout(credRetryTimer);
+      credRetryTimer = setTimeout(() => { void runLlmCredentialSync('retry'); }, delay);
+    } else {
+      // 退避打光了（多半是离线）。底账留着：下次启动 / 下次冲刷继续补。
+      console.error(`${HEADER} llm_credentials(${reason}) 连续 ${MAX_RETRIES} 次失败，云端凭据仍是上一份（已排程的任务到点会用旧 Key）`, error);
+      credRetryCount = 0;
+    }
+  } finally {
+    credSyncing = false;
+  }
+};
+
+/**
+ * 聊天 API / 角色单独 API / 情绪评估 API 改过之后，把云端那几行凭据对齐的唯一入口。
+ *
+ * 立即传一次，失败退避重试，并在 localStorage 留底账等启动 / 下次冲刷补传。
+ * 老 worker（不支持凭据表）上它是 no-op——那条路的凭据仍冻结在任务里，靠
+ * refreshApiCredentialsForPendingTasks 逐条补刷。
+ */
+export const syncAmsgLlmCredentials = (apiConfig: APIConfig): void => {
+  pendingCredApiConfig = apiConfig;
+  hasPendingCredSync = true;
+  credRetryCount = 0;
+  if (credRetryTimer != null) { clearTimeout(credRetryTimer); credRetryTimer = null; }
+  writeCredSyncMark(true);
+  void runLlmCredentialSync('change');
+};
+
 // ─── 清空 Worker 地址前的收尾 ───
 
 /**
@@ -477,15 +610,20 @@ export interface AmsgCloudWipeResult {
   stateDeleted: number | null;
   /** 工具凭据有没有当场补传回去（它没有别的补写时机）。 */
   toolConfigRestored: boolean;
+  /**
+   * LLM 凭据表清掉的行数；这一步失败时是 null。
+   * 不当场补回去：这几行由排程 / 发消息那两条路按需重建（本地指纹底账已经一起划掉了）。
+   */
+  llmCredentialsDeleted: number | null;
   /** 推送订阅的去向：重新登记了 / 删掉了不再登记 / 没弄成。 */
   push: 'reregistered' | 'deleted' | 'failed';
 }
 
 /**
  * 清空这个用户在 worker D1 里的全部数据：已排程的任务、同步上去的角色上下文与
- * 工具凭据、推送订阅登记。设置页「清空云端数据」按钮走的就是这里。
+ * 工具凭据、登记的 LLM 凭据行、推送订阅登记。设置页「清空云端数据」按钮走的就是这里。
  *
- * 三样各清各的，**一步失败不短路后面两步**。这一条是这个函数存在的意义：换过
+ * 四样各清各的，**一步失败不短路后面几步**。这一条是这个函数存在的意义：换过
  * AMSG_MASTER_KEY 之后，旧密文全解不开，而「列任务」恰恰要逐条解密（GET /messages），
  * 于是它必然是最先炸的那一步；偏偏这时候最需要被清掉的是 client_state（不清的话
  * 读它的接口一直报错）。串行短路的话用户会一样都清不成，正好卡在最需要它的场景里。
@@ -514,6 +652,15 @@ export const wipeAmsgCloudData = async (
     console.warn(`${HEADER} 清空云端状态失败`, error);
   }
 
+  // 凭据表：和上面几样一样自成一步，前面哪一步炸了都照清。老 worker 上没有这张表，
+  // 那时这一步会失败——它本来就没东西可清，报出来即可，不影响别的几样。
+  let llmCredentialsDeleted: number | null = null;
+  try {
+    llmCredentialsDeleted = await ActiveMsgClient.deleteLlmCredentials({ all: true });
+  } catch (error) {
+    console.warn(`${HEADER} 清空云端 LLM 凭据失败`, error);
+  }
+
   let push: AmsgCloudWipeResult['push'] = 'failed';
   try {
     if (options.pushRegistered) {
@@ -527,7 +674,7 @@ export const wipeAmsgCloudData = async (
     console.warn(`${HEADER} 推送订阅收尾失败`, error);
   }
 
-  return { tasks, stateDeleted, toolConfigRestored, push };
+  return { tasks, stateDeleted, toolConfigRestored, llmCredentialsDeleted, push };
 };
 
 const writeChatPresence = (charId: string, lastUserMessageAt: number | null) => {

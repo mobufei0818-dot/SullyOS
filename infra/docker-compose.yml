@@ -1,0 +1,95 @@
+# /opt/umami/docker-compose.yml
+# umami v3.2.0 (postgresql) — SullyOS 自托管
+# 约束对照：
+#   #2 不接第三方 → PRIVATE_MODE / DISABLE_TELEMETRY / DISABLE_UPDATES
+#   #4 数据库不对公网 → db 服务下方**没有** ports:，仅走 compose 内部网络
+#   #5 不改 tracker 脚本名 → 不设置 TRACKER_SCRIPT_NAME / COLLECT_API_ENDPOINT
+#   #3 后台不公开 → 不设置 DISABLE_LOGIN
+
+name: umami
+
+services:
+  umami:
+    # 按 digest 固定。ghcr 上 v3 没有版本 tag，只有 postgresql-latest，
+    # 该 digest 对应 image created=2026-06-24T23:37:15Z，与 v3.2.0 发布时间一致。
+    image: ghcr.io/umami-software/umami@sha256:8edfe4beaef13f9d1300619fa264ef250a3688df9cc54d24ca830ca31cb475ec
+    container_name: umami
+    restart: unless-stopped
+    init: true
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env                      # APP_SECRET / POSTGRES_PASSWORD，权限 600
+    environment:
+      DATABASE_URL: postgresql://umami:${POSTGRES_PASSWORD}@db:5432/umami
+
+      # —— 隐私 / 断外联 ——
+      PRIVATE_MODE: 1             # 关闭所有对外网络调用（含 favicon 走 duckduckgo）
+      DISABLE_TELEMETRY: 1        # 关闭 i.umami.is 遥测像素
+      DISABLE_UPDATES: 1          # 关闭 api.umami.is/v1/updates 版本检查
+
+      # —— IP 处理 ——
+      # 只信任 Caddy 注入的这一个头。umami 的 getIpAddress() 会优先读它并直接返回，
+      # 不再去看 x-forwarded-for / cf-connecting-ip / true-client-ip 等 15 个可伪造头。
+      CLIENT_IP_HEADER: X-Anon-IP
+
+      # —— 其它 ——
+      REMOVE_TRAILING_SLASH: 1
+      DISABLE_BOT_CHECK: 0
+      NODE_OPTIONS: --max-old-space-size=384   # 这台机器只有 956MB
+      TZ: UTC
+    ports:
+      # 只绑回环。Docker 发布端口会绕过 ufw，绑 127.0.0.1 才是真正的隔离。
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/heartbeat || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  db:
+    image: postgres:17-alpine
+    container_name: umami-db
+    restart: unless-stopped
+    # ⚠️ 这里没有 ports: —— 这是约束 #4 的唯一保证，请勿添加
+    environment:
+      POSTGRES_DB: umami
+      POSTGRES_USER: umami
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: UTC
+      PGTZ: UTC
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - max_connections=50
+      - -c
+      - timezone=UTC
+    volumes:
+      - umami-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  umami-db-data:
+    name: umami-db-data

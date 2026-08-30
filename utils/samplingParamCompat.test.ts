@@ -1,5 +1,23 @@
 import { describe, it, expect } from 'vitest';
-import { modelRejectsSamplingParams, stripSamplingParams, isSamplingParamError } from './samplingParamCompat';
+import { clampClaudeTemperature, modelRejectsSamplingParams, stripSamplingParams, isSamplingParamError } from './samplingParamCompat';
+
+describe('clampClaudeTemperature', () => {
+    it('只把 Claude 超过 1 的 temperature 压到合法上限', () => {
+        const claude: any = { model: 'anthropic/claude-sonnet-4.6', temperature: 1.1, top_p: 0.88 };
+        expect(clampClaudeTemperature(claude)).toBe(true);
+        expect(claude).toEqual({ model: 'anthropic/claude-sonnet-4.6', temperature: 1, top_p: 0.88 });
+
+        const openAi: any = { model: 'gpt-4o', temperature: 1.1 };
+        expect(clampClaudeTemperature(openAi)).toBe(false);
+        expect(openAi.temperature).toBe(1.1);
+    });
+
+    it('Claude 已在合法范围时保持不动', () => {
+        const body: any = { model: 'claude-opus-4-5', temperature: 0.9 };
+        expect(clampClaudeTemperature(body)).toBe(false);
+        expect(body.temperature).toBe(0.9);
+    });
+});
 
 describe('modelRejectsSamplingParams', () => {
     it('识别会废弃采样参数的模型（带上 temperature 会 400）', () => {

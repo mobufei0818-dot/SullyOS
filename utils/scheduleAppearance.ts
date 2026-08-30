@@ -130,3 +130,34 @@ export function resolveScheduleCardPalette(
 export const SCHEDULE_CSS_SCOPE_REGEX = /^\.sully-schedule-[\w-]+\b/;
 
 export const SCHEDULE_CSS_SCOPE_HINT = '`.sully-schedule-*`';
+
+/** Stable public hooks shared by the schedule skin editor and collaboration maker. */
+export const SCHEDULE_CUSTOM_CSS_SELECTOR_GROUPS = [
+    {
+        label: '卡片与宿主',
+        selectors: [
+            '.sully-schedule-root', '.sully-schedule-card', '.sully-schedule-widget',
+            '.sully-schedule-cover', '.sully-schedule-settings',
+        ],
+    },
+    {
+        label: '日程内容',
+        selectors: [
+            '.sully-schedule-header', '.sully-schedule-timeline', '.sully-schedule-list',
+            '.sully-schedule-item', '.sully-schedule-item-current', '.sully-schedule-time',
+            '.sully-schedule-activity', '.sully-schedule-description',
+        ],
+    },
+    {
+        label: '聊天内修改回执',
+        selectors: [
+            '.sully-schedule-change', '.sully-schedule-change-head', '.sully-schedule-change-mark',
+            '.sully-schedule-change-kicker', '.sully-schedule-change-count', '.sully-schedule-change-list',
+            '.sully-schedule-change-row', '.sully-schedule-change-time', '.sully-schedule-change-before',
+            '.sully-schedule-change-arrow', '.sully-schedule-change-after', '.sully-schedule-change-shine',
+        ],
+    },
+] as const;
+
+export const SCHEDULE_CUSTOM_CSS_SELECTORS = SCHEDULE_CUSTOM_CSS_SELECTOR_GROUPS
+    .flatMap(group => [...group.selectors]);

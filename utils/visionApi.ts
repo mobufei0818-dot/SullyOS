@@ -2,6 +2,7 @@ import type { ApiPreset, Message, VisionApiConfig } from '../types';
 import { DB } from './db';
 import { extractContent, safeFetchJson } from './safeApi';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from './apiConfigNormalize';
+import { isBlobRef } from './blobRef';
 
 export const VISION_DESCRIPTION_METADATA_KEY = 'visionDescription';
 
@@ -10,6 +11,18 @@ export const VISION_API_TEST_IMAGE_DATA_URL = 'data:image/png;base64,iVBORw0KGgo
 
 const VISION_PROMPT = `请准确、具体地描述图片中实际可见的内容，供另一个无法看图的对话模型理解。
 请覆盖主体、动作、场景、重要物品、画面中的文字或界面信息；不要猜测画面外的信息，不要寒暄，只输出描述正文。`;
+
+/**
+ * 这个值还能拿去识图吗。三种形态都算数：内嵌的 data URL、网络地址，以及本机存的
+ * 图片令牌（`blobref:`，二进制在 blob_assets 里，见 utils/blobRef.ts）——令牌发出去
+ * 之前会由网络出口统一还原成 data URL（utils/apiBlobRefs.ts），这里只负责别把它
+ * 误判成「图没了」。
+ *
+ * 判漏的后果是静默的：图明明在，识图这步却直接跳过或报「图片数据不可用」，
+ * 界面上一点征兆都没有。
+ */
+const canDescribeImage = (value: unknown): value is string =>
+  typeof value === 'string' && (/^(data:image\/|https?:\/\/)/i.test(value) || isBlobRef(value));
 
 const inFlightDescriptions = new Map<string, Promise<string>>();
 
@@ -47,7 +60,7 @@ export async function describeImageWithVisionApi(
   if (!isVisionApiReady(config)) {
     throw new Error('识图 API 已开启，但 URL、Key 或 Model 尚未填写完整');
   }
-  if (!/^(data:image\/|https?:\/\/)/i.test(imageUrl)) {
+  if (!canDescribeImage(imageUrl)) {
     throw new Error('图片数据不可用，无法调用识图 API');
   }
 
@@ -124,7 +137,7 @@ export async function materializeVisionDescriptions(
     const imageUrl = typeof message.content === 'string' ? message.content : '';
     // 纯文字备份会保留 image 消息但移除原图数据；这种历史沿用“图片已不可用”占位，
     // 不能因为新开了识图 API 就让整轮聊天失败。
-    if (!/^(data:image\/|https?:\/\/)/i.test(imageUrl)) {
+    if (!canDescribeImage(imageUrl)) {
       prepared.push(message);
       continue;
     }

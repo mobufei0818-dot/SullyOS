@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2026 年 8 月 10 日更新说明 · Live2D 陪伴升级</title>
+<style>
+  :root {
+    --ink: #142329;
+    --ink-soft: #53666c;
+    --ink-faint: #829196;
+    --paper: #f2f7f6;
+    --card: #fbfdfc;
+    --rule: #d5e3df;
+    --accent: #167461;
+    --accent-soft: #d9f1eb;
+    --night: #111c2b;
+    --night-soft: #213b45;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(circle at 84% 6%, rgba(53, 184, 155, .11), transparent 32rem),
+      var(--paper);
+    color: var(--ink);
+    font-family: ui-serif, "Noto Serif SC", "Songti SC", Georgia, serif;
+    line-height: 1.8;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 760px; margin: 0 auto; padding: 64px 28px 96px; }
+  .eyebrow {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 22px;
+    color: var(--accent);
+    font: 700 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: .24em;
+  }
+  .eyebrow::after { content: ""; height: 1px; flex: 1; background: var(--rule); }
+  h1 { margin: 0; font-size: clamp(34px, 7vw, 50px); line-height: 1.18; letter-spacing: -.035em; }
+  .lede { max-width: 620px; margin: 22px 0 0; color: var(--ink-soft); font-size: 18px; }
+  .meta { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 30px; }
+  .meta span {
+    border: 1px solid var(--rule);
+    border-radius: 999px;
+    background: rgba(255,255,255,.68);
+    padding: 5px 11px;
+    color: var(--ink-faint);
+    font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .signal {
+    position: relative;
+    overflow: hidden;
+    min-height: 220px;
+    margin: 48px 0 58px;
+    border-radius: 28px;
+    background: linear-gradient(145deg, var(--night), var(--night-soft));
+    color: white;
+    box-shadow: 0 24px 55px rgba(13, 32, 37, .17);
+  }
+  .signal::before {
+    content: "";
+    position: absolute;
+    width: 260px;
+    height: 260px;
+    right: -65px;
+    top: -90px;
+    border-radius: 50%;
+    background: rgba(92, 235, 203, .13);
+    filter: blur(8px);
+  }
+  .signal-copy { position: relative; z-index: 2; max-width: 440px; padding: 34px; }
+  .signal-kicker { color: #83e8d1; font: 700 10px/1.4 ui-monospace, monospace; letter-spacing: .22em; }
+  .signal h2 { margin: 18px 0 10px; font-size: 27px; line-height: 1.35; }
+  .signal p { margin: 0; color: #c3d3d7; font-size: 15px; }
+  .avatar {
+    position: absolute;
+    right: 28px;
+    bottom: -22px;
+    width: 126px;
+    height: 178px;
+    opacity: .58;
+  }
+  .avatar::before {
+    content: "";
+    position: absolute;
+    width: 66px;
+    height: 66px;
+    left: 30px;
+    top: 0;
+    border: 1px solid rgba(131, 232, 209, .45);
+    border-radius: 50%;
+    background: rgba(131, 232, 209, .08);
+  }
+  .avatar::after {
+    content: "";
+    position: absolute;
+    width: 124px;
+    height: 124px;
+    left: 1px;
+    bottom: 0;
+    border: 1px solid rgba(131, 232, 209, .35);
+    border-radius: 54% 54% 10% 10%;
+    background: linear-gradient(rgba(131, 232, 209, .08), rgba(131, 232, 209, .02));
+  }
+
+  .overview { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 60px; }
+  .overview article {
+    border: 1px solid var(--rule);
+    border-radius: 20px;
+    background: var(--card);
+    padding: 24px;
+  }
+  .overview .num { color: var(--accent); font: italic 700 29px/1 Georgia, serif; }
+  .overview h3 { margin: 16px 0 7px; font-size: 18px; }
+  .overview p { margin: 0; color: var(--ink-soft); font-size: 14px; }
+
+  .item { margin-top: 58px; scroll-margin-top: 30px; }
+  .item-head { display: flex; align-items: baseline; gap: 18px; padding-bottom: 17px; border-bottom: 1px solid var(--rule); }
+  .item-num { color: var(--accent); font: italic 700 44px/1 Georgia, serif; }
+  .item h2 { margin: 0; font-size: 26px; line-height: 1.35; }
+  .item h2 small { display: block; margin-top: 5px; color: var(--ink-faint); font-size: 12px; font-weight: 600; letter-spacing: .08em; }
+  .item-body { padding: 22px 0 0; }
+  .item-body p { margin: 0 0 18px; color: var(--ink-soft); }
+  strong { color: var(--ink); }
+  .path {
+    display: inline-block;
+    margin: 3px 0;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: var(--accent-soft);
+    padding: 3px 9px;
+    color: #155d50;
+    font: 700 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  ol { margin: 18px 0 24px; padding: 0; list-style: none; counter-reset: step; }
+  ol li { position: relative; counter-increment: step; padding: 8px 0 8px 42px; color: var(--ink-soft); }
+  ol li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: 7px;
+    width: 27px;
+    height: 27px;
+    border: 1px solid var(--accent);
+    border-radius: 50%;
+    color: var(--accent);
+    text-align: center;
+    font: 700 13px/25px Georgia, serif;
+  }
+  .note {
+    margin: 22px 0;
+    border-left: 3px solid var(--accent);
+    border-radius: 3px 12px 12px 3px;
+    background: var(--accent-soft);
+    padding: 16px 19px;
+    color: #315f56;
+    font-size: 14px;
+  }
+  .finale {
+    margin-top: 64px;
+    border: 1px solid var(--rule);
+    border-radius: 22px;
+    background: white;
+    padding: 28px;
+    text-align: center;
+  }
+  .finale strong { display: block; margin-bottom: 6px; font-size: 20px; }
+  .finale span { color: var(--ink-faint); font-size: 14px; }
+  footer { margin-top: 54px; color: var(--ink-faint); text-align: center; font-size: 13px; }
+
+  @media (max-width: 620px) {
+    .wrap { padding: 42px 20px 74px; }
+    .overview { grid-template-columns: 1fr; }
+    .signal-copy { max-width: 73%; padding: 26px 23px; }
+    .signal h2 { font-size: 23px; }
+    .avatar { right: 10px; }
+    .item-head { align-items: flex-start; }
+    .item h2 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <div class="eyebrow">AUGUST 10, 2026 · LIVE2D UPDATE</div>
+    <h1>Live2D 陪伴升级</h1>
+    <p class="lede">角色不再只待在头像里：现在可以带着自己的模型接起视频通话，也可以直接住进桌面。</p>
+    <div class="meta">
+      <span>2026-08-10</span>
+      <span>VIDEO CALL</span>
+      <span>COMPANION DESKTOP</span>
+    </div>
+  </header>
+
+  <section class="signal" aria-label="Live2D 更新概览">
+    <div class="signal-copy">
+      <div class="signal-kicker">LIVE2D · NOW IN FRAME</div>
+      <h2>一套模型，两种新的陪伴方式。</h2>
+      <p>打电话时见到 ta，回到桌面时 ta 也还在。</p>
+    </div>
+    <div class="avatar" aria-hidden="true"></div>
+  </section>
+
+  <section class="overview" aria-label="本次更新两项内容">
+    <article>
+      <div class="num">01</div>
+      <h3>视频通话</h3>
+      <p>VRM / Live2D 模型进入通话舞台，跟着台词做表情与动作。</p>
+    </article>
+    <article>
+      <div class="num">02</div>
+      <h3>L2D 陪伴桌面</h3>
+      <p>新增「触感陪伴」桌面主题，让角色常驻主屏并回应互动。</p>
+    </article>
+  </section>
+
+  <section class="item" id="video-call">
+    <div class="item-head">
+      <div class="item-num">01</div>
+      <h2>新增视频通话<small>VIDEO CALL · VRM / LIVE2D</small></h2>
+    </div>
+    <div class="item-body">
+      <p>电话现在不只有声音。绑定模型后，角色会出现在视频舞台里，并根据对话内容做出表情、动作和视线变化。</p>
+      <ol>
+        <li>打开桌面的 <span class="path">电话</span>，选择一位角色。</li>
+        <li>在拨号区切换到 <span class="path">视频</span>。</li>
+        <li>首次使用时导入 VRM，或选择包含 <strong>*.model3.json</strong> 的 Live2D 文件夹 / ZIP。</li>
+        <li>完成引导后，点击「视频接通」开始通话。</li>
+      </ol>
+      <div class="note">用户摄像头是可选项；不打开摄像头也能使用角色视频舞台。Live2D 模型和动作设置都保存在本地。</div>
+    </div>
+  </section>
+
+  <section class="item" id="companion-desktop">
+    <div class="item-head">
+      <div class="item-num">02</div>
+      <h2>新增面向 L2D 的桌面主题<small>COMPANION DESKTOP · TOUCH &amp; STAGE</small></h2>
+    </div>
+    <div class="item-body">
+      <p>新增 <strong>「触感陪伴」</strong>桌面主题：Live2D 角色直接成为主屏中心，不需要再打开单独页面。桌面会沿用角色在视频通话中绑定的模型。</p>
+      <ol>
+        <li>先在 <span class="path">电话 → 视频</span> 为角色绑定 VRM / Live2D 模型。</li>
+        <li>打开 <span class="path">外观 → 系统风格</span>。</li>
+        <li>选择 <span class="path">触感陪伴</span>，返回桌面即可进入。</li>
+      </ol>
+      <p>在陪伴桌面中，可以切换角色、调整模型构图和背景，也可以使用不同的桌面框架。启用触摸反馈后，轻触角色会播放预先生成并保存在本地的回应。</p>
+      <div class="note">若桌面没有显示模型，请先确认当前角色已经在「电话 → 视频」中完成模型绑定。</div>
+    </div>
+  </section>
+
+  <section class="finale">
+    <strong>从通话里的见面，到桌面上的常驻。</strong>
+    <span>这次更新的重点只有两件事，但都让角色离你更近了一点。</span>
+  </section>
+
+  <footer>SullyOS · 使用手册更新日志</footer>
+</main>
+</body>
+</html>

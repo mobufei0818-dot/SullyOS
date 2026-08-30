@@ -1,0 +1,11 @@
+CREATE OR REPLACE FUNCTION public.umami_strip_geo()
+ RETURNS trigger
+ LANGUAGE plpgsql
+AS $function$
+BEGIN
+  NEW.region := NULL;
+  NEW.city   := NULL;
+  RETURN NEW;
+END;
+$function$
+CREATE TRIGGER trg_umami_strip_geo BEFORE INSERT OR UPDATE ON public.session FOR EACH ROW EXECUTE FUNCTION umami_strip_geo()

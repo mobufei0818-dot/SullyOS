@@ -3,6 +3,8 @@ packages:
   - "worker/*"
 
 allowBuilds:
+  # 原生画布，只有 pdfjs 的服务端渲染路径会用；本仓库跑不到，构建脚本一直是跳过的
+  canvas: false
   esbuild: true
   sharp: true
   workerd: true

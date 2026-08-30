@@ -641,6 +641,75 @@ export const RoomPlateDB = {
         deleteByKey(STORE_ROOM_PLATES, plateId(charId, room)),
 };
 
+/**
+ * 「门牌被后台改写过了」的窗口事件（`detail: { charId, rooms }`）。
+ *
+ * 给云端整理用的：结果晚几分钟才回来，那时用户多半正开着记忆宫殿。门牌已经写进
+ * IndexedDB，界面却还挂着提交前那份——不派这个事件的话得关掉再打开才看得见，看上去
+ * 就像整理压根没跑。名字放在门牌读写这一层，派发方和监听方都别手抄字符串。
+ */
+export const ROOM_PLATES_UPDATED_EVENT = 'room-plates-updated';
+
+/**
+ * 读一块门牌，没有就现造一块空的（不落库，由调用方决定要不要存）。
+ *
+ * 住在这儿是因为两条整理路径（本地的 roomPlates、上云的 roomPlateCloud）都要它，
+ * 而新门牌的初始形态——尤其是 `version: 0` 这个乐观锁起点——两边必须一模一样。
+ */
+export async function loadOrCreatePlate(charId: string, room: PlateRoom): Promise<RoomPlate> {
+    const existing = await RoomPlateDB.get(charId, room);
+    if (existing) return existing;
+    return {
+        id: plateId(charId, room),
+        charId,
+        room,
+        entries: [],
+        updatedAt: Date.now(),
+        version: 0,
+    };
+}
+
+/**
+ * 每块门牌一条落库队列（见 mutatePlate）。
+ *
+ * 键是门牌主键，所以上限是「角色数 × 4」，用不着回收；存的也只是一个已 settle 的 Promise。
+ */
+const plateWriteQueues = new Map<string, Promise<unknown>>();
+
+/**
+ * 改一块门牌：**现读一份 → 改 → 整块存回去**，同一块门牌上的改动排队走，不并发。
+ *
+ * 门牌是「整块对象存回去」的形状，而动它的路有四条，彼此完全不知道对方存在：
+ * 云端整理结果落地、本地整理落库、送达保证兜底并入、以及门牌面板上用户手改。任意两条
+ * 撞在一起就是后写的把先写的整块盖掉——用户刚敲的字没了，或者一整轮整理的成果没了，
+ * 而两边日志都显示成功。各自在自己那条路里排队是不够的（面板原先就是这么做的），
+ * 队伍必须是**按门牌**的一条，所有路共用。
+ *
+ * `change` 要是纯的——只回答「这份门牌该改成什么样」，回 null 表示不用改。要往界面上
+ * 说话、要记日志的，在外面等这个 promise 落定之后再说。
+ *
+ * @returns 存进去的那一份；`change` 回 null（不用改）时是 null。落库出错照常抛。
+ */
+export async function mutatePlate(
+    charId: string,
+    room: PlateRoom,
+    change: (plate: RoomPlate) => RoomPlate | null,
+): Promise<RoomPlate | null> {
+    const key = plateId(charId, room);
+    const run = async (): Promise<RoomPlate | null> => {
+        const fresh = await loadOrCreatePlate(charId, room);
+        const next = change(fresh);
+        if (!next) return null;
+        await RoomPlateDB.save(next);
+        return next;
+    };
+    // 前一次的成败不影响后一次排上队（两个分支都是 run），但队尾要吞掉异常——
+    // 不吞的话一次落库失败会变成后面每一次的 unhandled rejection。
+    const write = (plateWriteQueues.get(key) ?? Promise.resolve()).then(run, run);
+    plateWriteQueues.set(key, write.catch(() => {}));
+    return write;
+}
+
 // ─── DigestReport CRUD（消化日志） ────────────────────
 
 export const DigestReportDB = {

@@ -323,9 +323,15 @@ describe('sanitizeIntoSegments', () => {
     ]);
   });
 
-  it('CJK 字符之间空格 → 切 (中文里本不该有空格 = LLM 想断行)', () => {
+  it('CJK 字符之间空格属于正文，不切 segment', () => {
     const segs = sanitizeIntoSegments('汉字 汉字');
-    expect(segs.map((s) => s.raw)).toEqual(['汉字', '汉字']);
+    expect(segs.map((s) => s.raw)).toEqual(['汉字 汉字']);
+  });
+
+  it('非内置双语格式的中日混排内容保持为一个 segment', () => {
+    const text = '「筋トレ界隈じゃ日常茶飯事だ（那时候我也说过 健身圈一天四个蛋是日常）」';
+    const segs = sanitizeIntoSegments(text);
+    expect(segs).toEqual([{ raw: text, sanitized: text }]);
   });
 
   it('<think> 整段被剥, 只剩 think 时 → 空数组 (skip-push 触发)', () => {

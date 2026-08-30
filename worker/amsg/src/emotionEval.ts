@@ -27,13 +27,67 @@ import {
   type EmotionEvalOutcome,
 } from '../../../utils/emotionEvalCore';
 
+/** 副 API 凭据的两种长相：任务里内联的 { baseUrl, apiKey, model }，或凭据表里的三件套。 */
+export interface AmsgEmotionEvalApi {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
 /** 前端塞进任务 metadata.amsgEmotionEval 的那份评估配置。 */
 export interface AmsgEmotionEvalSpec {
   /** 带两个占位符的评估提示词模板。 */
   prompt: string;
-  /** 副 API 凭据（没单独配就是主 API 那一份）。 */
-  api: { baseUrl: string; apiKey: string; model: string };
+  /**
+   * 副 API 凭据（没单独配就是主 API 那一份）。
+   *
+   * 支持凭据表的 Worker 上这里是空的——凭据存在 `llm_credentials` 里，任务只带
+   * `credRefs.emotion` 这个名字，到点由 `ctx.resolveLlmCredential` 现读（见
+   * resolveEmotionEvalApi）。换 Key 只要覆盖那一行，任务一个字都不用改。
+   * 还带着它的是老 Worker 建的任务，或旧版前端排的存量任务，照旧直接用。
+   */
+  api?: AmsgEmotionEvalApi;
 }
+
+/** fire 时按名字取一行凭据（上游 amsg-server 2.6.0-next.17+ 挂在 hook ctx 上）。 */
+export type ResolveLlmCredential = (
+  credId: string,
+) => Promise<{ apiUrl: string; apiKey: string; primaryModel: string } | null>;
+
+/**
+ * 这一轮评估用哪份副 API 凭据。
+ *
+ * 顺序：任务里内联的那份优先（存量任务只有这一份），没有才按 `credRefs.emotion` 去表里现读。
+ * 两条都取不到就返回 null——调用方据此跳过评估，主回复照发（评估从来不连累正文）。
+ *
+ * 凭据表里存的是 `apiUrl`（已经是 /chat/completions 那个终点地址），而评估请求走的是
+ * requestEmotionEval 那套 `{ baseUrl }` 口径——它自己会补 /chat/completions，所以这里
+ * 把末尾那一段摘掉再交出去，两条路发出去的地址才一模一样。
+ */
+export const resolveEmotionEvalApi = async (
+  spec: AmsgEmotionEvalSpec,
+  credRefs: Record<string, unknown> | undefined | null,
+  resolveLlmCredential: ResolveLlmCredential | undefined,
+): Promise<AmsgEmotionEvalApi | null> => {
+  if (spec.api?.baseUrl && spec.api.model) return spec.api;
+  const credId = credRefs && typeof credRefs === 'object' && !Array.isArray(credRefs)
+    ? (credRefs as Record<string, unknown>).emotion
+    : undefined;
+  if (typeof credId !== 'string' || !credId || typeof resolveLlmCredential !== 'function') return null;
+  let resolved: Awaited<ReturnType<ResolveLlmCredential>> = null;
+  try {
+    resolved = await resolveLlmCredential(credId);
+  } catch (error) {
+    console.warn('[amsg:emotion] 凭据读不出来，这一轮不评估（主回复不受影响）', error);
+    return null;
+  }
+  if (!resolved?.apiUrl || !resolved.primaryModel) return null;
+  return {
+    baseUrl: resolved.apiUrl.replace(/\/chat\/completions\/*$/i, ''),
+    apiKey: resolved.apiKey || '',
+    model: resolved.primaryModel,
+  };
+};
 
 
 /**
@@ -43,13 +97,18 @@ export interface AmsgEmotionEvalSpec {
  */
 export const amsgEmotionUpdateKey = (clientTaskId: string) => `emotion_update:${clientTaskId}`;
 
-/** 这份配置能不能用来发请求（缺哪一样都发不出去）。 */
+/**
+ * 这份配置能不能用来发请求。
+ *
+ * 提示词是硬要求；凭据两种给法认一种就行——内联三件套（存量任务 / 老 Worker），
+ * 或者整个不带 api、由 `credRefs.emotion` 到点现读（见 resolveEmotionEvalApi）。
+ * 带了 api 却配不齐的那种一律判不可用（那份发不出去），和以前一样。
+ */
 const isUsableEvalSpec = (spec: unknown): spec is AmsgEmotionEvalSpec => {
   const s = spec as AmsgEmotionEvalSpec | undefined;
-  return !!s
-    && typeof s.prompt === 'string' && !!s.prompt
-    && !!s.api
-    && typeof s.api.baseUrl === 'string' && !!s.api.baseUrl
+  if (!s || typeof s.prompt !== 'string' || !s.prompt) return false;
+  if (s.api === undefined || s.api === null) return true;
+  return typeof s.api.baseUrl === 'string' && !!s.api.baseUrl
     && typeof s.api.model === 'string' && !!s.api.model;
 };
 
@@ -141,8 +200,10 @@ export const EMOTION_EVAL_RIDE_ALONG_MS = 10_000;
  */
 export const runAmsgEmotionEval = async (
   spec: AmsgEmotionEvalSpec,
+  /** 这一轮用哪份副 API——由 resolveEmotionEvalApi 从内联凭据或凭据表里取好再传进来。 */
+  api: AmsgEmotionEvalApi,
   chatMessages: Array<{ role: string; content: unknown }>,
   charName: string,
   timeoutMs: number = EMOTION_EVAL_TIMEOUT_MS,
 ): Promise<AmsgEmotionEvalOutcome> =>
-  requestEmotionEval(spec.api, coreRestoreEvalPrompt(spec.prompt, chatMessages, charName), timeoutMs);
+  requestEmotionEval(api, coreRestoreEvalPrompt(spec.prompt, chatMessages, charName), timeoutMs);

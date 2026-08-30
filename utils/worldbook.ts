@@ -93,6 +93,21 @@ export const toMountedWorldbook = (book: Worldbook): MountedWorldbook => ({
     sourceUid: book.sourceUid,
 });
 
+/**
+ * Install a complete worldbook group into one character cache. Existing entries
+ * with the same ids are replaced, so retrying an install cannot create duplicates.
+ */
+export const upsertMountedWorldbooks = (
+    current: MountedWorldbook[] = [],
+    books: Worldbook[] = [],
+): MountedWorldbook[] => {
+    const incomingIds = new Set(books.map(book => book.id));
+    return [
+        ...current.filter(book => !incomingIds.has(book.id)),
+        ...books.map(toMountedWorldbook),
+    ];
+};
+
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 const keywordMatches = (

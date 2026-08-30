@@ -15,8 +15,8 @@
  * 一直有字节在流，网关不会误判死连接。已经自己设了 `stream:true` 的调用（聊天主路径、
  * 见面、情绪评估）不碰——它们各自的解析链路（增量预览 / safeResponseJson）原样工作。
  *
- * 自愈：个别中转对 stream/stream_options 直接 4xx 的，拦截器用升级前的原 body 重发
- * 一次（见 OSContext 集成点），行为退回旧版。
+ * 个别中转若拒绝 stream/stream_options，错误会原样交给调用方。不能在拦截器里自动
+ * 重发付费生成请求：中转可能已经把第一份交给上游，静默重发会造成重复扣费。
  */
 
 import { isSseResponseText, parseSseToCompletion } from './safeApi';

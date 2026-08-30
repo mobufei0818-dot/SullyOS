@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, PhoneSimLog, ConvTopic, AiSession, AiServiceKind, TavernCard } from '../types';
+import { CharacterProfile, PhoneEvidence, PhoneCustomApp, PhoneContact, PhoneSimLog, ConvTopic, AiSession, AiServiceKind, TavernCard, APIConfig } from '../types';
 import { ContextBuilder } from '../utils/context';
 import Modal from '../components/os/Modal';
+import TokenImg from '../components/os/TokenImg';
+import { useBlobRefUrl } from '../utils/blobRef';
 import { safeResponseJson, extractContent, extractJson } from '../utils/safeApi';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import {
@@ -17,6 +19,7 @@ import { getLastInnerState } from '../utils/emotionApply';
 import { trackEvent } from '../utils/analytics';
 import { normalizePhoneEvidence, phoneFieldToText } from '../utils/phoneEvidence';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import { getCheckPhoneApi, resolveCheckPhoneApi, setCheckPhoneApi } from '../utils/checkPhoneApi';
 import {
     User, Phone, ChatCircleDots, ChatCircle, ShoppingBag, Hamburger, Compass, GearSix,
     Plus, SignOut, CaretLeft, CaretRight, Cloud, ImagesSquare, LockSimple, Package,
@@ -254,7 +257,7 @@ const HomeCard: React.FC<{
 );
 
 const CheckPhone: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, updateCharacter, apiConfig, addToast, userProfile, characterGroups } = useOS();
+    const { closeApp, characters, activeCharacterId, updateCharacter, apiConfig, apiPresets, addToast, userProfile, characterGroups } = useOS();
     const [view, setView] = useState<'select' | 'phone'>('select');
     // activeAppId: 'home' | 'chat_detail' | 'app_id'
     const [activeAppId, setActiveAppId] = useState<string>('home');
@@ -263,6 +266,12 @@ const CheckPhone: React.FC = () => {
     const [page, setPage] = useState(0); // 0 = home, 1 = custom apps
     const [selectPage, setSelectPage] = useState(0); // Target Device 选人界面的翻页（每页 6 人）
     const [selectGroupId, setSelectGroupId] = useState(GROUP_FILTER_ALL); // 选人界面的分组筛选
+    const [showApiSettings, setShowApiSettings] = useState(false);
+    const [phoneApiConfig, setPhoneApiConfigState] = useState<APIConfig | null>(() => getCheckPhoneApi());
+    const [testingPhoneApi, setTestingPhoneApi] = useState(false);
+    const [phoneApiTestResult, setPhoneApiTestResult] = useState<string | null>(null);
+    const effectiveApiConfig = resolveCheckPhoneApi(phoneApiConfig, apiConfig);
+    const phoneApiFollowsDefault = !phoneApiConfig?.baseUrl;
 
     // Detail State
     const [selectedChatRecord, setSelectedChatRecord] = useState<PhoneEvidence | null>(null);
@@ -349,6 +358,10 @@ const CheckPhone: React.FC = () => {
     const touchStartX = useRef<number | null>(null);
     const touchStartY = useRef<number | null>(null);
 
+    // 桌面底图用的是角色的见面背景，字段里存的是 blobref 令牌（二进制在 IndexedDB）。
+    // 令牌塞不进 CSS url()，先在组件顶层解析成能用的地址；非令牌值原样透传。
+    const dateBackgroundUrl = useBlobRefUrl(targetChar?.dateBackground);
+
     // Derived state for evidence records
     const records = (targetChar?.phoneState?.records || []).map(normalizePhoneEvidence);
     const customApps = targetChar?.phoneState?.customApps || [];
@@ -405,6 +418,12 @@ const CheckPhone: React.FC = () => {
         }
     }, [characters]);
 
+    useEffect(() => {
+        const sync = () => setPhoneApiConfigState(getCheckPhoneApi());
+        window.addEventListener('check-phone-api-changed', sync);
+        return () => window.removeEventListener('check-phone-api-changed', sync);
+    }, []);
+
     // Reset page scroll on navigation to prevent mobile layout shift
     useEffect(() => {
         window.scrollTo(0, 0);
@@ -443,6 +462,60 @@ const CheckPhone: React.FC = () => {
         setSelectedEvidenceRecord(null);
         setEvidenceBackAppId('home');
         setPage(0);
+    };
+
+    const apiHost = (url?: string) => {
+        try { return url ? new URL(url).host : '未配置'; }
+        catch { return url || '未配置'; }
+    };
+    const isSamePhoneApi = (config: APIConfig) => Boolean(phoneApiConfig)
+        && phoneApiConfig!.baseUrl === config.baseUrl
+        && phoneApiConfig!.model === config.model
+        && phoneApiConfig!.apiKey === config.apiKey;
+
+    const choosePhoneApi = (config: APIConfig | null) => {
+        setCheckPhoneApi(config);
+        setPhoneApiConfigState(config?.baseUrl ? config : null);
+        setPhoneApiTestResult(null);
+        addToast(config ? '查手机已切换到独立 API' : '查手机已改为跟随聊天默认', 'success');
+        trackEvent('切换查手机独立 API', { mode: config ? 'independent' : 'default' });
+    };
+
+    const testPhoneApi = async () => {
+        const config = effectiveApiConfig;
+        if (!config?.baseUrl || !config?.model) {
+            setPhoneApiTestResult('当前没有可用的 API');
+            return;
+        }
+        setTestingPhoneApi(true);
+        setPhoneApiTestResult(null);
+        try {
+            const response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${config.apiKey || 'sk-none'}`,
+                },
+                body: JSON.stringify({
+                    model: config.model,
+                    messages: [{ role: 'user', content: 'Hi' }],
+                    max_tokens: 5,
+                    stream: false,
+                }),
+            });
+            if (!response.ok) {
+                const detail = await response.text().catch(() => '');
+                setPhoneApiTestResult(`HTTP ${response.status}${detail ? `：${detail.slice(0, 80)}` : ''}`);
+                return;
+            }
+            const data = await safeResponseJson(response);
+            const reply = extractContent(data) || '';
+            setPhoneApiTestResult(`连接成功${reply ? ` · ${reply.slice(0, 24)}` : ''}`);
+        } catch (error: any) {
+            setPhoneApiTestResult(`连接失败：${error?.message || '网络错误'}`);
+        } finally {
+            setTestingPhoneApi(false);
+        }
     };
 
     const handleExitPhone = () => {
@@ -616,7 +689,7 @@ const CheckPhone: React.FC = () => {
 
     // --- Core Generation Logic ---
     const handleGenerate = async (type: string, customPrompt?: string, layout?: LayoutId) => {
-        if (!targetChar || !apiConfig.apiKey) {
+        if (!targetChar || !effectiveApiConfig.apiKey) {
             addToast('配置错误', 'error');
             return;
         }
@@ -743,11 +816,11 @@ ${realCharRule}
 
             const fullPrompt = `${context}\n\n### [你和用户「${userProfile.name}」的最近聊天（仅背景参考）]\n${recentMsgs}\n\n${perspectiveLock}\n\n### [Task]\n${promptInstruction}\n请结合上面的「当前时间 / 距离上次联系」和人设调整生成内容的时间戳和情绪。如果很久没联系，记录可能是近期的独处状态；如果刚聊过，记录可能与聊天内容相关。`;
 
-            const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+            const response = await fetch(`${effectiveApiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApiConfig.apiKey}` },
                 body: JSON.stringify({
-                    model: apiConfig.model,
+                    model: effectiveApiConfig.model,
                     messages: [{ role: "user", content: fullPrompt }],
                     temperature: 0.8
                 })
@@ -882,10 +955,10 @@ ${realCharRule}
 
     // 裸 LLM 调用（智能体生成 / 互动续写共用）
     const callLLM = async (prompt: string, temperature = 0.85): Promise<string> => {
-        const response = await fetch(`${apiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+        const response = await fetch(`${effectiveApiConfig.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiConfig.apiKey}` },
-            body: JSON.stringify({ model: apiConfig.model, messages: [{ role: 'user', content: prompt }], temperature }),
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${effectiveApiConfig.apiKey}` },
+            body: JSON.stringify({ model: effectiveApiConfig.model, messages: [{ role: 'user', content: prompt }], temperature }),
         });
         if (!response.ok) throw new Error('API Error');
         const data = await safeResponseJson(response);
@@ -911,7 +984,7 @@ ${realCharRule}
 
     // 生成：偷看机主在某个 AI 服务里的使用记录
     const handleGenerateAiAgent = async (service: AiServiceKind) => {
-        if (!targetChar || !apiConfig.apiKey) { addToast('配置错误', 'error'); return; }
+        if (!targetChar || !effectiveApiConfig.apiKey) { addToast('配置错误', 'error'); return; }
         setIsLoading(true);
         trackEvent('偷看 AI 助手使用记录', { service });
         try {
@@ -1120,7 +1193,7 @@ ${olderText}
     const handleAiSend = async () => {
         const session = selectedAiSession;
         const text = aiInput.trim();
-        if (!session || !text || !targetChar || !apiConfig.apiKey) return;
+        if (!session || !text || !targetChar || !effectiveApiConfig.apiKey) return;
         const isTavern = session.service === 'tavern';
         setAiSending(true);
         setAiInput('');
@@ -1177,7 +1250,7 @@ ${olderText}
     // 自然推进：不用 user 开口，让 LLM 接着剧情自己往下写一轮（双方都由 AI 演）
     const handleAiAutoContinue = async () => {
         const session = selectedAiSession;
-        if (!session || !targetChar || !apiConfig.apiKey || aiSending) return;
+        if (!session || !targetChar || !effectiveApiConfig.apiKey || aiSending) return;
         const isTavern = session.service === 'tavern';
         setAiSending(true);
         try {
@@ -1315,7 +1388,7 @@ ${olderText}
 
     // 用指定的卡开一局：生成一段以这张卡为对手的酒馆剧情（卡片本身不新增、不顶掉）
     const handlePlayCard = async (card: TavernCard) => {
-        if (!targetChar || !apiConfig.apiKey) { addToast('配置错误', 'error'); return; }
+        if (!targetChar || !effectiveApiConfig.apiKey) { addToast('配置错误', 'error'); return; }
         setIsLoading(true);
         trackEvent('用角色卡开一局');
         try {
@@ -1655,8 +1728,8 @@ ${olderText}
             const aChunk = serializeTurns(aLines.slice(mark, mark + ARCHIVE_EVERY));
             const bChunk = flipTranscript(aChunk);
             const [aSum, bSum] = await Promise.all([
-                summarizeConversation({ api: apiConfig as any, speakerName: targetChar.name, otherName: b.name, transcript: aChunk }),
-                summarizeConversation({ api: apiConfig as any, speakerName: b.name, otherName: targetChar.name, transcript: bChunk }),
+                summarizeConversation({ api: effectiveApiConfig as any, speakerName: targetChar.name, otherName: b.name, transcript: aChunk }),
+                summarizeConversation({ api: effectiveApiConfig as any, speakerName: b.name, otherName: targetChar.name, transcript: bChunk }),
             ]);
             const ts = Date.now();
             const mk = () => `tp-${ts}-${Math.random().toString(36).slice(2, 7)}`;
@@ -1684,7 +1757,7 @@ ${olderText}
 
     // P1：真角色双向对话（A 发 B 回，双 LLM，镜像到 B）
     const handleRealConversation = async (contact: PhoneContact) => {
-        if (!targetChar || !apiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
+        if (!targetChar || !effectiveApiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
         const b = characters.find(c => c.id === contact.linkedCharId);
         if (!b) { addToast('该联系人未绑定真实角色', 'error'); return; }
         setIsLoading(true);
@@ -1698,7 +1771,7 @@ ${olderText}
             const archivedALines = aAllLines.slice(0, aArchived);            // 留着给用户看的原文
             const recentDetail = serializeTurns(aAllLines.slice(aArchived));  // 喂上下文的近段
             const result = await runRealConversation({
-                a: targetChar, b, user: userProfile, api: apiConfig as any,
+                a: targetChar, b, user: userProfile, api: effectiveApiConfig as any,
                 affinityA: contact.affinity, affinityB: bToA?.affinity ?? 0,
                 existingDetail: recentDetail,
                 // bNote = A 对 B 的备注（喂给 A）；aNote = B 对 A 的备注（喂给 B）。别接反。
@@ -1727,13 +1800,13 @@ ${olderText}
 
     // 与虚构 NPC 的对话（机主脑补，单 LLM，纯虚构、不镜像）
     const handleNpcConversation = async (contact: PhoneContact) => {
-        if (!targetChar || !apiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
+        if (!targetChar || !effectiveApiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
         setIsLoading(true);
         trackEvent('生成一段与联系人的对话', { contactKind: 'npc' });
         try {
             const existing = (targetChar.phoneState?.records || []).find(r => r.type === 'chat' && (r.contactId === contact.id || normName(r.title) === normName(contact.name)));
             const { detail, learnedNew } = await runNpcConversation({
-                host: targetChar, user: userProfile, api: apiConfig as any,
+                host: targetChar, user: userProfile, api: effectiveApiConfig as any,
                 npcName: contact.name, identity: contact.identity, note: contact.note,
                 learned: contact.learned, rounds: 4, existingDetail: existing?.detail,
             });
@@ -1883,14 +1956,14 @@ ${olderText}
     // ----- 人格模拟：后台生成（生成期间用户可离开本 App 去别处逛） -----
     const runSim = async (m: 'daily' | 'event', t: string, presence: 'default' | 'light' | 'none' = 'default', tone: 'mix' | 'depressive' | 'darkhumor' | 'cute' = 'mix') => {
         if (!targetChar) return;
-        if (!apiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
+        if (!effectiveApiConfig.apiKey) { addToast('请先配置 API', 'error'); return; }
         const cid = targetChar.id, cname = targetChar.name;
         personaSimStore.set({ status: 'loading', mode: m, theme: t, charId: cid, charName: cname });
         // 只报模式（日常/事件）这个固定枚举；主题 t 是用户自己写的文本，不上报
         trackEvent('生成人格模拟演出', { mode: m });
         try {
             const generated = await generatePersonaScript({
-                char: targetChar, userProfile, apiConfig: apiConfig as any, mode: m, theme: t, userPresence: presence, tone,
+                char: targetChar, userProfile, apiConfig: effectiveApiConfig as any, mode: m, theme: t, userPresence: presence, tone,
             });
             personaSimStore.set({ status: 'ready', mode: m, theme: t, script: generated, charId: cid, charName: cname });
             addToast('演出已就绪', 'success');
@@ -2045,7 +2118,7 @@ ${olderText}
                             <div key={r.id} onClick={() => { setSelectedChatRecord(r); setTranscriptExpanded(false); setActiveAppId('chat_detail'); }}
                                 className="group relative flex items-center gap-3.5 rounded-2xl p-3.5 bg-white/[0.035] border border-white/[0.06] active:scale-[0.99] transition cursor-pointer animate-fade-in">
                                 {av ? (
-                                    <img src={av} alt="" className="w-12 h-12 rounded-2xl object-cover shrink-0" />
+                                    <TokenImg value={av} alt="" className="w-12 h-12 rounded-2xl object-cover shrink-0" />
                                 ) : (
                                     <div className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 text-white font-semibold text-lg"
                                         style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)`, boxShadow: `inset 0 0 18px ${accent}25` }}>
@@ -2099,7 +2172,7 @@ ${olderText}
                         <div key={idx} className={`flex items-end gap-2 ${msg.isMe ? 'justify-end' : 'justify-start'}`}>
                             {!msg.isMe && (
                                 partnerAvatar ? (
-                                    <img src={partnerAvatar} alt="" className="w-8 h-8 rounded-xl object-cover shrink-0" />
+                                    <TokenImg value={partnerAvatar} alt="" className="w-8 h-8 rounded-xl object-cover shrink-0" />
                                 ) : (
                                     <div className="w-8 h-8 rounded-xl flex items-center justify-center text-xs text-white shrink-0"
                                         style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)` }}>
@@ -2115,7 +2188,7 @@ ${olderText}
                                 style={msg.isMe ? { background: `linear-gradient(135deg, ${accent}, ${accent}bb)` } : undefined}>
                                 {msg.content}
                             </div>
-                            {msg.isMe && <img src={targetChar.avatar} className="w-8 h-8 rounded-xl object-cover shrink-0" />}
+                            {msg.isMe && <TokenImg value={targetChar.avatar} className="w-8 h-8 rounded-xl object-cover shrink-0" />}
                         </div>
                     ))}
                     <div ref={chatEndRef} />
@@ -2174,7 +2247,7 @@ ${olderText}
                         <article>
                             <div className="flex items-center gap-3 pb-4 border-b border-white/[0.07]">
                                 {targetChar?.avatar
-                                    ? <img src={targetChar.avatar} alt="" className="w-12 h-12 rounded-full object-cover" />
+                                    ? <TokenImg value={targetChar.avatar} alt="" className="w-12 h-12 rounded-full object-cover" />
                                     : <div className="w-12 h-12 rounded-full flex items-center justify-center text-white font-semibold" style={{ background: accent }}>{charName.slice(0, 1)}</div>}
                                 <div className="min-w-0">
                                     <div className="text-[15px] font-semibold text-white/95">{charName}</div>
@@ -2382,7 +2455,7 @@ ${olderText}
                             className="group relative rounded-2xl p-4 pr-8 bg-white/[0.035] border border-white/[0.06] animate-slide-up cursor-pointer active:scale-[0.99] transition focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60">
                             <div className="flex items-center gap-3 mb-2.5">
                                 {targetChar?.avatar
-                                    ? <img src={targetChar.avatar} className="w-9 h-9 rounded-full object-cover" />
+                                    ? <TokenImg value={targetChar.avatar} className="w-9 h-9 rounded-full object-cover" />
                                     : <div className="w-9 h-9 rounded-full" style={{ background: accent }} />}
                                 <div className="min-w-0">
                                     <div className="text-[13px] font-semibold text-white/95">{charName}</div>
@@ -2473,7 +2546,7 @@ ${olderText}
                                     <span className={`w-5 h-5 rounded-full border flex items-center justify-center shrink-0 text-[11px] font-bold transition ${selected ? 'bg-pink-500 border-pink-500 text-white' : 'border-white/30 text-transparent'}`}>✓</span>
                                 )}
                                 {av ? (
-                                    <img src={av} alt="" className="w-12 h-12 rounded-2xl object-cover shrink-0" />
+                                    <TokenImg value={av} alt="" className="w-12 h-12 rounded-2xl object-cover shrink-0" />
                                 ) : (
                                     <div className="w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 text-white font-semibold text-lg"
                                         style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)`, boxShadow: `inset 0 0 18px ${accent}25` }}>
@@ -2769,7 +2842,7 @@ ${olderText}
                                 <div className="flex items-center gap-2 mb-2">
                                     <div className="w-7 h-7 rounded-lg flex items-center justify-center overflow-hidden shrink-0"
                                         style={{ background: f.isMe ? 'transparent' : `${t.accent}1f` }}>
-                                        {f.isMe ? <img src={targetChar.avatar} className="w-7 h-7 object-cover" /> : <span className="text-base">{partnerEmoji}</span>}
+                                        {f.isMe ? <TokenImg value={targetChar.avatar} className="w-7 h-7 object-cover" /> : <span className="text-base">{partnerEmoji}</span>}
                                     </div>
                                     <span className="text-[12.5px] font-semibold" style={{ color: f.isMe ? t.accent : t.text }}>{who}</span>
                                     {f.isMe && <span className="text-[9px] px-1.5 py-0.5 rounded-full" style={{ background: `${t.accent}26`, color: t.accent }}>玩家</span>}
@@ -2798,7 +2871,7 @@ ${olderText}
                                     }}>
                                     {m.text}
                                 </div>
-                                {m.isMe && <img src={targetChar.avatar} className="w-8 h-8 rounded-xl object-cover shrink-0" />}
+                                {m.isMe && <TokenImg value={targetChar.avatar} className="w-8 h-8 rounded-xl object-cover shrink-0" />}
                             </div>
                         );
                     })}
@@ -2858,7 +2931,7 @@ ${olderText}
         const commitAff = () => { if (affinityDraft != null) { handleSetAffinity(c, affinityDraft); setAffinityDraft(null); } };
         const closeProfile = () => { setShowProfile(false); setEditingIdentity(false); setEditingNote(false); };
         const avatarNode = (size: string, txt: string) => av
-            ? <img src={av} alt="" className={`${size} rounded-2xl object-cover shrink-0`} />
+            ? <TokenImg value={av} alt="" className={`${size} rounded-2xl object-cover shrink-0`} />
             : <div className={`${size} rounded-2xl flex items-center justify-center shrink-0 text-white font-semibold ${txt}`} style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)` }}>{c.name[0]}</div>;
         return (
             <SubAppShell>
@@ -2911,11 +2984,11 @@ ${olderText}
                                 <span className={`w-4 h-4 rounded-full border flex items-center justify-center shrink-0 text-[9px] font-bold self-center ${sel ? 'bg-pink-500 border-pink-500 text-white' : 'border-white/30 text-transparent'} ${m.isMe ? 'order-last' : ''}`}>✓</span>
                             )}
                             {!m.isMe && (av
-                                ? <img src={av} alt="" className="w-7 h-7 rounded-xl object-cover shrink-0" />
+                                ? <TokenImg value={av} alt="" className="w-7 h-7 rounded-xl object-cover shrink-0" />
                                 : <div className="w-7 h-7 rounded-xl flex items-center justify-center text-[11px] text-white shrink-0" style={{ background: `linear-gradient(135deg, ${accent}40, ${accent}10)` }}>{c.name[0]}</div>)}
                             <div className={`px-3.5 py-2.5 rounded-2xl max-w-[76%] text-[13px] leading-relaxed break-words ${m.isMe ? 'text-white rounded-br-md' : 'bg-white/[0.07] text-white/90 border border-white/[0.06] rounded-bl-md'}`}
                                 style={m.isMe ? { background: `linear-gradient(135deg, ${accent}, ${accent}bb)` } : undefined}>{m.content}</div>
-                            {m.isMe && <img src={targetChar.avatar} alt="" className="w-7 h-7 rounded-xl object-cover shrink-0" />}
+                            {m.isMe && <TokenImg value={targetChar.avatar} alt="" className="w-7 h-7 rounded-xl object-cover shrink-0" />}
                         </div>
                     );})}
                     {isLoading && (
@@ -3411,7 +3484,7 @@ ${olderText}
     );
 
     const renderDesktop = () => {
-        const hasBg = !!targetChar?.dateBackground;
+        const hasBg = !!dateBackgroundUrl;
         const totalPages = customApps.length > 0 ? 2 : 1;
 
         const onTouchStart = (e: React.TouchEvent) => {
@@ -3437,7 +3510,7 @@ ${olderText}
                     style={{ background: 'radial-gradient(120% 80% at 50% 0%, #1a1d2b 0%, #0a0c12 55%, #060709 100%)' }} />
                 {hasBg && (
                     <div className="absolute inset-0 opacity-25 pointer-events-none"
-                        style={{ backgroundImage: `url(${targetChar!.dateBackground})`, backgroundSize: 'cover', backgroundPosition: 'center' }} />
+                        style={{ backgroundImage: `url("${dateBackgroundUrl}")`, backgroundSize: 'cover', backgroundPosition: 'center' }} />
                 )}
                 <div className="absolute inset-0 pointer-events-none"
                     style={{ background: 'linear-gradient(to bottom, rgba(7,8,9,0.35) 0%, rgba(7,8,9,0.1) 30%, rgba(7,8,9,0.85) 100%)' }} />
@@ -3508,7 +3581,11 @@ ${olderText}
                         <CaretLeft size={18} weight="bold" />
                     </button>
                     <span className="font-semibold tracking-[0.25em] uppercase text-[13px] text-white/80">Target Device</span>
-                    <div className="w-9" />
+                    <button onClick={() => { setPhoneApiTestResult(null); setShowApiSettings(true); }} aria-label="查手机 API 设置"
+                        className="relative w-9 h-9 rounded-full flex items-center justify-center text-white/75 bg-white/[0.05] border border-white/[0.08] active:scale-90 transition">
+                        <GearSix size={17} weight={phoneApiFollowsDefault ? 'regular' : 'fill'} />
+                        {!phoneApiFollowsDefault && <span className="absolute right-1.5 bottom-1.5 h-1.5 w-1.5 rounded-full bg-violet-400 shadow-[0_0_6px_#a78bfa]" />}
+                    </button>
                 </div>
                 {(() => {
                     const PER_PAGE = 6;
@@ -3527,7 +3604,7 @@ ${olderText}
                                         className="min-h-0 rounded-3xl border border-white/[0.07] bg-white/[0.03] backdrop-blur-xl p-4 flex flex-col items-center justify-center gap-3 cursor-pointer active:scale-95 transition group hover:border-violet-400/50 hover:shadow-[0_0_24px_rgba(157,124,255,0.25)] relative overflow-hidden">
                                         <div className="absolute -top-10 -right-10 w-28 h-28 rounded-full blur-3xl bg-violet-500/0 group-hover:bg-violet-500/20 transition" />
                                         <div className="w-20 h-20 rounded-full p-[2px] border-2 border-white/15 group-hover:border-violet-400/70 transition-colors relative z-10 shrink-0">
-                                            <img src={c.avatar} className="w-full h-full rounded-full object-cover grayscale group-hover:grayscale-0 transition-all" />
+                                            <TokenImg value={c.avatar} className="w-full h-full rounded-full object-cover grayscale group-hover:grayscale-0 transition-all" />
                                         </div>
                                         <div className="text-center relative z-10">
                                             <div className="font-semibold text-white/90 text-sm group-hover:text-violet-300">{c.name}</div>
@@ -3557,6 +3634,59 @@ ${olderText}
                         </div>
                     );
                 })()}
+                <Modal isOpen={showApiSettings} title="查手机 · API 设置" onClose={() => setShowApiSettings(false)}>
+                    <div className="space-y-3">
+                        <p className="text-[11px] leading-relaxed text-slate-500">
+                            查手机里的内容生成、人际关系对话、智能体和人格模拟都会走这里。单独选择后不影响聊天；不设置则跟随聊天默认。
+                        </p>
+                        <div className="rounded-2xl bg-slate-50 border border-slate-200 p-3.5">
+                            <div className="text-[10px] tracking-[0.18em] text-slate-400 mb-1">当前生效</div>
+                            <div className="text-[13px] font-bold text-slate-800 break-all">{effectiveApiConfig?.model || '未配置'}</div>
+                            <div className="text-[10.5px] text-slate-400 mt-0.5 break-all">
+                                {apiHost(effectiveApiConfig?.baseUrl)} · {phoneApiFollowsDefault ? '跟随聊天默认' : '查手机独立'}
+                            </div>
+                            <button onClick={testPhoneApi} disabled={testingPhoneApi}
+                                className="mt-2.5 px-3 py-1.5 rounded-full bg-violet-100 text-violet-700 text-[11px] font-bold disabled:opacity-50">
+                                {testingPhoneApi ? '测试中…' : '测试连接'}
+                            </button>
+                            {phoneApiTestResult && (
+                                <div className={`mt-2 rounded-xl px-2.5 py-2 text-[10.5px] leading-relaxed ${phoneApiTestResult.startsWith('连接成功') ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'}`}>
+                                    {phoneApiTestResult}
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="text-[10px] tracking-[0.18em] text-slate-400 px-1">选择 API</div>
+                        <button onClick={() => choosePhoneApi(null)}
+                            className={`w-full rounded-2xl border p-3 text-left transition ${phoneApiFollowsDefault ? 'border-violet-300 bg-violet-50' : 'border-slate-200 bg-white'}`}>
+                            <div className="flex items-center gap-2">
+                                <div className="min-w-0 flex-1">
+                                    <div className="text-[12px] font-bold text-slate-800">跟随聊天默认</div>
+                                    <div className="text-[10px] text-slate-400 truncate">{apiConfig?.model || '未配置'} · {apiHost(apiConfig?.baseUrl)}</div>
+                                </div>
+                                {phoneApiFollowsDefault && <span className="text-[10px] font-bold text-violet-600">✓ 使用中</span>}
+                            </div>
+                        </button>
+
+                        {apiPresets.length === 0 ? (
+                            <p className="px-1 text-[10.5px] leading-relaxed text-slate-400">“设置”里还没有保存的 API 预设。先保存预设，这里就能单独选择。</p>
+                        ) : apiPresets.map(preset => {
+                            const active = isSamePhoneApi(preset.config);
+                            return (
+                                <button key={preset.id} onClick={() => choosePhoneApi(preset.config)}
+                                    className={`w-full rounded-2xl border p-3 text-left transition ${active ? 'border-violet-300 bg-violet-50' : 'border-slate-200 bg-white'}`}>
+                                    <div className="flex items-center gap-2">
+                                        <div className="min-w-0 flex-1">
+                                            <div className="text-[12px] font-bold text-slate-800 truncate">{preset.name}</div>
+                                            <div className="text-[10px] text-slate-400 truncate">{preset.config.model || '未配置'} · {apiHost(preset.config.baseUrl)}</div>
+                                        </div>
+                                        {active && <span className="text-[10px] font-bold text-violet-600">✓ 使用中</span>}
+                                    </div>
+                                </button>
+                            );
+                        })}
+                    </div>
+                </Modal>
             </div>
         );
     }
@@ -3878,7 +4008,7 @@ ${olderText}
                                             onClick={() => handleRebindContact(selectedContact, { kind: 'real', charId: rc.id })}
                                             disabled={current}
                                             className={`w-full flex items-center gap-2.5 rounded-xl p-2.5 border text-left transition ${current ? 'border-pink-300 bg-pink-50' : 'border-slate-200 bg-slate-50 active:scale-[0.99]'}`}>
-                                            <img src={rc.avatar} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0" />
+                                            <TokenImg value={rc.avatar} alt="" className="w-8 h-8 rounded-lg object-cover shrink-0" />
                                             <span className="text-[13px] font-semibold text-slate-700 flex-1 truncate">{rc.name}</span>
                                             {current && <span className="text-[10px] font-bold text-pink-500 shrink-0">当前绑定</span>}
                                         </button>

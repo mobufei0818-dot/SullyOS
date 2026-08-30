@@ -13,12 +13,19 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildXhsSessionPayload,
+  classifyNativeToolCalls,
   createFireSessionState,
-  MAX_TOOL_ITERATIONS,
+  DEFAULT_TOOL_ITERATIONS,
+  MCP_MAX_TOOL_ITERATIONS,
+  resolveToolIterationBudget,
   processLLMRound,
   type PushBuildInput,
 } from './agentic';
 import { buildMcpNameMap, type McpFireServer } from '../../../utils/mcpFireCore';
+import {
+  AMSG_FIRE_CANCEL_TOOL,
+  AMSG_FIRE_SCHEDULE_TOOL,
+} from '../../../utils/amsgFireSchedule';
 import type { XhsNote } from '../../../utils/realtimeContext';
 
 const build: PushBuildInput = {
@@ -195,6 +202,28 @@ describe('processLLMRound — 无正文边界', () => {
     expect(decision.decision).toBe('skip-push');
     if (decision.decision !== 'skip-push') return;
     expect(decision.reason).toBe('side-effects-only');
+  });
+
+  // 日程改动是「没正文就整条丢」这条规矩里的唯一例外：它不是做给用户看的动作，是角色
+  // 在纠正自己的表。一起丢掉的话，下一次 fire 读到的还是那条旧安排，角色会反复想改又
+  // 反复改不掉。所以照旧不发推送，但把改动带出来交给调用方走 emitResult。
+  it('只有日程改动、没有正文：仍然不发推送，但把改动带出来', () => {
+    const decision = processLLMRound(
+      createFireSessionState(),
+      '[[ACTION:CHANGE_SCHEDULE | 22:00 | 陪你聊天]]',
+      build,
+    );
+    expect(decision.decision).toBe('skip-push');
+    if (decision.decision !== 'skip-push') return;
+    expect(decision.reason).toBe('side-effects-only');
+    expect(decision.scheduleChanges).toEqual([{ startTime: '22:00', activity: '陪你聊天' }]);
+  });
+
+  it('没有日程改动时不带这个字段（别让调用方对着空数组白跑一趟）', () => {
+    const decision = processLLMRound(createFireSessionState(), '[[ACTION:POKE]]', build);
+    expect(decision.decision).toBe('skip-push');
+    if (decision.decision !== 'skip-push') return;
+    expect(decision.scheduleChanges).toBeUndefined();
   });
 
   it('既没正文也没副作用：整条不发，记 empty-generation', () => {
@@ -493,7 +522,7 @@ describe('processLLMRound — 最后一轮不再放行工具请求', () => {
     processLLMRound(state, '顺便看看天气。\n[[SEARCH: 明天 天气]]', build, null, null, 1);
 
     const decision = processLLMRound(
-      state, '还得再查一次。\n[[RECALL: 2026-07]]', build, null, null, MAX_TOOL_ITERATIONS - 1);
+      state, '还得再查一次。\n[[RECALL: 2026-07]]', build, null, null, DEFAULT_TOOL_ITERATIONS - 1);
     expect(decision.decision).toBe('finish');
     if (decision.decision !== 'finish') return;
     const text = decision.pushPayloads.map((p) => p.message).join('\n');
@@ -505,13 +534,36 @@ describe('processLLMRound — 最后一轮不再放行工具请求', () => {
 
   it('倒数第二轮照常给工具机会', () => {
     const decision = processLLMRound(
-      createFireSessionState(), '查一下。\n[[SEARCH: 天气]]', build, null, null, MAX_TOOL_ITERATIONS - 2);
+      createFireSessionState(), '查一下。\n[[SEARCH: 天气]]', build, null, null, DEFAULT_TOOL_ITERATIONS - 2);
     expect(decision.decision).toBe('tool-request');
   });
 
   it('不传轮次（拿不到 ctx.iteration 的老部署）行为不变', () => {
     const decision = processLLMRound(createFireSessionState(), '查一下。\n[[SEARCH: 天气]]', build);
     expect(decision.decision).toBe('tool-request');
+  });
+});
+
+describe('工具轮次预算 — 普通任务省成本，MCP 多步任务可继续', () => {
+  it('没有 MCP 保持 5 轮，有 MCP 放宽到 12 轮', () => {
+    expect(resolveToolIterationBudget(false)).toBe(DEFAULT_TOOL_ITERATIONS);
+    expect(resolveToolIterationBudget(true)).toBe(MCP_MAX_TOOL_ITERATIONS);
+    expect(DEFAULT_TOOL_ITERATIONS).toBe(5);
+    expect(MCP_MAX_TOOL_ITERATIONS).toBe(12);
+  });
+
+  it('MCP 的第 5 轮仍可继续，第 12 轮才强制收尾', () => {
+    const fifth = processLLMRound(
+      createFireSessionState(), '继续查。\n[[SEARCH: 天气]]', build, null, null,
+      DEFAULT_TOOL_ITERATIONS - 1, MCP_MAX_TOOL_ITERATIONS,
+    );
+    expect(fifth.decision).toBe('tool-request');
+
+    const last = processLLMRound(
+      createFireSessionState(), '再查。\n[[SEARCH: 天气]]', build, null, null,
+      MCP_MAX_TOOL_ITERATIONS - 1, MCP_MAX_TOOL_ITERATIONS,
+    );
+    expect(last.decision).not.toBe('tool-request');
   });
 });
 
@@ -618,5 +670,109 @@ describe('processLLMRound + MCP', () => {
     const all = d.pushPayloads.map((p) => String(p.message)).join('\n');
     expect(all).toContain('先问暗号');
     expect(all).not.toContain('get_secret(');
+  });
+});
+
+// ─── native tool_call 认领：严格命中优先，去命名空间唯一命中兜底（实机回归） ────────
+//
+// 实测里两类丢弃都真实发生过：模型把 mcp__ 前缀弄丢只报裸名（sess_task_60/61），
+// 以及 native 调 cancel_active_message 这个明明声明过的工具被当幻觉丢掉（sess_task_64
+// ——旧入口只认 schedule + mcp__ 两种名字，cancel / renew 压根没有池可进）。
+
+const manageNames = new Set([AMSG_FIRE_SCHEDULE_TOOL, AMSG_FIRE_CANCEL_TOOL]);
+const rawCall = (name: string, args = '{}', id = 'call_x1') => ({
+  id,
+  type: 'function' as const,
+  function: { name, arguments: args },
+});
+
+describe('classifyNativeToolCalls — 认领与丢弃', () => {
+  it('严格命中照旧：mcp__ 前缀名进 mcp 池、声明的管理工具名进 manage 池，名字不动', () => {
+    const r = classifyNativeToolCalls(
+      [rawCall('mcp__get_secret'), rawCall(AMSG_FIRE_SCHEDULE_TOOL), rawCall(AMSG_FIRE_CANCEL_TOOL)],
+      manageNames, mcpResolve,
+    );
+    expect(r.mcp.map((tc) => tc.function.name)).toEqual(['mcp__get_secret']);
+    expect(r.manage.map((tc) => tc.function.name))
+      .toEqual([AMSG_FIRE_SCHEDULE_TOOL, AMSG_FIRE_CANCEL_TOOL]);
+    expect(r.dropped).toEqual([]);
+  });
+
+  it('模型丢了 mcp__ 前缀只报裸名 → 认领并把名字改写回声明名（sess_task_60/61 现场）', () => {
+    const r = classifyNativeToolCalls(
+      [rawCall('get_secret', '{"who":"小满"}')], manageNames, mcpResolve);
+    expect(r.mcp).toHaveLength(1);
+    expect(r.mcp[0].function.name).toBe('mcp__get_secret');
+    // id 与参数原样保留，只改名字
+    expect(r.mcp[0].id).toBe('call_x1');
+    expect(r.mcp[0].function.arguments).toBe('{"who":"小满"}');
+    expect(r.dropped).toEqual([]);
+  });
+
+  it('换了「姓」的命名空间写法（default_api: / functions. / tools/）取最后一段唯一命中', () => {
+    const r = classifyNativeToolCalls([
+      rawCall('default_api:get_secret'),
+      rawCall('functions.mcp__get_secret'),
+      rawCall(`tools/${AMSG_FIRE_CANCEL_TOOL}`),
+    ], manageNames, mcpResolve);
+    expect(r.mcp.map((tc) => tc.function.name))
+      .toEqual(['mcp__get_secret', 'mcp__get_secret']);
+    expect(r.manage.map((tc) => tc.function.name)).toEqual([AMSG_FIRE_CANCEL_TOOL]);
+    expect(r.dropped).toEqual([]);
+  });
+
+  it('幻觉工具（哪份清单都对不上）照旧丢弃，名字留给日志', () => {
+    const r = classifyNativeToolCalls(
+      [rawCall('made_up_tool'), rawCall('default_api:also_fake')], manageNames, mcpResolve);
+    expect(r.manage).toEqual([]);
+    expect(r.mcp).toEqual([]);
+    expect(r.dropped).toEqual(['made_up_tool', 'default_api:also_fake']);
+  });
+
+  it('工具没声明就不认领：manage 清单空时 cancel 照丢、mcpResolve 为 null 时裸名照丢', () => {
+    const r = classifyNativeToolCalls(
+      [rawCall(AMSG_FIRE_CANCEL_TOOL), rawCall('get_secret')], new Set<string>(), null);
+    expect(r.manage).toEqual([]);
+    expect(r.mcp).toEqual([]);
+    expect(r.dropped).toEqual([AMSG_FIRE_CANCEL_TOOL, 'get_secret']);
+  });
+
+  it('形状不对的输入（非数组 / 没有名字）不炸，进 dropped 或忽略', () => {
+    expect(classifyNativeToolCalls(undefined, manageNames, mcpResolve))
+      .toEqual({ manage: [], mcp: [], dropped: [] });
+    const r = classifyNativeToolCalls(
+      [{ id: 'call_bad', type: 'function', function: { name: '', arguments: '{}' } }],
+      manageNames, mcpResolve);
+    expect(r.dropped).toEqual([null]);
+  });
+});
+
+describe('processLLMRound — 排程池混入 cancel / renew', () => {
+  it('本轮只 native 取消了一条 → 正文里的排程语法照常认（不同意图不算跑两遍）', () => {
+    const state = createFireSessionState();
+    const d = processLLMRound(
+      state,
+      `那条不用发了，我重新约。\n${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"2026-07-22 09:00","topic":"约早饭"})`,
+      build, null, { nativeToolCalls: [rawCall(AMSG_FIRE_CANCEL_TOOL, '{"task_id":"abcd1234"}')] });
+    expect(d.decision).toBe('tool-request');
+    if (d.decision !== 'tool-request') return;
+    const names = d.toolCalls.map((tc) => tc.function.name);
+    expect(names).toContain(AMSG_FIRE_CANCEL_TOOL);
+    expect(names).toContain(AMSG_FIRE_SCHEDULE_TOOL);
+    // 正文那句排程语法照剥，不能漏进旁白
+    expect(state.narrations.join('')).not.toContain(`${AMSG_FIRE_SCHEDULE_TOOL}(`);
+  });
+
+  it('native 排程在场时正文排程语法仍只剥不入列（防同一意图跑两遍，回归守卫）', () => {
+    const state = createFireSessionState();
+    const nativeSchedule = rawCall(AMSG_FIRE_SCHEDULE_TOOL, '{"send_at":"2026-07-22 09:00"}');
+    const d = processLLMRound(
+      state,
+      `我给你排上啦。\n${AMSG_FIRE_SCHEDULE_TOOL}({"send_at":"2026-07-22 09:00"})`,
+      build, null, { nativeToolCalls: [nativeSchedule] });
+    expect(d.decision).toBe('tool-request');
+    if (d.decision !== 'tool-request') return;
+    expect(d.toolCalls).toEqual([nativeSchedule]);
+    expect(state.narrations.join('')).not.toContain(`${AMSG_FIRE_SCHEDULE_TOOL}(`);
   });
 });

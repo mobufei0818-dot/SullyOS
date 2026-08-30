@@ -13,6 +13,7 @@
 
 import type { Message, Emoji } from '../types';
 import { formatLifeSimResetCardForContext } from './lifeSimChatCard';
+import { formatQixiEventCardForContext, tryParseQixiEventChatCard } from './qixiChatCard';
 import { formatTransferRecord } from './transferFormat';
 import { formatStatCount } from './videoParser';
 
@@ -132,6 +133,8 @@ export function normalizeMessageContent(
             if (card?.type === 'lifesim_reset_card') {
                 return formatLifeSimResetCardForContext(card, charName);
             }
+            const qixiCard = tryParseQixiEventChatCard(card);
+            if (qixiCard) return formatQixiEventCardForContext(qixiCard, 'archive');
             if (card?.type === 'guidebook_card') {
                 const diff = (card.finalAffinity ?? 0) - (card.initialAffinity ?? 0);
                 return `[攻略本游戏结算] ${charName}和${userName}玩了一局"攻略本"恋爱小游戏（${card.rounds || '?'}回合）。结局：「${card.title || '???'}」 好感度变化：${card.initialAffinity} → ${card.finalAffinity}（${diff >= 0 ? '+' : ''}${diff}） ${charName}的评语：${card.charVerdict || '无'} ${charName}对${userName}的新发现：${card.charNewInsight || '无'}`;

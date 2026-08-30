@@ -69,6 +69,10 @@ export const validateScopedCss = (css: string, selectorRegex: RegExp, scopeHint:
         if (!selectorGroup.startsWith('@')) {
             const selectorList = selectorGroup.split(',').map(item => item.trim()).filter(Boolean);
             selectorList.forEach(selector => {
+                // @keyframes 的内部步骤也会被上面的轻量 ruleRegex 读成普通“选择器”。
+                // 它们不访问 DOM，不属于作用域外溢，应该放行；真正的语法仍由
+                // CSSStyleSheet.replaceSync / 大括号检查负责。
+                if (/^(?:from|to|\d+(?:\.\d+)?%)$/i.test(selector)) return;
                 if (!selectorRegex.test(selector)) {
                     pushError(
                         `选择器 \`${selector}\` 超出限定范围，仅允许以 ${scopeHint} 开头。`,

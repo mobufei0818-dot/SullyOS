@@ -13,6 +13,7 @@ import AppIcon from './AppIcon';
 import TokenImg from './TokenImg';
 import { useBlobRefUrl, putImageBlob } from '../../utils/blobRef';
 import { processImageToBlob } from '../../utils/file';
+import { hueFromImage, hueFromGradient } from '../../utils/dominantHue';
 import { FURNITURE_ICONS } from '../../utils/furnitureIcons';
 import { isDevDebugAvailable, subscribeDevDebugAvailability } from '../../utils/devDebug';
 import { SCHEMES, hsl, schemePreview, type TgStyle } from './gotchiScheme';
@@ -197,9 +198,6 @@ const itemZ = (item: RoomItem) => item.type === 'rug' ? 1 + Math.floor(item.y / 
 
 const isNightHour = (h: number) => h < 6 || h >= 23;
 
-// 戳一戳兜底短语（角色还没说过话时用）
-const POKE_FALLBACK = ['嗯？', '干嘛啦…', '我在呢！', '(被戳了一下)', '別戳了别戳了', '✦?', '在想事情…', '要陪我玩吗！'];
-
 // 等级口径与 MobileGameHome 完全一致：每条消息 10 exp，三角曲线升级
 const deriveStats = (msgCount: number) => {
     const totalExp = msgCount * 10;
@@ -212,73 +210,7 @@ const deriveStats = (msgCount: number) => {
 };
 
 // ─── 主色提取（🎨「提取小窝主色」）──────────────────────────────
-const rgbToHsl = (r: number, g: number, b: number): [number, number, number] => {
-    r /= 255; g /= 255; b /= 255;
-    const max = Math.max(r, g, b), min = Math.min(r, g, b);
-    const l = (max + min) / 2;
-    if (max === min) return [0, 0, l];
-    const d = max - min;
-    const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    let h = 0;
-    if (max === r) h = ((g - b) / d + (g < b ? 6 : 0));
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    return [h * 60, s, l];
-};
-
-// 色相直方图（15° 一桶，饱和度×中亮度加权），忽略近灰/近黑白的像素
-const dominantHueOfPixels = (data: Uint8ClampedArray): number | null => {
-    const BINS = 24;
-    const weight = new Array(BINS).fill(0);
-    const hueSum = new Array(BINS).fill(0);
-    for (let i = 0; i < data.length; i += 4) {
-        if (data[i + 3] < 128) continue; // 透明像素
-        const [h, s, l] = rgbToHsl(data[i], data[i + 1], data[i + 2]);
-        if (s < 0.14 || l < 0.1 || l > 0.92) continue;
-        const w = s * (1 - Math.abs(l - 0.55));
-        const bin = Math.floor(h / (360 / BINS)) % BINS;
-        weight[bin] += w;
-        hueSum[bin] += h * w;
-    }
-    let best = 0;
-    for (let i = 1; i < BINS; i++) if (weight[i] > weight[best]) best = i;
-    if (weight[best] <= 0) return null;
-    return hueSum[best] / weight[best];
-};
-
-// 图片 url → 主色相（24×24 缩略采样；跨域画布被污染时返回 null，交给下一个候选）
-const hueFromImage = (url: string): Promise<number | null> => new Promise(resolve => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-        try {
-            const cv = document.createElement('canvas');
-            cv.width = 24; cv.height = 24;
-            const ctx = cv.getContext('2d');
-            if (!ctx) return resolve(null);
-            ctx.drawImage(img, 0, 0, 24, 24);
-            resolve(dominantHueOfPixels(ctx.getImageData(0, 0, 24, 24).data));
-        } catch { resolve(null); }
-    };
-    img.onerror = () => resolve(null);
-    img.src = url;
-});
-
-// CSS 渐变串 → 主色相（抓 #hex 色值取饱和度加权平均）
-const hueFromGradient = (s: string): number | null => {
-    const hexes = s.match(/#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b/g);
-    if (!hexes || hexes.length === 0) return null;
-    let wSum = 0, hSum = 0;
-    for (const hex of hexes) {
-        const full = hex.length === 4 ? `#${hex[1]}${hex[1]}${hex[2]}${hex[2]}${hex[3]}${hex[3]}` : hex;
-        const r = parseInt(full.slice(1, 3), 16), g = parseInt(full.slice(3, 5), 16), b = parseInt(full.slice(5, 7), 16);
-        const [h, sat, l] = rgbToHsl(r, g, b);
-        if (sat < 0.1 || l < 0.08 || l > 0.95) continue;
-        const w = sat * (1 - Math.abs(l - 0.55));
-        wSum += w; hSum += h * w;
-    }
-    return wSum > 0 ? hSum / wSum : null;
-};
+// 实现抽到 utils/dominantHue.ts，与触感陪伴桌面共用。
 
 // ─── 装饰小件（全静态，零成本）───────────────────────────────
 // 星芒 ✦ 散布：按 [x%, y%, 字号px, 颜色, 透明度, 是否闪烁]
@@ -504,11 +436,14 @@ const Actor = React.memo<{
             e.stopPropagation();
             setBounce(true);
             setTimeout(() => setBounce(false), 450);
-            // 从聊天里 ta 最近的回复按顺序循环取一条；一条没有就用兜底短语
-            const lines = pokeLines.length > 0 ? pokeLines : POKE_FALLBACK;
-            setPokeText(lines[pokeIdx.current % lines.length]);
-            pokeIdx.current += 1;
-            setTimeout(() => setPokeText(''), 3200);
+            // 只复用角色真实说过的话。没有内容时保留戳戳动效，但绝不由主题冒充角色开口。
+            if (pokeLines.length > 0) {
+                setPokeText(pokeLines[pokeIdx.current % pokeLines.length]);
+                pokeIdx.current += 1;
+                setTimeout(() => setPokeText(''), 3200);
+            } else {
+                setPokeText('');
+            }
             // 迸射 2-3 颗爱心（连戳越快越多，最多 5 颗）
             const nowT = performance.now?.() ?? 0;
             comboRef.current = nowT - comboRef.current.t < 900 ? { n: comboRef.current.n + 1, t: nowT } : { n: 1, t: nowT };
@@ -1130,7 +1065,7 @@ const TamagotchiHome: React.FC = () => {
                         <button onClick={switchChar} className={`relative w-[46px] h-[46px] rounded-full p-[2px] shrink-0 ${characters.length > 1 ? 'active:scale-90 transition-transform' : ''}`}
                             style={{ border: `1.5px solid ${PAL.frame}`, boxShadow: '0 0 10px var(--tg-frame-a30)' }}>
                             <div className="w-full h-full rounded-full overflow-hidden" style={{ background: PAL.cardHi }}>
-                                <img src={char.avatar} className="w-full h-full object-cover" alt="" loading="lazy" draggable={false} />
+                                <TokenImg value={char.avatar} className="w-full h-full object-cover" alt="" loading="lazy" draggable={false} />
                             </div>
                             {characters.length > 1 && <span className="absolute -bottom-0.5 -right-0.5 w-[15px] h-[15px] rounded-full flex items-center justify-center text-[8px]" style={{ background: PAL.cardHi, border: `1px solid ${PAL.frameSoft}`, color: PAL.ink }}>⇄</span>}
                         </button>

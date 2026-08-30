@@ -22,6 +22,7 @@ import { callLuckinTool, isLuckinConfigured, listLuckinTools } from '../../utils
 import { autoFixProposalCodesByName } from '../../utils/luckinToolBridge';
 import { luckinItemEmoji } from '../../utils/luckinEmoji';
 import PayQr from './PayQr';
+import TokenImg from '../os/TokenImg';
 
 interface LuckinMiniAppProps {
     open: boolean;
@@ -817,7 +818,7 @@ const InAppChat: React.FC<{
                 style={!expanded ? { paddingBottom: 'calc(0.5rem + var(--safe-bottom, 0px))' } : undefined}
             >
                 <div className="w-7 h-7 rounded-full bg-[#16386F] overflow-hidden shrink-0 flex items-center justify-center text-sm">
-                    {charAvatar ? <img src={charAvatar} alt="" className="w-full h-full object-cover" /> : '🐾'}
+                    {charAvatar ? <TokenImg value={charAvatar} alt="" className="w-full h-full object-cover" /> : '🐾'}
                 </div>
                 <div className="flex-1 min-w-0 text-left">
                     {!expanded && lastChar
@@ -842,7 +843,7 @@ const InAppChat: React.FC<{
                             <div key={i} className={`flex gap-1.5 ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                                 {m.role === 'assistant' && (
                                     <div className="w-6 h-6 rounded-full bg-[#16386F] overflow-hidden shrink-0 flex items-center justify-center text-xs mt-0.5">
-                                        {charAvatar ? <img src={charAvatar} alt="" className="w-full h-full object-cover" /> : '🐾'}
+                                        {charAvatar ? <TokenImg value={charAvatar} alt="" className="w-full h-full object-cover" /> : '🐾'}
                                     </div>
                                 )}
                                 <div className="max-w-[80%] flex flex-col gap-1 min-w-0">
@@ -853,8 +854,8 @@ const InAppChat: React.FC<{
                                             onAddAll={(items: LuckinProposalItem[]) => onAddAllFromProposal?.(items)}
                                         />
                                     ) : m.type === 'emoji' ? (
-                                        <img
-                                            src={m.content}
+                                        <TokenImg
+                                            value={m.content}
                                             alt="表情"
                                             className="w-20 h-20 sm:w-24 sm:h-24 object-contain rounded-lg bg-white/40 p-1"
                                             loading="lazy"
@@ -876,7 +877,7 @@ const InAppChat: React.FC<{
                         {isTyping && (
                             <div className="flex gap-1.5 justify-start">
                                 <div className="w-6 h-6 rounded-full bg-[#16386F] overflow-hidden shrink-0 flex items-center justify-center text-xs">
-                                    {charAvatar ? <img src={charAvatar} alt="" className="w-full h-full object-cover" /> : '🐾'}
+                                    {charAvatar ? <TokenImg value={charAvatar} alt="" className="w-full h-full object-cover" /> : '🐾'}
                                 </div>
                                 <div className="px-2.5 py-1.5 rounded-2xl bg-white border border-[#E6DFCF]">
                                     <span className="inline-flex gap-0.5">

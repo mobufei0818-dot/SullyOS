@@ -1,6 +1,10 @@
 /**
  * 彼方 chibi 立绘解析（单一来源）：vrState.chibi → date 皮肤/sprites → 头像兜底。
  * VRWorldApp 的房间站位、剧院的演出回放共用这套逻辑。
+ *
+ * 返回的 img 是「图片字段值」而不是「能直接加载的地址」：捏出来的 chibi 与头像都可能是
+ * blobref 令牌（见 utils/blobRef.ts）。消费方一律用 TokenImg 渲染，或用 useBlobRefUrl
+ * 解析后再拼 CSS url()，别直接塞进 <img src>。
  */
 import type { CharacterProfile } from '../../types';
 

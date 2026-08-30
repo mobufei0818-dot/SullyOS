@@ -20,7 +20,7 @@ import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { ContextBuilder } from '../utils/context';
 import { safeResponseJson, extractJson } from '../utils/safeApi';
 import { DB } from '../utils/db';
-import { putImageBlob, useBlobRefUrl } from '../utils/blobRef';
+import { putImageBlob, useBlobRefUrl, resolveRefToDataUrl } from '../utils/blobRef';
 import {
     synthesizeSong,
     buildAceStepTags,
@@ -42,6 +42,7 @@ import {
 import { C as MusicC, Sparkle, CrossStar, GlassProgress, MetaChip } from './music/MusicUI';
 import Modal from '../components/os/Modal';
 import ConfirmDialog from '../components/os/ConfirmDialog';
+import TokenImg from '../components/os/TokenImg';
 import {
     Check, PencilSimple,
     Sparkle as SparkleP, Butterfly, Feather, Lightning, MicrophoneStage,
@@ -1416,13 +1417,21 @@ const SongwritingApp: React.FC = () => {
     /** Compose user + char avatars side-by-side on canvas → data URL. */
     const buildDualCover = useCallback(async (charUrl: string, userUrl: string): Promise<string | null> => {
         try {
-            const loadImg = (src: string) => new Promise<HTMLImageElement>((resolve, reject) => {
-                const img = new Image();
-                img.crossOrigin = 'anonymous';
-                img.onload = () => resolve(img);
-                img.onerror = reject;
-                img.src = src;
-            });
+            // 头像可能是 blobref 令牌，令牌本身不是能加载的地址：直接喂给 Image 会加载
+            // 失败，而失败被下面的 catch 收走，合影封面悄悄变成一张只有渐变的空白图。
+            // 所以先解析成 data URL 再加载（非令牌原样返回，可以无条件调）。
+            // 图已丢时解析结果是空串，此处抛出让调用方按「这张画不出来」处理。
+            const loadImg = async (src: string) => {
+                const url = await resolveRefToDataUrl(src);
+                if (!url) throw new Error('avatar blob missing');
+                return await new Promise<HTMLImageElement>((resolve, reject) => {
+                    const img = new Image();
+                    img.crossOrigin = 'anonymous';
+                    img.onload = () => resolve(img);
+                    img.onerror = reject;
+                    img.src = url;
+                });
+            };
             const canvas = document.createElement('canvas');
             const SIZE = 400;
             canvas.width = SIZE; canvas.height = SIZE;
@@ -1750,7 +1759,7 @@ const SongwritingApp: React.FC = () => {
                                                         <span className="text-[10px] text-stone-400">{moodInfo?.icon} {moodInfo?.label}</span>
                                                     </div>
                                                     <div className="flex items-center gap-2 mt-1">
-                                                        {char && <img src={char.avatar} className="w-4 h-4 rounded-full object-cover" />}
+                                                        {char && <TokenImg value={char.avatar} className="w-4 h-4 rounded-full object-cover" />}
                                                         <span className="text-[10px] text-stone-400">与 {char?.name} 创作</span>
                                                     </div>
                                                 </div>
@@ -1780,7 +1789,7 @@ const SongwritingApp: React.FC = () => {
                             value={shareGroupId} onChange={setShareGroupId} className="mb-2" />
                         {filterCharactersByGroup(characters, characterGroups, shareGroupId).map(c => (
                             <button key={c.id} onClick={() => handleShareToChat(c.id)} className="w-full flex items-center gap-3 p-3 rounded-lg hover:bg-stone-50 border border-stone-100 transition-colors">
-                                <img src={c.avatar} className="w-10 h-10 rounded-full object-cover" />
+                                <TokenImg value={c.avatar} className="w-10 h-10 rounded-full object-cover" />
                                 <span className="font-medium text-sm text-stone-700">{c.name}</span>
                             </button>
                         ))}
@@ -2235,7 +2244,7 @@ const SongwritingApp: React.FC = () => {
                                     }}
                                 >
                                     <div className="relative shrink-0">
-                                        <img src={c.avatar} className="w-12 h-12 rounded-2xl object-cover" />
+                                        <TokenImg value={c.avatar} className="w-12 h-12 rounded-2xl object-cover" />
                                         {active && <Sparkle size={9} color={MusicC.sakura} delay={0} className="absolute -top-1 -right-1" />}
                                     </div>
                                     <div className="text-left flex-1 min-w-0">
@@ -2411,7 +2420,7 @@ const SongwritingApp: React.FC = () => {
                         </div>
                         {collaborator && (
                             <div className="flex items-center gap-2 mt-3 opacity-50">
-                                <img src={collaborator.avatar} className="w-5 h-5 rounded-full object-cover" />
+                                <TokenImg value={collaborator.avatar} className="w-5 h-5 rounded-full object-cover" />
                                 <span className="text-[11px]">与 {collaborator.name} 创作</span>
                             </div>
                         )}
@@ -2706,7 +2715,7 @@ const SongwritingApp: React.FC = () => {
                             value={shareGroupId} onChange={setShareGroupId} className="mb-2" />
                         {filterCharactersByGroup(characters, characterGroups, shareGroupId).map(c => (
                             <button key={c.id} onClick={() => handleShareToChat(c.id)} className="w-full flex items-center gap-3 p-3 rounded-lg hover:bg-stone-50 border border-stone-100 transition-colors">
-                                <img src={c.avatar} className="w-10 h-10 rounded-full object-cover" />
+                                <TokenImg value={c.avatar} className="w-10 h-10 rounded-full object-cover" />
                                 <span className="font-medium text-sm text-stone-700">{c.name}</span>
                             </button>
                         ))}
@@ -2726,10 +2735,10 @@ const SongwritingApp: React.FC = () => {
                                 }}
                             >
                                 {coverMode === 'char' && collaborator?.avatar && (
-                                    <img src={collaborator.avatar} alt="" className="w-full h-full object-cover" />
+                                    <TokenImg value={collaborator.avatar} alt="" className="w-full h-full object-cover" />
                                 )}
                                 {coverMode === 'user' && userProfile?.avatar && (
-                                    <img src={userProfile.avatar} alt="" className="w-full h-full object-cover" />
+                                    <TokenImg value={userProfile.avatar} alt="" className="w-full h-full object-cover" />
                                 )}
                                 {coverMode === 'dual' && (
                                     isBuildingDual ? (
@@ -2815,7 +2824,7 @@ const SongwritingApp: React.FC = () => {
                                                 border: `1.5px solid ${active ? 'rgba(255,255,255,0.6)' : `${MusicC.faint}50`}`,
                                             }}>
                                             {opt.src ? (
-                                                <img src={opt.src} alt="" className="w-full h-full object-cover" />
+                                                <TokenImg value={opt.src} alt="" className="w-full h-full object-cover" />
                                             ) : (
                                                 <div className="w-full h-full flex items-center justify-center"
                                                     style={{ background: `linear-gradient(135deg, ${MusicC.sakura}, ${MusicC.lavender})` }}>
@@ -3273,7 +3282,7 @@ const SongwritingApp: React.FC = () => {
                     <div className="px-4 pb-3 flex items-center gap-3">
                         {collaborator && (
                             <div className="flex items-center gap-2 min-w-0 flex-1">
-                                <img src={collaborator.avatar} className="w-7 h-7 rounded-full object-cover" alt="" />
+                                <TokenImg value={collaborator.avatar} className="w-7 h-7 rounded-full object-cover" alt="" />
                                 <div className="min-w-0">
                                     <div className="text-[10px] truncate" style={{ color: paper.muted }}>{collaborator.name} 正在看这本歌词</div>
                                     <div className="text-[9px] truncate opacity-70">{activeSong.subtitle || '每次只改你点到的那一句'}</div>
@@ -3527,7 +3536,7 @@ const SongwritingApp: React.FC = () => {
                         <div className="flex-1 overflow-y-auto no-scrollbar px-4 py-5 pb-28" ref={scrollRef}>
                             {feedbackGroups.length === 0 && (
                                 <div className="h-full flex flex-col items-center justify-center text-center px-10 pb-16">
-                                    {collaborator && <img src={collaborator.avatar} className="w-14 h-14 rounded-full object-cover mb-5 opacity-90" alt="" />}
+                                    {collaborator && <TokenImg value={collaborator.avatar} className="w-14 h-14 rounded-full object-cover mb-5 opacity-90" alt="" />}
                                     <p className="text-[14px]" style={{ fontFamily: 'Georgia, "Noto Serif SC", serif' }}>这里专心讨论，不会碰你的歌词</p>
                                     <p className="text-[10px] mt-2 leading-5" style={{ color: paper.muted }}>可以问结构、请点评、讨论押韵，写词请回到「写歌词」。</p>
                                 </div>
@@ -3541,7 +3550,7 @@ const SongwritingApp: React.FC = () => {
                                     const expanded = !!expandedFeedbackIds[group.id];
                                     return (
                                         <div key={group.id} className={`flex gap-2.5 ${isUserMessage ? 'justify-end' : 'justify-start'}`}>
-                                            {!isUserMessage && collaborator && <img src={collaborator.avatar} className="w-7 h-7 rounded-full object-cover shrink-0 mt-1" alt="" />}
+                                            {!isUserMessage && collaborator && <TokenImg value={collaborator.avatar} className="w-7 h-7 rounded-full object-cover shrink-0 mt-1" alt="" />}
                                             <div className={`max-w-[82%] ${isUserMessage ? 'items-end' : 'items-start'} flex flex-col`}>
                                                 <div
                                                     className={`px-4 py-3 text-[13px] leading-6 ${isUserMessage ? 'rounded-[18px_18px_5px_18px]' : 'rounded-[18px_18px_18px_5px]'}`}
@@ -3572,7 +3581,7 @@ const SongwritingApp: React.FC = () => {
                                 })}
                                 {isTyping && (
                                     <div className="flex items-center gap-2.5">
-                                        {collaborator && <img src={collaborator.avatar} className="w-7 h-7 rounded-full object-cover" alt="" />}
+                                        {collaborator && <TokenImg value={collaborator.avatar} className="w-7 h-7 rounded-full object-cover" alt="" />}
                                         <div className="px-4 py-3 rounded-[18px_18px_18px_5px] flex gap-1.5" style={{ background: paper.sheet, border: `1px solid ${paper.rule}` }}>
                                             {[0, 1, 2].map(index => <span key={index} className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: paper.muted, animationDelay: `${index * 90}ms` }} />)}
                                         </div>

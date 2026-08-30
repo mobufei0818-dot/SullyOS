@@ -85,7 +85,7 @@ export function computeStreamPreviewBubbles(fullText: string): string[] {
     }
     if (kept.length === 0) return [];
 
-    // 与最终管线同一套气泡切分（CJK 空格切点等），再逐条 sanitize + 有效内容校验，
+    // 与最终管线同一套气泡切分（只认显式换行），再逐条 sanitize + 有效内容校验，
     // 让预览气泡的边界和内容尽量贴近最终落库的样子。
     const bubbles: string[] = [];
     for (const chunk of ChatParser.chunkText(kept.join('\n'))) {

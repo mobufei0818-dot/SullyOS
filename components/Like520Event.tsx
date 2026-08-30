@@ -15,6 +15,9 @@ import { creatorPartToBlobRefs, loadCreatorPartsForRender } from '../utils/creat
 import { CharacterProfile, SpecialMomentRecord } from '../types';
 import { safeResponseJson } from '../utils/safeApi';
 import { assetMirrors, attachAudioMirrorFallback } from '../utils/assetUrl';
+import { shareOrDownloadBlob } from '../utils/shareExport';
+import TokenImg from './os/TokenImg';
+import { dataUrlToBlob, isImageValue, putImageBlob } from '../utils/blobRef';
 import {
     runLike520CallA,
     runLike520CallB,
@@ -1852,8 +1855,8 @@ const Y520Scene: React.FC<Y520SceneProps> = ({ callA, charName, charAvatar, char
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                         <div className="l520-charpill">
-                            {charAvatar?.startsWith('http') || charAvatar?.startsWith('data:')
-                                ? <img src={charAvatar} alt={charName} />
+                            {isImageValue(charAvatar)
+                                ? <TokenImg value={charAvatar} alt={charName} />
                                 : <span className="l520-charpill-emoji">{charAvatar || '🌸'}</span>}
                             <span>{charName}</span>
                         </div>
@@ -2195,8 +2198,8 @@ const UncoveredLineView: React.FC<{
             <div className="l520-topbar" style={{ paddingBottom: 0 }}>
                 <div className="l520-header-row">
                     <div className="l520-charpill">
-                        {charAvatar?.startsWith('http') || charAvatar?.startsWith('data:')
-                            ? <img src={charAvatar} alt={charName} />
+                        {isImageValue(charAvatar)
+                            ? <TokenImg value={charAvatar} alt={charName} />
                             : <span className="l520-charpill-emoji">{charAvatar || '🌸'}</span>}
                         <span>{charName}</span>
                     </div>
@@ -2393,11 +2396,14 @@ const LetterView: React.FC<{ text: string; onNext: () => void; onClose: () => vo
             // radial-gradient 时会拿这个色填整块 wrapper，挑顶端色能让"上面那一节"
             // 不再突变
             const canvas = await html2canvas(target, { backgroundColor: '#fefbf4', scale: 2, useCORS: true });
-            const url = canvas.toDataURL('image/png');
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = `520_letter_${Date.now()}.png`;
-            a.click();
+            const blob = await new Promise<Blob>((resolve, reject) => {
+                canvas.toBlob((result: Blob | null) => result ? resolve(result) : reject(new Error('信件图片生成失败')), 'image/png');
+            });
+            await shareOrDownloadBlob({
+                blob,
+                fileName: `520_letter_${Date.now()}.png`,
+                shareTitle: '520 特别信件',
+            });
         } catch (e) {
             console.error('[520] letter save failed', e);
         } finally {
@@ -2689,7 +2695,7 @@ const DoneView: React.FC<{
                     {charChibi ? (
                         <img src={charChibi} alt="" style={{ height: 110, objectFit: 'contain', filter: 'drop-shadow(0 0 1.5px #fff) drop-shadow(0 0 1.5px #fff) drop-shadow(0 0 3px rgba(255,255,255,0.85)) drop-shadow(0 6px 12px rgba(199,97,130,0.35))' }} />
                     ) : charAvatar ? (
-                        <img src={charAvatar} alt="" style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover', boxShadow: '0 6px 14px rgba(199,97,130,0.3)' }} />
+                        <TokenImg value={charAvatar} alt="" style={{ width: 80, height: 80, borderRadius: '50%', objectFit: 'cover', boxShadow: '0 6px 14px rgba(199,97,130,0.3)' }} />
                     ) : null}
                     {userChibi && (
                         <img src={userChibi} alt="" style={{ height: 110, objectFit: 'contain', filter: 'drop-shadow(0 0 1.5px #fff) drop-shadow(0 0 1.5px #fff) drop-shadow(0 0 3px rgba(255,255,255,0.85)) drop-shadow(0 6px 12px rgba(199,97,130,0.35))' }} />
@@ -3238,10 +3244,19 @@ export const Like520Session: React.FC<SessionProps> = ({ charId, onClose }) => {
         if (sessionMode !== 'fresh') return;                   // 回放/看信模式不重存
         if (!char || !callA || !callB || !charChibi || !userChibi || !chosenTucao) return;
         savedRef.current = true;
+        // 带相框的定妆照有 500KB 上下，落进 Blob 库、记录里只留 blobref 令牌。
+        // 落库失败也别把整条记录（信、锚点、两只手办的 state）连坐掉，记一笔继续存。
+        // 注意下面 customData 里的两张手办图仍然是 dataURL：合成大头贴的 canvas 只认能同步开始加载的值。
+        let framedRef = '';
+        try {
+            framedRef = await putImageBlob(dataUrlToBlob(charChibi.frameDataUrl));
+        } catch (e) {
+            console.warn('[520] 定妆照落库失败，本次记录不带图', e);
+        }
         const previousRecords = char.specialMomentRecords || {};
         const record: SpecialMomentRecord = {
             content: callB.letter,
-            image: charChibi.frameDataUrl,
+            image: framedRef,
             timestamp: Date.now(),
             source: 'generated',
             customData: {
@@ -3862,8 +3877,8 @@ export const Like520Controller: React.FC<Like520ControllerProps> = ({ onClose, i
                                         onClick={() => { setCharId(c.id); setStage('session'); }}
                                         className="flex flex-col items-center gap-2 p-3 bg-[#FFF8F1] rounded-2xl border border-[#FCEDD9] active:scale-95 transition-transform"
                                     >
-                                        {c.avatar?.startsWith('http') || c.avatar?.startsWith('data:') ? (
-                                            <img src={c.avatar} alt={c.name} className="w-12 h-12 rounded-full object-cover" />
+                                        {isImageValue(c.avatar) ? (
+                                            <TokenImg value={c.avatar} alt={c.name} className="w-12 h-12 rounded-full object-cover" />
                                         ) : (
                                             <div className="w-12 h-12 rounded-full bg-white flex items-center justify-center text-2xl">
                                                 {c.avatar || '🌸'}

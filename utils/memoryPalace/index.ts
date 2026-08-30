@@ -4,7 +4,7 @@
 
 // 类型
 export type {
-    MemoryRoom, RoomConfig, MemoryNode, MemoryVector,
+    MemoryRoom, RoomConfig, MemoryEntity, MemoryNode, MemoryVector,
     LinkType, MemoryLink, BoxStatus, TopicBox, TopicContinuity,
     AnticipationStatus, Anticipation, MemoryBatch,
     PersonalityStyle, EmbeddingConfig, ScoredMemory, RemoteVectorConfig,
@@ -36,6 +36,30 @@ export { buildLinks, strengthenCoActivated } from './links';
 // 输出管线
 export { vectorSearch } from './vectorSearch';
 export { bm25Search, tokenize } from './bm25';
+export {
+    analyzeExplicitEntitySignals,
+    lookupExplicitEntityCandidates,
+    mergeExplicitEntityCandidates,
+    normalizeEntityKey,
+} from './explicitEntityRecall';
+export type {
+    ExplicitEntityAnalysis,
+    ExplicitEntityCandidate,
+    ExplicitEntitySignal,
+    ExplicitEntitySignalSource,
+} from './explicitEntityRecall';
+export {
+    buildEventBoxLightIndex,
+    lookupEventBoxLightCandidates,
+    mergeEventBoxLightCandidates,
+    normalizeEventBoxIndexText,
+} from './eventBoxLightIndex';
+export type {
+    EventBoxLightCandidate,
+    EventBoxLightIndex,
+    EventBoxLightLookupResult,
+    EventBoxLightMatchSource,
+} from './eventBoxLightIndex';
 export { hybridSearch } from './hybridSearch';
 export { spreadActivation } from './activation';
 export { applyPriming, checkRumination } from './priming';
@@ -45,6 +69,79 @@ export { formatMemoryDateWithDistance } from './memoryDate';
 // 集成
 export type { LightLLMConfig, PipelineResult, DiaryIngestResult } from './pipeline';
 export { retrieveMemories, injectMemoryPalace, processNewMessages, getMemoryPalaceHighWaterMark, ingestDiaryToPalace } from './pipeline';
+export { RECALL_PIPELINE_VERSION, readRecallRuntimeSnapshot } from './trace';
+export type { EventBoxMetadataRecallTrace, RecallEntryPoint, RecallFailureReason, RecallOutcome, RecallTrace, RecallRetrievalTelemetry } from './trace';
+export {
+    analyzeLocalContext,
+    evaluateLocalRecallGate,
+    renderLocalContextGuidance,
+    normalizeRecallPlan,
+    runLightRecallRouter,
+} from './recallRouter';
+export {
+    analyzeUserInteraction,
+    renderInteractionAdaptationGuidance,
+    resolveAccommodationPolicy,
+    DEFAULT_CHARACTER_ACCOMMODATION,
+    INTERACTION_TREND_MESSAGE_SCAN_LIMIT,
+    INTERACTION_TREND_TURN_LIMIT,
+} from './interactionAdaptation';
+export {
+    analyzeDeepEngagement,
+    renderDeepEngagementGuidance,
+} from './deepEngagement';
+export type {
+    ConversationDepthSignals,
+    ConversationDepthState,
+    DeepEngagementAnalysis,
+    EngagementMode,
+} from './deepEngagement';
+export {
+    advanceConversationEngagement,
+    analyzeConversationEngagement,
+    clearConversationEngagementState,
+    loadConversationEngagementState,
+    renderConversationEngagementGuidance,
+    saveConversationEngagementState,
+    shouldUseLegacyDeepEngagement,
+    CONVERSATION_ENGAGEMENT_ENGINE_KEY,
+    CONVERSATION_ENGAGEMENT_STORAGE_PREFIX,
+    CONVERSATION_ENGAGEMENT_VERSION,
+} from './conversationEngagement';
+export type {
+    ActiveConversationSubject,
+    ConversationAct,
+    ConversationEngagementAdvanceResult,
+    ConversationEngagementAnalysis,
+    ConversationEngagementReason,
+    ConversationInteractionMode,
+    EngagementState,
+    GroundedConversationFact,
+    ProgressiveConversationStance,
+    ResponseAct,
+    ResponsePlan,
+    StoredConversationEngagementState,
+    SubjectHook,
+    SubjectHookKind,
+} from './conversationEngagement';
+export type {
+    InteractionSurfaceState,
+    ResolvedAccommodationPolicy,
+    UserInteractionAnalysis,
+} from './interactionAdaptation';
+export type {
+    ContextSignals,
+    LocalContextAnalysis,
+    LocalRecallGateResult,
+    RecallGateFeatures,
+    RecallPlan,
+    RecallQuery,
+    RecallQueryScope,
+    RecallQuerySource,
+    RecallRouterExecutionResult,
+    RecallRouterExecutionStatus,
+    RecallRouterTrace,
+} from './recallRouter';
 export {
     DEFAULT_MEMORY_PALACE_WATERLINE,
     MEMORY_PALACE_WATERLINE_PRESETS,

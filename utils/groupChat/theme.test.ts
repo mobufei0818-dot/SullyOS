@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveChatTheme } from './theme';
+import { resolveChatTheme, scopeBubbleThemeCss } from './theme';
 import { ChatTheme } from '../../types';
 
 const presets: Record<string, ChatTheme> = {
@@ -35,5 +35,21 @@ describe('resolveChatTheme', () => {
         const resolved = resolveChatTheme('old', [broken], presets);
         expect(resolved.user.borderRadius).toBe(18);
         expect(resolved.ai.backgroundColor).toBe('#eee');
+    });
+});
+
+describe('scopeBubbleThemeCss', () => {
+    it('给普通、逗号列表和嵌套规则追加群聊消息作用域', () => {
+        const css = `.sully-bubble-user, .sully-bubble-ai::after { box-shadow: none; }
+@media (max-width: 480px) { .sully-voice-bar { gap: 4px; } }`;
+        const scoped = scopeBubbleThemeCss(css, '.group-theme-a');
+
+        expect(scoped).toContain('.group-theme-a .sully-bubble-user, .group-theme-a .sully-bubble-ai::after');
+        expect(scoped).toContain('@media (max-width: 480px) { .group-theme-a .sully-voice-bar');
+    });
+
+    it('空 CSS 不产生样式', () => {
+        expect(scopeBubbleThemeCss('', '.group-theme-a')).toBe('');
+        expect(scopeBubbleThemeCss(undefined, '.group-theme-a')).toBe('');
     });
 });

@@ -5,6 +5,7 @@ import { DB } from '../utils/db';
 import { Message } from '../types';
 import { Plugs, Power, Trash, Plug } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import TokenImg from '../components/os/TokenImg';
 import { trackEvent } from '../utils/analytics';
 
 const LS = {
@@ -382,7 +383,7 @@ const QQBridge: React.FC = () => {
                         : 'bg-white border-slate-200 hover:border-sky-200'
                     } ${enabled ? 'opacity-70 cursor-not-allowed' : 'active:scale-95'}`}
                   >
-                    <img src={c.avatar} alt="" className="w-8 h-8 rounded-full object-cover" />
+                    <TokenImg value={c.avatar} alt="" className="w-8 h-8 rounded-full object-cover" />
                     <div className="min-w-0 flex-1">
                       <div className="text-xs font-semibold text-slate-700 truncate">{c.name}</div>
                       <div className="text-[10px] text-slate-400 truncate">{c.description || '—'}</div>

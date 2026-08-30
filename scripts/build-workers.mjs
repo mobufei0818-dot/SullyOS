@@ -58,12 +58,6 @@ const WORKERS = [
   // public/ 副本给设置页「复制 Worker 代码」按钮 fetch。amsg-server 2.6.0-next.2 起
   // 全 Web Crypto，和 instant 一样免 nodejs_compat flag。
   { name: 'amsg', outName: 'amsg-worker.bundle.js' },
-  // loyal-recruitment 是一次性忠实用户招募服务：独立 D1 / secrets / 路由，
-  // 不与邮局或彼方活动共享运行时状态。
-  {
-    name: 'loyal-recruitment',
-    skipPublicOut: true,
-  },
 ];
 
 // amsg-instant 0.3.0+ uses only Web Crypto (globalThis.crypto.subtle); the

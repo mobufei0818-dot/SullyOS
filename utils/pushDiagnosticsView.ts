@@ -7,7 +7,7 @@
 import type { BrowserPushState, SubscribeFailureKind } from './pushSubscribeShared';
 
 /** 这几类失败换多少次重试都是同一个结果，问题在设备/浏览器本身。 */
-const DEVICE_LEVEL_FAILURES: SubscribeFailureKind[] = ['channel-unreachable', 'unsupported'];
+const DEVICE_LEVEL_FAILURES: SubscribeFailureKind[] = ['channel-unreachable', 'no-subscription', 'unsupported'];
 
 /**
  * 失败记录还算不算数：手上已经有一条活订阅，说明后来建成了，旧记录留着只会误导。
@@ -53,6 +53,7 @@ export const describeSupport = (state: BrowserPushState): string => {
   if (!state.supported) return '否（浏览器缺少推送相关接口）';
   const failure = liveFailureKind(state);
   if (failure === 'channel-unreachable') return '接口齐全，但连不上推送服务器';
+  if (failure === 'no-subscription') return '接口齐全，但没拿到订阅';
   if (failure === 'unsupported') return '否（浏览器自称支持，实际建不出订阅）';
   return '是';
 };

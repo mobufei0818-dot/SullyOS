@@ -107,20 +107,32 @@
 - 回程（push metadata）：`amsgEmotionUpdate` / `amsgEmotionDone` / `amsgEmotionError`
   （评估结果 / 熄灯信号 / 脱敏后的失败原因）、`amsgReasoning`（思考链，只挂第一条 push、
   只在即时对话轮）、`amsgToolTrace`（`[{name,count}]`，只数真跑过的调用、只挂末条 push、
+  只在即时对话轮）、`amsgUsage`（`{promptTokens, completionTokens}`，同样只挂末条 push、
   只在即时对话轮）。
+- `amsgUsage` 的去处：客户端把它补进「设置 → API 调用记录」里那笔云端调用（发出时先落
+  一笔 pending，收到末条推送时回填 Token）。它是**最后一次**模型调用的用量——带工具的
+  一轮会连着调好几次模型，中间几次的数云端没留，所以跑过工具时那笔记录会标「只算末轮」。
 - 超限旁路：`amsgEmotionRef` / `amsgReasoningRef`（值挪进 client_state，键
   `emotion_update:<clientTaskId>` / `reasoning:<clientTaskId>`）。
 
 ## outbox（push 丢失的拉取兜底）
 
-- 服务端没有收件箱表，也不新增表（D1 schema 漂移坑）。用 char namespace 的
-  `client_state` 写 key `chat_outbox`：按轮（sessionId）保留最近 3 轮的全部条目
-  （一轮长回复会拆成很多段，整轮留下补收才不掐头），另有 60 条总条数护栏、超出从最老丢起；元素
-  `{ messageId, sessionId, at, payload }`。
-- 写入点：push 载荷定稿处（**不论 push 发送成败都写**——push 静默丢失正是要兜的）。
-  只记 instant 任务的产物即可（v1 范围）。
-- 客户端（agent 2）：启动时、visibility 转 visible 时、每一跳状态点名时，
-  拉 `chat_outbox`，按 messageId 过滤已收，未收的走 inbox 同一条管线入库。
+- 服务端 `message_outbox` 表（按用户存，不分角色也不分消息类型）。每条 push 发出去
+  **之前**先落一行，客户端落库之后 `POST /outbox/ack` 销账，所以「哪些还没收下」是
+  查得出来的事实，不用拿本地聊天记录去猜。行的保留期跟着 Web Push TTL 上限（四周）走。
+- 写入点在库层的 push 发送路径上，定时主动消息和即时对话的产物都记。
+- 客户端拉账本分两类时机，别混：
+  - **上线补收**（`catchUpMissedPushes`）：冷启动、回到前台各一次，带 60s 节流，
+    **不看有没有在等回复**。定时主动消息由云端到点自己发，客户端不产生任何「我在等它」
+    的本地状态——只在等回复时才拉的话，这类消息的推送丢了就永远没人去捞。
+  - **等回复时的点名**（`runInstantChatStatusCheck`）：每 60s 一跳，下结论前必拉一次
+    最新的，不受节流管（拿旧账本去判「回复取不回」会误杀还在路上的回复）。
+- 补收只上屏两天内的条目，更老的只销账（那个岁数的推送推送服务早就不投了）。超窗销掉
+  几条会数出来交给界面说一句——这一销消息就永久拿不回来了，不能一声不响。
+- 头一趟拉账本走「存量整批销账、一条不上屏」（`adoptOutboxBacklog`）：worker 先更新
+  建了表、前端还是老版本那段时间，账本会攒下一批「其实收到了、只是不会销账」的行，
+  当补收倒出来就是重放。用户在设置页手点的那次补收例外（`treatBacklogAsMissed`）——
+  他是察觉到消息没来才点的，这个判断他自己做得了。
 
 ## 失败路径
 

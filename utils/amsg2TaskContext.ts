@@ -259,7 +259,6 @@ export async function collectAmsg2TaskContext(
         policy: t.expirePolicy,
         recurrenceType: t.recurrenceType,
         firstSendTime: t.firstSendTime,
-        anchorMs: t.anchorLastUserMsgAt ?? null,
         messages,
         nowMs: now,
         lookbackMs: AMSG2_TASK_LOOKBACK_MS,

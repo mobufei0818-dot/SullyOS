@@ -16,6 +16,7 @@ import { ActiveMsgClient, getDefaultActiveMsgFirstSendTime } from '../../utils/a
 import { ActiveMsgStore } from '../../utils/activeMsgStore';
 import { type AmsgLastSkip, DEFAULT_MAX_UNANSWERED_SENDS, describeLastSkip } from '../../utils/amsgFirePack';
 import { isInstantChatReady } from '../../utils/amsgInstantChat';
+import { syncAmsgLlmCredentials } from '../../utils/amsgStateSync';
 import { buildUserCancelledNotices } from '../../utils/amsg2TaskContext';
 import { trackEvent } from '../../utils/analytics';
 import {
@@ -402,7 +403,6 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
         promptHint: promptHint.trim() || undefined,
         userMessage: userMessage.trim() || undefined,
         expirePolicy: resolveExpirePolicy(mode, expirePolicy),
-        anchorLastUserMsgAt: result.anchorMs,
         source: 'user',
         status: 'scheduled',
         createdAt: Date.now(),
@@ -440,6 +440,10 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
           : `任务已创建 [${shortTaskId(result.uuid)}]。`),
       result.replacedCancelFailed ? 'error' : 'success');
 
+      // 角色级 API（单独 API 开关 / 三件套）这次可能刚改过：支持凭据表的 Worker 上
+      // 只要把这个角色那几行覆盖掉，已排的任务（含角色自排的）下次触发就跟上了。
+      // 老 Worker 上是 no-op，凭据靠下面逐条补刷。
+      syncAmsgLlmCredentials(apiConfig);
       // 角色级 API（单独 API 开关 / 三件套）也可能这次刚改过：刚排的这条已带新凭据
       // （排程时现算），但同角色**其它** pending AI 任务里冻结的还是旧的，就地刷一遍。
       // 用渲染时清单近似「其它任务」——保存期间角色刚用工具排的新任务会漏，下次保存

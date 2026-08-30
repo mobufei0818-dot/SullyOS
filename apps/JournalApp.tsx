@@ -2,10 +2,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { CharacterProfile, DiaryEntry, StickerData, DiaryPage, MemoryFragment } from '../types';
+import { CharacterProfile, DiaryEntry, StickerData, DiaryPage, MemoryFragment, type JournalAppearance } from '../types';
 import { ContextBuilder } from '../utils/context';
 import { processImage } from '../utils/file';
 import Modal from '../components/os/Modal';
+import TokenImg from '../components/os/TokenImg';
+import { isImageValue } from '../utils/blobRef';
 import { safeResponseJson, extractJson } from '../utils/safeApi';
 import { normalizeMessageContent } from '../utils/messageFormat';
 import { injectMemoryPalace, ingestDiaryToPalace, type DiaryIngestResult } from '../utils/memoryPalace/pipeline';
@@ -13,6 +15,8 @@ import { getRoomLabel } from '../utils/memoryPalace/types';
 import { Sparkle, Archive } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent } from '../utils/analytics';
+import JournalAppearanceButton, { JournalAppearanceStyle } from '../components/journal/JournalAppearanceEditor';
+import JournalThemeArtwork from '../components/journal/JournalThemeArtwork';
 
 const INTRO_SEEN_KEY = 'journal_app_intro_seen_v4';
 
@@ -64,7 +68,23 @@ const getLocalDateStr = () => {
 };
 
 const JournalApp: React.FC = () => {
-    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter, memoryPalaceConfig, characterGroups } = useOS();
+    const { closeApp, characters, activeCharacterId, apiConfig, addToast, userProfile, updateCharacter, memoryPalaceConfig, characterGroups, theme } = useOS();
+    // 预览草稿只活在当前 JournalApp 会话里，不写 theme/localStorage。状态放在
+    // App 顶层，才能在选择页、列表页与书写页之间切换时继续预览同一套 CSS。
+    const [previewJournalAppearance, setPreviewJournalAppearance] = useState<JournalAppearance | undefined>();
+    const effectiveJournalAppearance = previewJournalAppearance || theme.journalAppearance;
+    // 原本琥珀严格保留旧的单页结构；其它主题拥有各自的实体 / 设备版式。
+    const effectiveJournalPreset = effectiveJournalAppearance?.preset || 'original';
+    const journalUsesScrapbookLayout = effectiveJournalPreset !== 'original';
+    const journalLayoutClass = journalUsesScrapbookLayout
+        ? ` sully-journal-designed sully-journal-theme-${effectiveJournalPreset}`
+        : '';
+    const journalAppearanceButtonProps = {
+        previewAppearance: previewJournalAppearance,
+        isPreviewing: Boolean(previewJournalAppearance),
+        onStartPreview: setPreviewJournalAppearance,
+        onCancelPreview: () => setPreviewJournalAppearance(undefined),
+    };
 
     const [mode, setMode] = useState<'select' | 'calendar' | 'write'>('select');
     const [selectedChar, setSelectedChar] = useState<CharacterProfile | null>(null);
@@ -284,7 +304,7 @@ const JournalApp: React.FC = () => {
         return { ...entry, chatCardMessageId: newId };
     };
 
-    const saveEntry = async () => {
+    const saveEntry = async (options: { silent?: boolean } = {}) => {
         if (!currentEntry || !selectedChar) return;
         // 若该日记已经在聊天里有卡片（char 回复过 + 自动发送过），保存时同步更新卡片
         let toSave = currentEntry;
@@ -294,7 +314,7 @@ const JournalApp: React.FC = () => {
         await DB.saveDiary(toSave);
         if (toSave !== currentEntry) setCurrentEntry(toSave);
         await loadDiaries(toSave.charId);
-        addToast('日记已保存', 'success');
+        if (!options.silent) addToast('日记已保存', 'success');
     };
 
     const handleDeleteDiary = async () => {
@@ -421,11 +441,15 @@ const JournalApp: React.FC = () => {
             return;
         }
 
+        const isRewrite = Boolean(currentEntry.charPage);
         setIsThinking(true);
-        saveEntry();
-        trackEvent('邀请角色交换日记');
+        addToast(isRewrite ? `正在请 ${selectedChar.name} 重新写这篇日记…` : `正在请 ${selectedChar.name} 写交换日记…`, 'info');
+        trackEvent(isRewrite ? '重新生成角色日记' : '邀请角色交换日记');
 
         try {
+            // 生成前仍要把用户页草稿落库，但这是重写流程的内部步骤，不能冒充用户
+            // 主动点了“保存”。旧代码在这里直接 saveEntry()，于是循环按钮先弹“日记已保存”。
+            await saveEntry({ silent: true });
             await injectMemoryPalace(selectedChar, undefined, currentEntry.userPage.text);
             let systemPrompt = ContextBuilder.buildCoreContext(selectedChar, userProfile);
 
@@ -531,10 +555,10 @@ Structure:
             await DB.saveDiary(synced);
             await loadDiaries(selectedChar.id);
             setActiveTab('char');
-            addToast('对方已回复 · 已同步到聊天', 'success');
+            addToast(isRewrite ? '角色日记已重新写好 · 已同步到聊天' : '对方已回复 · 已同步到聊天', 'success');
 
         } catch (e: any) {
-            addToast(`回复失败: ${e.message}`, 'error');
+            addToast(`${isRewrite ? '重新写日记' : '交换日记'}失败: ${e.message}`, 'error');
         } finally {
             setIsThinking(false);
         }
@@ -691,7 +715,7 @@ ${charPart}
         return (
             <div 
                 ref={side === activeTab ? paperRef : undefined}
-                className={`relative w-full h-full shadow-md transition-all duration-300 overflow-hidden ${style.css} flex flex-col rounded-3xl touch-none`}
+                className={`sully-journal-paper sully-journal-paper-${side} relative w-full h-full shadow-md transition-all duration-300 overflow-hidden ${style.css} flex flex-col rounded-3xl touch-none`}
                 style={{ ...style.style }}
                 onPointerMove={isInteractive && side === activeTab ? handlePointerMove : undefined}
                 onPointerUp={isInteractive && side === activeTab ? handlePointerUp : undefined}
@@ -699,12 +723,12 @@ ${charPart}
                 onClick={handleBackgroundClick}
             >
                 {/* Content Container */}
-                <div className="flex-1 p-6 relative z-10 flex flex-col">
-                    <div className="flex justify-between items-center mb-4 pb-2 border-b border-black/5 shrink-0">
-                        <span className={`text-xs font-bold uppercase tracking-widest opacity-50 ${style.text}`}>
+                <div className="sully-journal-page-content flex-1 p-6 relative z-10 flex flex-col">
+                    <div className="sully-journal-page-meta flex justify-between items-center mb-4 pb-2 border-b border-black/5 shrink-0">
+                        <span className={`sully-journal-page-title text-xs font-bold uppercase tracking-widest opacity-50 ${style.text}`}>
                             {side === 'user' ? 'MY DIARY' : 'REPLY'}
                         </span>
-                        <span className={`text-[10px] opacity-40 font-mono ${style.text}`}>
+                        <span className={`sully-journal-page-date text-[10px] opacity-40 font-mono ${style.text}`}>
                             {currentEntry?.date}
                         </span>
                     </div>
@@ -713,7 +737,7 @@ ${charPart}
                         value={page.text}
                         onChange={e => updatePage({ text: e.target.value }, side)}
                         placeholder={side === 'user' ? "记录今天发生的事情..." : "等待回复..."}
-                        className={`flex-1 w-full bg-transparent resize-none outline-none leading-loose text-[16px] font-normal ${style.text} placeholder:opacity-30 no-scrollbar`}
+                        className={`sully-journal-textarea flex-1 w-full bg-transparent resize-none outline-none leading-loose text-[16px] font-normal ${style.text} placeholder:opacity-30 no-scrollbar`}
                         readOnly={isThinking} 
                     />
                 </div>
@@ -729,7 +753,7 @@ ${charPart}
                             key={s.id} 
                             onPointerDown={(e) => handlePointerDown(e, s.id, 'move')}
                             onClick={(e) => selectSticker(e, s.id)}
-                            className={`absolute text-6xl select-none drop-shadow-md z-20 cursor-move ${draggingSticker === s.id ? 'opacity-90' : ''} transition-transform`}
+                            className={`sully-journal-sticker absolute text-6xl select-none drop-shadow-md z-20 cursor-move ${draggingSticker === s.id ? 'opacity-90' : ''} transition-transform`}
                             style={{ 
                                 left: `${s.x}%`, 
                                 top: `${s.y}%`, 
@@ -739,8 +763,8 @@ ${charPart}
                                 padding: '4px'
                             }}
                         >
-                            {s.url.startsWith('http') || s.url.startsWith('data') ? (
-                                <img src={s.url} className="w-20 h-20 object-contain pointer-events-none" draggable={false} />
+                            {isImageValue(s.url) ? (
+                                <TokenImg value={s.url} className="w-20 h-20 object-contain pointer-events-none" draggable={false} />
                             ) : s.url}
 
                             {/* Controls for Selected Sticker */}
@@ -764,10 +788,36 @@ ${charPart}
                 })}
                 
                 {/* Paper Texture Overlay (Subtle) */}
-                <div className="absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/paper-fibers.png')] opacity-10 pointer-events-none z-0 mix-blend-multiply"></div>
+                <div className="sully-journal-texture absolute inset-0 bg-[url('https://www.transparenttextures.com/patterns/paper-fibers.png')] opacity-10 pointer-events-none z-0 mix-blend-multiply"></div>
             </div>
         );
     };
+
+    const renderEmptyCharPage = () => (
+        <div className="sully-journal-empty w-full h-full bg-[#252525] rounded-3xl border border-white/5 flex flex-col items-center justify-center text-white/40 gap-4 p-8 text-center">
+            <div className="opacity-20 animate-pulse"><img src={twemojiUrl('1f48c')} alt="letter" className="w-12 h-12" /></div>
+            {isThinking ? (
+                <div className="space-y-2">
+                    <p className="text-sm font-medium text-amber-500">对方正在阅读你的日记...</p>
+                    <div className="flex justify-center gap-1">
+                        <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce"></div>
+                        <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce delay-100"></div>
+                        <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce delay-200"></div>
+                    </div>
+                </div>
+            ) : (
+                <>
+                    <p className="text-sm">写完日记后，点击下方按钮<br/>邀请 {selectedChar?.name} 交换日记。</p>
+                    <button
+                        onClick={handleExchange}
+                        className="px-6 py-3 bg-amber-500 hover:bg-amber-400 text-white text-sm font-bold rounded-full shadow-[0_0_20px_rgba(245,158,11,0.3)] active:scale-95 transition-all mt-2"
+                    >
+                        查看 TA 的今日
+                    </button>
+                </>
+            )}
+        </div>
+    );
 
     // 一次性弹窗:讲清楚新版交换日记的行为变化(自动同步 / 归档移到列表 / 宫殿入向量)
     const introModal = showIntro ? (
@@ -909,31 +959,33 @@ ${charPart}
 
     if (mode === 'select') {
         return (
-            <div className="h-full w-full bg-amber-50 flex flex-col font-light">
+            <div className={`sully-journal-root sully-journal-select h-full w-full bg-amber-50 flex flex-col font-light${journalLayoutClass}`}>
+                <JournalAppearanceStyle appearance={effectiveJournalAppearance} />
                 {introModal}
                 {archiveResultModal}
-                <div className="border-b border-amber-100 bg-amber-50/80 backdrop-blur-sm sticky top-0 z-20 shrink-0" style={{ paddingTop: 'var(--chrome-top)' }}>
+                <JournalThemeArtwork preset={effectiveJournalPreset} scene="select" />
+                <div className="sully-journal-header border-b border-amber-100 bg-amber-50/80 backdrop-blur-sm sticky top-0 z-20 shrink-0" style={{ paddingTop: 'var(--chrome-top)' }}>
                     <div className="h-12 px-6 flex items-center justify-between">
-                        <button onClick={closeApp} className="p-2 -ml-2 rounded-full hover:bg-amber-100/50 active:scale-90 transition-transform">
+                        <button onClick={closeApp} aria-label="返回桌面" className="sully-journal-back p-2 -ml-2 rounded-full hover:bg-amber-100/50 active:scale-90 transition-transform">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6 text-amber-900"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                         </button>
-                        <span className="font-bold text-amber-900 text-lg tracking-wide">选择日记本</span>
-                        <div className="w-8"></div>
+                        <span className="sully-journal-header-title font-bold text-amber-900 text-lg tracking-wide">选择日记本</span>
+                        <JournalAppearanceButton compact {...journalAppearanceButtonProps} />
                     </div>
                 </div>
                 
                 {/* 分组筛选（没建分组时不渲染），浅色米黄底 */}
                 <CharacterGroupFilterBar characters={characters} groups={characterGroups}
-                    value={journalGroupId} onChange={setJournalGroupId} className="px-6 pt-4 shrink-0" />
-                <div className="p-6 grid grid-cols-2 gap-5 overflow-y-auto pb-20 no-scrollbar">
+                    value={journalGroupId} onChange={setJournalGroupId} className="sully-journal-group-filter px-6 pt-4 shrink-0" />
+                <div className="sully-journal-notebook-grid p-6 grid grid-cols-2 gap-5 overflow-y-auto pb-20 no-scrollbar">
                     {filterCharactersByGroup(characters, characterGroups, journalGroupId).map(c => (
-                        <div key={c.id} onClick={() => handleCharSelect(c)} className="aspect-[3/4] bg-white rounded-r-2xl rounded-l-md border-l-4 border-l-amber-800 shadow-[2px_4px_12px_rgba(0,0,0,0.08)] p-4 flex flex-col items-center justify-center gap-3 cursor-pointer active:scale-95 transition-all relative overflow-hidden group">
+                        <div key={c.id} onClick={() => handleCharSelect(c)} className="sully-journal-notebook aspect-[3/4] bg-white rounded-r-2xl rounded-l-md border-l-4 border-l-amber-800 shadow-[2px_4px_12px_rgba(0,0,0,0.08)] p-4 flex flex-col items-center justify-center gap-3 cursor-pointer active:scale-95 transition-all relative overflow-hidden group">
                             <div className="absolute inset-y-0 left-0 w-2 bg-gradient-to-r from-black/10 to-transparent"></div>
-                            <div className="w-16 h-16 rounded-full p-[2px] border border-amber-100 bg-amber-50">
-                                <img src={c.avatar} className="w-full h-full rounded-full object-cover" />
+                            <div className="sully-journal-notebook-avatar w-16 h-16 rounded-full p-[2px] border border-amber-100 bg-amber-50">
+                                <TokenImg value={c.avatar} className="w-full h-full rounded-full object-cover" />
                             </div>
-                            <span className="font-bold text-amber-900 text-sm">{c.name}</span>
-                            <span className="text-[9px] text-amber-600 bg-amber-50 px-2 py-1 rounded-full font-mono uppercase tracking-wide">Journal</span>
+                            <span className="sully-journal-notebook-name font-bold text-amber-900 text-sm">{c.name}</span>
+                            <span className="sully-journal-notebook-label text-[9px] text-amber-600 bg-amber-50 px-2 py-1 rounded-full font-mono uppercase tracking-wide">Journal</span>
                         </div>
                     ))}
                 </div>
@@ -943,40 +995,42 @@ ${charPart}
 
     if (mode === 'calendar' && selectedChar) {
         return (
-            <div className="h-full w-full bg-white flex flex-col font-light relative">
+            <div className={`sully-journal-root sully-journal-calendar h-full w-full bg-white flex flex-col font-light relative${journalLayoutClass}`}>
+                <JournalAppearanceStyle appearance={effectiveJournalAppearance} />
                 {introModal}
                 {archiveResultModal}
-                <div className="pb-6 px-6 bg-amber-500 shadow-lg shrink-0 rounded-b-[2rem] z-20" style={{ paddingTop: 'max(3rem, var(--safe-top))' }}>
+                <JournalThemeArtwork preset={effectiveJournalPreset} scene="calendar" />
+                <div className="sully-journal-calendar-hero pb-6 px-6 bg-amber-500 shadow-lg shrink-0 rounded-b-[2rem] z-20" style={{ paddingTop: 'max(3rem, var(--safe-top))' }}>
                     <div className="flex justify-between items-start mb-4">
-                         <button onClick={() => setMode('select')} className="text-white/80 hover:text-white transition-colors">
+                         <button onClick={() => setMode('select')} aria-label="返回日记本选择" className="sully-journal-back text-white/80 hover:text-white transition-colors">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18" /></svg>
                          </button>
-                         <div className="w-6"></div>
+                         <JournalAppearanceButton tone="dark" compact {...journalAppearanceButtonProps} />
                     </div>
-                    <div className="text-white">
-                        <div className="text-xs opacity-70 uppercase tracking-widest font-bold mb-1">Exchange Diary</div>
-                        <div className="text-3xl font-bold tracking-tight">{selectedChar.name}</div>
+                    <div className="sully-journal-calendar-heading text-white">
+                        <div className="sully-journal-calendar-kicker text-xs opacity-70 uppercase tracking-widest font-bold mb-1">Exchange Diary</div>
+                        <div className="sully-journal-calendar-title text-3xl font-bold tracking-tight">{selectedChar.name}</div>
                     </div>
                 </div>
 
-                <div className="flex-1 overflow-y-auto p-5 pb-20 no-scrollbar">
-                    <button onClick={() => openEntry(getLocalDateStr())} className="w-full py-5 mb-8 border-2 border-dashed border-amber-200 rounded-2xl text-amber-500 font-bold flex items-center justify-center gap-2 hover:bg-amber-50 active:scale-95 transition-all">
+                <div className="sully-journal-calendar-list flex-1 overflow-y-auto p-5 pb-20 no-scrollbar">
+                    <button onClick={() => openEntry(getLocalDateStr())} className="sully-journal-new-entry w-full py-5 mb-8 border-2 border-dashed border-amber-200 rounded-2xl text-amber-500 font-bold flex items-center justify-center gap-2 hover:bg-amber-50 active:scale-95 transition-all">
                         <span className="text-xl">+</span> 写今天的日记
                     </button>
                     
                     <div className="space-y-4">
                         {diaries.map(d => (
-                            <div key={d.id} onClick={() => openEntry(d.date)} className="flex items-center gap-4 p-4 rounded-2xl bg-white border border-slate-100 shadow-sm active:scale-95 transition-all hover:shadow-md cursor-pointer relative overflow-hidden group">
-                                <div className="absolute left-0 top-0 bottom-0 w-1 bg-amber-400"></div>
-                                <div className="w-14 h-14 bg-amber-50 rounded-xl flex flex-col items-center justify-center text-amber-800 shrink-0 border border-amber-100">
+                            <div key={d.id} onClick={() => openEntry(d.date)} className="sully-journal-entry flex items-center gap-4 p-4 rounded-2xl bg-white border border-slate-100 shadow-sm active:scale-95 transition-all hover:shadow-md cursor-pointer relative overflow-hidden group">
+                                <div className="sully-journal-entry-accent absolute left-0 top-0 bottom-0 w-1 bg-amber-400"></div>
+                                <div className="sully-journal-entry-date w-14 h-14 bg-amber-50 rounded-xl flex flex-col items-center justify-center text-amber-800 shrink-0 border border-amber-100">
                                     <span className="text-[10px] font-bold opacity-60">{d.date.split('-')[1]}月</span>
                                     <span className="text-xl font-bold leading-none">{d.date.split('-')[2]}</span>
                                 </div>
                                 <div className="flex-1 min-w-0">
-                                    <p className="text-sm text-slate-700 truncate font-medium">{d.userPage.text || '(空)'}</p>
+                                    <p className="sully-journal-entry-text text-sm text-slate-700 truncate font-medium">{d.userPage.text || '(空)'}</p>
                                     <div className="flex justify-between items-center mt-1">
-                                        <p className="text-xs text-slate-400 font-mono">{d.date.split('-')[0]}</p>
-                                        <div className="flex gap-2">
+                                        <p className="sully-journal-entry-year text-xs text-slate-400 font-mono">{d.date.split('-')[0]}</p>
+                                        <div className="sully-journal-entry-badges flex gap-2">
                                             {d.charPage && <span className="px-2 py-0.5 bg-green-100 text-green-600 rounded-full text-[9px] font-bold">已回复</span>}
                                             {d.chatCardMessageId && <span className="px-2 py-0.5 bg-emerald-50 text-emerald-500 rounded-full text-[9px] font-bold">同步聊天</span>}
                                             {d.isArchived && <span className="px-2 py-0.5 bg-amber-100 text-amber-600 rounded-full text-[9px] font-bold">已归档</span>}
@@ -1023,17 +1077,20 @@ ${charPart}
 
     // --- WRITE MODE ---
     return (
-        <div className="h-full w-full bg-[#1a1a1a] flex flex-col relative overflow-hidden">
+        <div className={`sully-journal-root sully-journal-write h-full w-full bg-[#1a1a1a] flex flex-col relative overflow-hidden${journalLayoutClass}`}>
+            <JournalAppearanceStyle appearance={effectiveJournalAppearance} />
             {introModal}
             {archiveResultModal}
+            <JournalThemeArtwork preset={effectiveJournalPreset} scene="write" />
 
             {/* Editor Header */}
-            <div className="bg-[#1a1a1a]/90 backdrop-blur-md text-white shrink-0 z-30" style={{ paddingTop: 'var(--chrome-top)' }}>
+            <div className="sully-journal-editor-header bg-[#1a1a1a]/90 backdrop-blur-md text-white shrink-0 z-30" style={{ paddingTop: 'var(--chrome-top)' }}>
                 <div className="h-12 px-4 flex items-center justify-between">
-                    <button onClick={() => setMode('calendar')} className="p-2 -ml-2 text-white/60 hover:text-white rounded-full active:bg-white/10 transition-colors">
+                    <button onClick={() => setMode('calendar')} aria-label="返回日记列表" className="sully-journal-back p-2 -ml-2 text-white/60 hover:text-white rounded-full active:bg-white/10 transition-colors">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
                     </button>
                     <div className="flex gap-3">
+                        <JournalAppearanceButton tone="dark" compact {...journalAppearanceButtonProps} />
                         {/* Toggle Char Sticker Visibility Button */}
                         {activeTab === 'char' && (
                             <button
@@ -1091,54 +1148,46 @@ ${charPart}
             </div>
 
             {/* Main Page Area */}
-            <div className="flex-1 relative w-full overflow-hidden flex flex-col">
-                <div className="flex-1 w-full max-w-xl mx-auto px-2 pb-4 pt-2 flex flex-col relative">
+            <div className="sully-journal-editor-stage flex-1 relative w-full overflow-hidden flex flex-col">
+                <div className={`flex-1 w-full mx-auto px-2 pb-4 pt-2 flex flex-col relative ${journalUsesScrapbookLayout ? 'max-w-5xl' : 'max-w-xl'}`}>
                     <div className="flex-1 relative rounded-3xl transition-all duration-500">
-                        {activeTab === 'user' && currentEntry && renderPage(currentEntry.userPage, 'user')}
-                        
-                        {activeTab === 'char' && (
-                            currentEntry?.charPage ? renderPage(currentEntry.charPage, 'char') : (
-                                <div className="w-full h-full bg-[#252525] rounded-3xl border border-white/5 flex flex-col items-center justify-center text-white/40 gap-4 p-8 text-center">
-                                    <div className="opacity-20 animate-pulse"><img src={twemojiUrl('1f48c')} alt="letter" className="w-12 h-12" /></div>
-                                    {isThinking ? (
-                                        <div className="space-y-2">
-                                            <p className="text-sm font-medium text-amber-500">对方正在阅读你的日记...</p>
-                                            <div className="flex justify-center gap-1">
-                                                <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce"></div>
-                                                <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce delay-100"></div>
-                                                <div className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-bounce delay-200"></div>
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <>
-                                            <p className="text-sm">写完日记后，点击下方按钮<br/>邀请 {selectedChar?.name} 交换日记。</p>
-                                            <button 
-                                                onClick={handleExchange} 
-                                                className="px-6 py-3 bg-amber-500 hover:bg-amber-400 text-white text-sm font-bold rounded-full shadow-[0_0_20px_rgba(245,158,11,0.3)] active:scale-95 transition-all mt-2"
-                                            >
-                                                查看 TA 的今日
-                                            </button>
-                                        </>
-                                    )}
+                        {journalUsesScrapbookLayout ? (
+                            <div className="sully-journal-spread">
+                                <div
+                                    className={`sully-journal-spread-page sully-journal-spread-user ${activeTab === 'user' ? 'is-active' : 'is-inactive'}`}
+                                    onPointerDownCapture={() => setActiveTab('user')}
+                                >
+                                    {currentEntry && renderPage(currentEntry.userPage, 'user')}
                                 </div>
-                            )
+                                <div
+                                    className={`sully-journal-spread-page sully-journal-spread-char ${activeTab === 'char' ? 'is-active' : 'is-inactive'}`}
+                                    onPointerDownCapture={() => setActiveTab('char')}
+                                >
+                                    {currentEntry?.charPage ? renderPage(currentEntry.charPage, 'char') : renderEmptyCharPage()}
+                                </div>
+                            </div>
+                        ) : (
+                            <>
+                                {activeTab === 'user' && currentEntry && renderPage(currentEntry.userPage, 'user')}
+                                {activeTab === 'char' && (currentEntry?.charPage ? renderPage(currentEntry.charPage, 'char') : renderEmptyCharPage())}
+                            </>
                         )}
                     </div>
                 </div>
             </div>
 
             {/* Bottom Controls */}
-            <div className="shrink-0 bg-[#222] border-t border-white/5 pb-safe pt-2 z-30">
-                <div className="flex justify-center gap-4 mb-4 px-4">
+            <div className="sully-journal-bottom-controls shrink-0 bg-[#222] border-t border-white/5 pb-safe pt-2 z-30">
+                <div className="sully-journal-tabs flex justify-center gap-4 mb-4 px-4">
                     <button 
                         onClick={() => { setActiveTab('user'); setSelectedStickerId(null); trackEvent('切换日记页标签', { page: 'user' }); }}
-                        className={`flex-1 py-3 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all duration-300 relative overflow-hidden ${activeTab === 'user' ? 'bg-white text-black shadow-lg' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
+                        className={`sully-journal-tab ${activeTab === 'user' ? 'sully-journal-tab-active' : ''} flex-1 py-3 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all duration-300 relative overflow-hidden ${activeTab === 'user' ? 'bg-white text-black shadow-lg' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
                     >
                         My Diary
                     </button>
                     <button 
                         onClick={() => { setActiveTab('char'); setSelectedStickerId(null); trackEvent('切换日记页标签', { page: 'char' }); }}
-                        className={`flex-1 py-3 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all duration-300 relative overflow-hidden ${activeTab === 'char' ? 'bg-amber-500 text-white shadow-lg shadow-amber-900/50' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
+                        className={`sully-journal-tab ${activeTab === 'char' ? 'sully-journal-tab-active' : ''} flex-1 py-3 rounded-2xl text-xs font-bold uppercase tracking-wider transition-all duration-300 relative overflow-hidden ${activeTab === 'char' ? 'bg-amber-500 text-white shadow-lg shadow-amber-900/50' : 'bg-white/5 text-white/40 hover:bg-white/10'}`}
                     >
                         {selectedChar?.name || 'Partner'}
                         {currentEntry?.charPage && activeTab !== 'char' && <div className="absolute top-2 right-2 w-2 h-2 bg-green-500 rounded-full shadow-sm animate-pulse"></div>}
@@ -1146,12 +1195,12 @@ ${charPart}
                 </div>
 
                 <div className="flex items-center justify-between px-6 pb-4">
-                    <div className="flex gap-3 bg-[#111] p-1.5 rounded-full border border-white/10">
+                    <div className="sully-journal-paper-picker flex gap-3 bg-[#111] p-1.5 rounded-full border border-white/10">
                         {PAPER_STYLES.slice(0, 4).map(s => (
                             <button 
                                 key={s.id} 
                                 onClick={() => { updatePage({ paperStyle: s.id }, activeTab); trackEvent('切换日记纸张样式', { paperStyle: s.id }); }}
-                                className={`w-8 h-8 rounded-full border border-white/10 transition-transform active:scale-90 ${s.css}`}
+                                className={`sully-journal-paper-swatch w-8 h-8 rounded-full border border-white/10 transition-transform active:scale-90 ${s.css}`}
                                 title={s.name}
                             />
                         ))}
@@ -1159,14 +1208,20 @@ ${charPart}
                     
                     <div className="flex gap-3">
                         {activeTab === 'char' && currentEntry?.charPage && !isThinking && (
-                            <button onClick={handleExchange} className="w-11 h-11 bg-white/10 text-white rounded-full flex items-center justify-center active:scale-90 transition-transform border border-white/5">
+                            <button
+                                onClick={handleExchange}
+                                className="w-11 h-11 bg-white/10 text-white rounded-full flex items-center justify-center active:scale-90 transition-transform border border-white/5"
+                                title="重新写角色日记"
+                                aria-label="重新写角色日记"
+                                data-testid="journal-rewrite-character-page"
+                            >
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" /></svg>
                             </button>
                         )}
                         
                         <button 
                             onClick={() => { setShowStickerPanel(!showStickerPanel); if (!showStickerPanel) trackEvent('打开贴纸面板'); }}
-                            className={`w-11 h-11 rounded-full flex items-center justify-center text-xl shadow-lg active:scale-90 transition-transform ${showStickerPanel ? 'bg-white text-black' : 'bg-gradient-to-br from-amber-400 to-orange-500 text-white'}`}
+                            className={`sully-journal-sticker-button w-11 h-11 rounded-full flex items-center justify-center text-xl shadow-lg active:scale-90 transition-transform ${showStickerPanel ? 'bg-white text-black' : 'bg-gradient-to-br from-amber-400 to-orange-500 text-white'}`}
                         >
                             <Sparkle size={24} weight="fill" />
                         </button>
@@ -1174,7 +1229,7 @@ ${charPart}
                 </div>
 
                 {showStickerPanel && (
-                    <div className="bg-[#1a1a1a] border-t border-white/10 p-4 animate-slide-up h-48 overflow-y-auto no-scrollbar">
+                    <div className="sully-journal-sticker-panel bg-[#1a1a1a] border-t border-white/10 p-4 animate-slide-up h-48 overflow-y-auto no-scrollbar">
                         <div className="grid grid-cols-6 gap-3">
                             <button onClick={() => { setShowImportModal(true); trackEvent('打开自定义贴纸导入弹窗'); }} className="flex items-center justify-center bg-white/10 rounded-xl border-2 border-dashed border-white/20 text-white/50 text-xl font-bold hover:bg-white/20 hover:text-white transition-all aspect-square">
                                 +

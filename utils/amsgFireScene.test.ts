@@ -164,3 +164,63 @@ describe('renderFireSceneBlock — 到点现挑时段', () => {
         expect(renderFireSceneBlock(withFlow, shanghaiAt(21), { tzId: 'Asia/Shanghai' })).toContain('晚上的念头');
     });
 });
+
+// 角色关掉「时间感知」后，前台连「现在几点」都读不到，这一段却照旧写着
+// 「当前时段：22:00 你正在…」——钟从日程这条缝漏了出去。取值与今日节日同源
+// （worker 从 tool_pack.timeAwarenessEnabled 读），日程内容本身不受影响。
+describe('renderFireSceneBlock — 钟点跟着「时间感知」开关', () => {
+    const tz = { tzId: 'Asia/Shanghai' };
+
+    it('默认（不传）照常报时段，老行为不变', () => {
+        const out = renderFireSceneBlock(scene, shanghaiAt(14, 30), tz);
+        expect(out).toContain('当前时段：14:00 你正在跑步（健身房）');
+    });
+
+    it('includeClock=false 时活动还在、钟点消失', () => {
+        const out = renderFireSceneBlock(scene, shanghaiAt(14, 30), tz, { includeClock: false });
+        expect(out).toContain('你正在跑步（健身房）');
+        expect(out).toContain('之后安排：戴着耳机瘫在沙发上');
+        expect(out).not.toContain('14:00');
+        expect(out).not.toContain('22:00');
+    });
+
+    it('今天第一条还没到点那句同样不带钟点', () => {
+        const out = renderFireSceneBlock(scene, shanghaiAt(6), tz, { includeClock: false });
+        expect(out).toContain('稍后先起床做早饭');
+        expect(out).not.toContain('08:00');
+    });
+
+    it('「此刻在听什么」不受影响——那不是钟点', () => {
+        const out = renderFireSceneBlock(scene, shanghaiAt(22, 30), tz, { includeClock: false });
+        expect(out).toContain('你此刻在听');
+    });
+});
+
+// 到点主动开口的角色最容易撞上「表上写着睡觉、我却正在给对方发消息」，所以这条路也要
+// 带上改日程的能力说明——没有它，角色只能顶着「我在睡觉」硬说。
+describe('renderFireSceneBlock — 主动消息也教改日程', () => {
+    const tz = { tzId: 'Asia/Shanghai' };
+
+    it('到点渲染时带上改日程的能力说明', () => {
+        const out = renderFireSceneBlock(scene, shanghaiAt(23, 10), tz);
+        expect(out).toContain('[[ACTION:CHANGE_SCHEDULE');
+        expect(out).toContain('不是必须履行的命令');
+    });
+
+    it('示例时段取当前这一条（最后一条日程之后没有「下一条」）', () => {
+        const out = renderFireSceneBlock(scene, shanghaiAt(23, 10), tz);
+        expect(out).toContain('[[ACTION:CHANGE_SCHEDULE | 22:00 | 去超市]]');
+    });
+
+    it('措辞不提「上表」——主动消息只给当前时段和下一条，没有完整日程可指', () => {
+        const out = renderFireSceneBlock(scene, shanghaiAt(14, 30), tz);
+        expect(out).not.toContain('来自上表');
+        expect(out).toContain('原样抄上面出现过的');
+    });
+
+    it('关掉钟点时连这条一起收起来（没有时段可抄，写不出指令）', () => {
+        const out = renderFireSceneBlock(scene, shanghaiAt(14, 30), tz, { includeClock: false });
+        expect(out).not.toContain('CHANGE_SCHEDULE');
+    });
+});
+

@@ -373,3 +373,67 @@ describe('classifyLLMOutput — 同一条消息里重复的副作用只出一个
     }
   });
 });
+
+// 角色改自己日程要跨两侧才算齐：worker 这边把标签认成 change_schedule directive，
+// 客户端那边拼回原标签、落库、顺带打脏让 fire_pack 重新上云。worker 不认的话，标签会
+// 留在正文里，然后被 sanitizeIntoSegments 的 stripBusinessTagsForNotification（正则含
+// ACTION）连 raw 一起剥掉，客户端什么都收不到——而角色嘴上已经说了「改好了」。
+// 即时对话是 amsg2 的主路径，前台那份 prompt 又照常教这个能力，所以这条通道必须在。
+describe('classifyLLMOutput — 日程修改走 directive 通道', () => {
+  it('规范标签 → change_schedule directive，正文里不留痕', () => {
+    const r = classifyLLMOutput('那今晚就不睡了，陪你聊。\n[[ACTION:CHANGE_SCHEDULE | 22:00 | 陪你聊天]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([
+        { type: 'change_schedule', time: '22:00', activity: '陪你聊天' },
+      ]);
+      expect(r.cleanedText).toBe('那今晚就不睡了，陪你聊。');
+      expect(r.cleanedText).not.toContain('CHANGE_SCHEDULE');
+    }
+  });
+
+  it('掉格式的写法一样认（跟客户端共用同一份容错解析）', () => {
+    for (const raw of [
+      '【【修改日程：22:00：陪你聊天】】',
+      '[[change schedule: (22:00): 陪你聊天]]',
+      '改日程 | 22点 | 陪你聊天',
+    ]) {
+      const r = classifyLLMOutput(raw);
+      expect(r.kind).toBe('finish');
+      if (r.kind === 'finish') {
+        expect(r.directives.some((d) => d.type === 'change_schedule')).toBe(true);
+      }
+    }
+  });
+
+  it('只输出这一个标签时也到得了客户端（directive-only，没有可见正文）', () => {
+    const r = classifyLLMOutput('[[ACTION:CHANGE_SCHEDULE | 22:00 | 陪你聊天]]');
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toHaveLength(1);
+      expect(r.cleanedText).toBe('');
+    }
+  });
+
+  it('没有这个标签时正文一个字都不动（解析层的空行压缩不该殃及普通消息）', () => {
+    const text = '今天好累。\n\n\n不过还是想跟你说说话。';
+    const r = classifyLLMOutput(text);
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') expect(r.cleanedText).toBe(text);
+  });
+
+  it('跟别的副作用标签共存时互不干扰', () => {
+    const r = classifyLLMOutput(
+      '[[ACTION:POKE]]\n[[ACTION:CHANGE_SCHEDULE | 22:00 | 陪你聊天]]\n[[ACTION:ADD_EVENT|纪念日|2026-08-20]]',
+    );
+    expect(r.kind).toBe('finish');
+    if (r.kind === 'finish') {
+      expect(r.directives).toEqual([
+        { type: 'change_schedule', time: '22:00', activity: '陪你聊天' },
+        { type: 'poke' },
+        { type: 'add_event', title: '纪念日', date: '2026-08-20' },
+      ]);
+    }
+  });
+});
+

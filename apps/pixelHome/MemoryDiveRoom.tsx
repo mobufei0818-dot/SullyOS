@@ -15,6 +15,7 @@ import type { MemoryRoom } from '../../utils/memoryPalace/types';
 import type { PixelHomeState, PixelRoomLayout, PixelAsset } from './types';
 import { decodeColorField } from './types';
 import { ROOM_SIZES, ROOM_SLOTS } from './roomTemplates';
+import TokenImg from '../../components/os/TokenImg';
 
 const TILE_BASE = 28;
 
@@ -312,7 +313,7 @@ const SpritePerson: React.FC<{
         }}
       >
         {sprite ? (
-          <img src={sprite}
+          <TokenImg value={sprite}
             style={{
               display: 'block', width: '100%', height: '100%',
               objectFit: 'contain', imageRendering: 'pixelated',

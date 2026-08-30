@@ -3,6 +3,8 @@ import React, { useMemo, useState, useEffect } from 'react';
 import { BankTransaction, SavingsGoal, APIConfig } from '../../types';
 import { safeResponseJson } from '../../utils/safeApi';
 import { getLocalDateKey } from '../../utils/localDate';
+import { shareOrDownloadFile } from '../../utils/shareExport';
+import { formatMoney, roundMoney, sumMoney } from '../../utils/format';
 
 interface Props {
     transactions: BankTransaction[];
@@ -56,10 +58,10 @@ const BankAnalytics: React.FC<Props> = ({ transactions, goals, currency, onDelet
     }, [transactions, viewMode, today, weekStart, currentMonth]);
 
     // Calculate totals
-    const totalSpent = useMemo(() => filteredTx.reduce((sum, tx) => sum + tx.amount, 0), [filteredTx]);
+    const totalSpent = useMemo(() => sumMoney(filteredTx.map(tx => tx.amount)), [filteredTx]);
 
     // CSV Export
-    const handleExportCSV = () => {
+    const handleExportCSV = async () => {
         if (transactions.length === 0) return;
         const BOM = '\uFEFF';
         const header = '日期,时间,金额,备注,分类\n';
@@ -70,19 +72,16 @@ const BankAnalytics: React.FC<Props> = ({ transactions, goals, currency, onDelet
                 const time = new Date(tx.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
                 const cat = CATEGORIES[categorizedTx[tx.id] || guessCategory(tx.note)]?.label || '其他';
                 const note = tx.note.replace(/,/g, '，').replace(/"/g, '""');
-                return `${date},${time},${tx.amount},"${note}",${cat}`;
+                return `${date},${time},${formatMoney(tx.amount)},"${note}",${cat}`;
             })
             .join('\n');
         const csv = BOM + header + rows;
-        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `记账记录_${new Date().toISOString().split('T')[0]}.csv`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+        await shareOrDownloadFile({
+            content: csv,
+            fileName: `记账记录_${new Date().toISOString().split('T')[0]}.csv`,
+            mimeType: 'text/csv;charset=utf-8',
+            shareTitle: 'SullyOS 记账记录',
+        });
     };
 
     // Group by category
@@ -98,7 +97,7 @@ const BankAnalytics: React.FC<Props> = ({ transactions, goals, currency, onDelet
         });
 
         return Object.entries(groups)
-            .map(([key, data]) => ({ category: key, ...data, percentage: totalSpent > 0 ? (data.total / totalSpent) * 100 : 0 }))
+            .map(([key, data]) => ({ category: key, ...data, total: roundMoney(data.total), percentage: totalSpent > 0 ? (data.total / totalSpent) * 100 : 0 }))
             .sort((a, b) => b.total - a.total);
     }, [filteredTx, categorizedTx, totalSpent]);
 
@@ -121,7 +120,7 @@ const BankAnalytics: React.FC<Props> = ({ transactions, goals, currency, onDelet
 
         setIsAnalyzing(true);
         try {
-            const txList = filteredTx.map(tx => `- ${tx.note}: ${currency}${tx.amount}`).join('\n');
+            const txList = filteredTx.map(tx => `- ${tx.note}: ${currency}${formatMoney(tx.amount)}`).join('\n');
             const periodLabel = viewMode === 'today' ? '今天' : viewMode === 'week' ? '本周' : '本月';
 
             const prompt = `作为一个财务分析助手，分析以下消费记录：
@@ -167,11 +166,11 @@ ${txList}
     };
 
     // Total savings progress
-    const totalSaved = useMemo(() => goals.reduce((sum, g) => sum + g.currentAmount, 0), [goals]);
+    const totalSaved = useMemo(() => sumMoney(goals.map(g => g.currentAmount)), [goals]);
     const nextGoal = useMemo(() => goals.find(g => !g.isCompleted) || goals[0], [goals]);
 
     // Budget status for today
-    const budgetRemaining = dailyBudget - (viewMode === 'today' ? totalSpent : 0);
+    const budgetRemaining = roundMoney(dailyBudget - (viewMode === 'today' ? totalSpent : 0));
     const budgetStatus = budgetRemaining >= 0 ? 'good' : 'over';
 
     return (
@@ -375,7 +374,7 @@ ${txList}
                                                 </div>
                                             </div>
                                         </div>
-                                        <div className="font-mono font-bold text-[#E64A19]">-{currency}{tx.amount}</div>
+                                        <div className="font-mono font-bold text-[#E64A19]">-{currency}{formatMoney(tx.amount)}</div>
 
                                         <button
                                             onClick={() => onDeleteTx(tx.id)}
@@ -406,7 +405,7 @@ ${txList}
                             <div className="bg-white/15 backdrop-blur-sm rounded-xl p-3 relative z-10">
                                 <div className="flex justify-between text-xs mb-2">
                                     <span className="opacity-80">下一目标: {nextGoal.name}</span>
-                                    <span className="font-bold">{currency}{nextGoal.targetAmount - nextGoal.currentAmount}</span>
+                                    <span className="font-bold">{currency}{formatMoney(nextGoal.targetAmount - nextGoal.currentAmount)}</span>
                                 </div>
                                 <div className="h-2 bg-black/20 rounded-full overflow-hidden">
                                     <div

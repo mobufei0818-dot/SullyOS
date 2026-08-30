@@ -8,6 +8,7 @@ import { LifestreamDepth } from '../../utils/handbookGenerator';
 import { PAPER_TONES, CUTE_STACK, WashiTape } from './paper';
 import { HeartSticker, StarSticker, SparkleDot } from './stickers';
 import { Sparkle, X } from '@phosphor-icons/react';
+import TokenImg from '../os/TokenImg';
 
 interface PickerProps {
     visible: boolean;
@@ -48,8 +49,8 @@ const HandbookCharPicker: React.FC<PickerProps> = ({
                 boxShadow: excluded ? 'none' : '0 1px 3px rgba(122,90,114,0.08)',
             }}
         >
-            <img
-                src={c.avatar}
+            <TokenImg
+                value={c.avatar}
                 className="w-10 h-10 rounded-full object-cover shrink-0"
                 style={{ boxShadow: '0 1px 3px rgba(0,0,0,0.15), 0 0 0 2.5px #fff' }}
                 alt=""

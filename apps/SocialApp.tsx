@@ -4,13 +4,15 @@ import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { CharacterProfile, SocialPost, SocialComment, SubAccount, SocialAppProfile } from '../types';
 import { ContextBuilder } from '../utils/context';
-import { processImage } from '../utils/file';
+import { processImageToBlob } from '../utils/file';
+import { putImageBlob } from '../utils/blobRef';
 import Modal from '../components/os/Modal';
 import { safeResponseJson } from '../utils/safeApi';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { House, User, Package, Warning } from '@phosphor-icons/react';
 import { mergeSocialComments, prependUniqueSocialPosts, updateSocialPost } from '../utils/socialFeedMerge';
 import { trackEvent } from '../utils/analytics';
+import TokenImg from '../components/os/TokenImg';
 
 const TWEMOJI_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72';
 const twemojiUrl = (codepoint: string) => `${TWEMOJI_BASE}/${codepoint}.png`;
@@ -361,10 +363,13 @@ const SocialApp: React.FC = () => {
         const file = e.target.files?.[0];
         if (file) {
             try {
-                const base64 = await processImage(file, { skipCompression: true });
-                setUserBgImage(base64);
+                // 背景图存二进制：assets 行里只留 blobref 令牌，渲染走 TokenImg。
+                // 旧令牌不主动删（同一张图可能被别处引用），交给孤儿 GC。
+                const blob = await processImageToBlob(file, { skipCompression: true });
+                const ref = await putImageBlob(blob);
+                setUserBgImage(ref);
                 // Save to DB Assets
-                await DB.saveAsset('spark_user_bg', base64);
+                await DB.saveAsset('spark_user_bg', ref);
                 addToast('背景图已更新', 'success');
             } catch (err) {
                 addToast('图片处理失败', 'error');
@@ -376,8 +381,11 @@ const SocialApp: React.FC = () => {
         const file = e.target.files?.[0];
         if (file) {
             try {
-                const base64 = await processImage(file);
-                setSocialProfile(prev => ({ ...prev, avatar: base64 }));
+                // 头像同样只存令牌；这里改的是 socialProfile 内存态，
+                // 落库在 saveUserProfileChanges（点「保存资料」时整个 JSON 写回）。
+                const blob = await processImageToBlob(file);
+                const ref = await putImageBlob(blob);
+                setSocialProfile(prev => ({ ...prev, avatar: ref }));
                 trackEvent('更换 Spark 头像');
             } catch (err: any) {
                 addToast(err.message, 'error');
@@ -387,7 +395,7 @@ const SocialApp: React.FC = () => {
 
     const saveUserProfileChanges = async () => {
         localStorage.setItem('spark_user_id', userSparkId);
-        // Save Profile to DB Assets (contains base64 avatar)
+        // Save Profile to DB Assets（avatar 是 blobref 令牌，二进制在 IndexedDB）
         await DB.saveAsset('spark_social_profile', JSON.stringify(socialProfile));
         setIsEditingId(false);
         addToast('主页资料已保存 (仅在 Spark 生效)', 'success');
@@ -901,7 +909,7 @@ ${identityMap}
             <div className="p-3">
                 <div className="flex justify-between items-center">
                     <div className="flex items-center gap-2 min-w-0">
-                        <img src={post.authorAvatar} className="w-5 h-5 rounded-full object-cover shrink-0 ring-1 ring-white/50" />
+                        <TokenImg value={post.authorAvatar} className="w-5 h-5 rounded-full object-cover shrink-0 ring-1 ring-white/50" />
                         <span className="text-[11px] text-slate-700 truncate font-medium">{post.authorName}</span>
                     </div>
                     <div className="flex items-center gap-1 text-slate-400 group-hover:text-slate-600 transition-colors">
@@ -934,7 +942,7 @@ ${identityMap}
                     <div className="flex items-center justify-between px-4 bg-white/60 backdrop-blur-xl border-b border-white/20 shrink-0 relative z-20" style={{ paddingTop: 'max(12px, var(--safe-top))', paddingBottom: '12px' }}>
                         <button onClick={handleClosePost} className="p-2 -m-2 active:opacity-60"><Icons.Back /></button>
                         <div className="flex items-center gap-2">
-                            <img src={selectedPost.authorAvatar} className="w-8 h-8 rounded-full object-cover border border-white/50" />
+                            <TokenImg value={selectedPost.authorAvatar} className="w-8 h-8 rounded-full object-cover border border-white/50" />
                             <span className="text-sm font-bold text-slate-800">{selectedPost.authorName}</span>
                         </div>
                         <button onClick={() => { setShowShareModal(true); trackEvent('打开分享帖子面板'); }} className="p-2 -m-2 active:opacity-60"><Icons.Share onClick={() => setShowShareModal(true)} className="w-6 h-6 text-slate-800 cursor-pointer hover:text-[#ff2442]" /></button>
@@ -970,7 +978,7 @@ ${identityMap}
                                 {selectedPost.comments.length === 0 && !loadingComments && <div className="text-center text-slate-300 text-xs py-10">快来抢沙发...</div>}
                                 {selectedPost.comments.map(c => (
                                     <div key={c.id} className="flex gap-3 animate-fade-in group">
-                                        <img src={c.authorAvatar} className="w-9 h-9 rounded-full object-cover shrink-0 border border-slate-100" />
+                                        <TokenImg value={c.authorAvatar} className="w-9 h-9 rounded-full object-cover shrink-0 border border-slate-100" />
                                         <div className="flex-1">
                                             <div className="flex justify-between items-start">
                                                 <span className={`text-xs font-bold ${c.isCharacter ? 'text-slate-800' : 'text-slate-500'}`}>{c.authorName}</span>
@@ -1035,7 +1043,7 @@ ${identityMap}
                         {filterCharactersByGroup(characters, characterGroups, identityGroupId).map(c => (
                             <div key={c.id} className="space-y-3 pb-4 border-b border-slate-50">
                                 <div className="flex items-center gap-2">
-                                    <img src={c.avatar} className="w-6 h-6 rounded-full object-cover" />
+                                    <TokenImg value={c.avatar} className="w-6 h-6 rounded-full object-cover" />
                                     <span className="text-sm font-bold text-slate-700">{c.name}</span>
                                     <button onClick={() => addSubAccount(c.id)} className="ml-auto text-[10px] bg-[#ff2442] text-white px-2 py-1 rounded-full shadow-sm active:scale-95 transition-transform">+ 添加马甲</button>
                                 </div>
@@ -1091,7 +1099,7 @@ ${identityMap}
                 <div className="grid grid-cols-4 gap-4 p-2">
                     {filterCharactersByGroup(characters, characterGroups, shareGroupId).map(c => (
                         <button key={c.id} onClick={() => handleShare(c.id, false)} className="flex flex-col items-center gap-2 group">
-                            <img src={c.avatar} className="w-12 h-12 rounded-full object-cover border border-slate-100 group-active:scale-90 transition-transform" />
+                            <TokenImg value={c.avatar} className="w-12 h-12 rounded-full object-cover border border-slate-100 group-active:scale-90 transition-transform" />
                             <span className="text-[10px] text-slate-600 truncate w-full text-center">{c.name}</span>
                         </button>
                     ))}
@@ -1196,9 +1204,9 @@ ${identityMap}
                             <div className="relative group">
                                 <div className="h-40 w-full overflow-hidden bg-slate-200 relative cursor-pointer" onClick={() => userBgInputRef.current?.click()}>
                                     {userBgImage ? (
-                                        <img src={userBgImage} className="w-full h-full object-cover" />
+                                        <TokenImg value={userBgImage} className="w-full h-full object-cover" />
                                     ) : (
-                                        <img src={userProfile.avatar} className="w-full h-full object-cover blur-2xl opacity-60 scale-125" />
+                                        <TokenImg value={userProfile.avatar} className="w-full h-full object-cover blur-2xl opacity-60 scale-125" />
                                     )}
                                     <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
                                         <span className="text-white text-xs font-bold bg-black/30 px-3 py-1 rounded-full backdrop-blur-md">更换背景</span>
@@ -1209,7 +1217,7 @@ ${identityMap}
                                 <div className="px-6 relative -mt-12 flex justify-between items-end">
                                     {/* Social Avatar - Clickable to change */}
                                     <div className="w-24 h-24 rounded-full p-1 bg-white/90 backdrop-blur-md shadow-lg relative group cursor-pointer" onClick={() => socialAvatarInputRef.current?.click()}>
-                                        <img src={socialProfile.avatar} className="w-full h-full rounded-full object-cover" />
+                                        <TokenImg value={socialProfile.avatar} className="w-full h-full rounded-full object-cover" />
                                         <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/20 rounded-full">
                                             <span className="text-white text-[10px] font-bold">更换</span>
                                         </div>
@@ -1282,7 +1290,7 @@ ${identityMap}
                                             <div className="p-3">
                                                 <h4 className="text-xs font-bold text-slate-800 line-clamp-2 leading-tight">{post.title}</h4>
                                                 <div className="flex justify-between items-center mt-2">
-                                                    <div className="flex items-center gap-1"><img src={post.authorAvatar} className="w-3 h-3 rounded-full" /><span className="text-[9px] text-slate-400 truncate w-12">{post.authorName}</span></div>
+                                                    <div className="flex items-center gap-1"><TokenImg value={post.authorAvatar} className="w-3 h-3 rounded-full" /><span className="text-[9px] text-slate-400 truncate w-12">{post.authorName}</span></div>
                                                     <div className="flex items-center gap-0.5 text-slate-400"><Icons.Heart filled={post.isLiked} className="w-3 h-3" /><span className="text-[9px]">{post.likes}</span></div>
                                                 </div>
                                             </div>

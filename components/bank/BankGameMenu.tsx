@@ -4,6 +4,8 @@ import { BankFullState, ShopStaff, CharacterProfile } from '../../types';
 import { SHOP_RECIPES, AVAILABLE_STAFF } from './BankGameConstants';
 import BankAssetIcon from './BankAssetIcon';
 import { processImage } from '../../utils/file';
+import { isBlobRef } from '../../utils/blobRef';
+import TokenImg from '../os/TokenImg';
 import { UsersThree, Target, Sparkle, PawPrint, Link as LinkIcon, Camera, Check, Lightbulb, Confetti, Briefcase, CookingPot, HandWaving, Dog, Cat, Rabbit } from '@phosphor-icons/react';
 
 interface Props {
@@ -131,8 +133,8 @@ const BankGameMenu: React.FC<Props> = ({
                                         <div className="flex items-center gap-3 cursor-pointer group" onClick={() => onEditStaff(s)}>
                                             <div className="relative">
                                                 <div className="w-14 h-14 rounded-xl bg-gradient-to-br from-[#FFF8E1] to-[#FFE0B2] flex items-center justify-center text-3xl shadow-inner group-hover:scale-105 transition-transform">
-                                                    {s.avatar.startsWith('http') || s.avatar.startsWith('data')
-                                                        ? <img src={s.avatar} className="w-full h-full object-cover rounded-xl" />
+                                                    {s.avatar.startsWith('http') || s.avatar.startsWith('data') || isBlobRef(s.avatar)
+                                                        ? <TokenImg value={s.avatar} className="w-full h-full object-cover rounded-xl" />
                                                         : s.avatar
                                                     }
                                                 </div>
@@ -229,7 +231,7 @@ const BankGameMenu: React.FC<Props> = ({
                                                             : 'bg-white border border-[#E8DCC8] hover:border-[#FF7043]'
                                                     }`}
                                                 >
-                                                    <img src={char.avatar} className="w-10 h-10 rounded-lg object-cover" />
+                                                    <TokenImg value={char.avatar} className="w-10 h-10 rounded-lg object-cover" />
                                                     <span className={`text-[9px] font-bold mt-1 truncate max-w-[50px] ${selectedOwner === char.id ? 'text-white' : 'text-[#5D4037]'}`}>
                                                         {char.name}
                                                     </span>
@@ -280,8 +282,8 @@ const BankGameMenu: React.FC<Props> = ({
                                     <div className="flex gap-3">
                                         {/* Avatar Preview */}
                                         <div className="w-14 h-14 flex-shrink-0 bg-white rounded-xl border border-[#E8DCC8] flex items-center justify-center overflow-hidden">
-                                            {customAvatar.startsWith('data:') || customAvatar.startsWith('http') ? (
-                                                <img src={customAvatar} className="w-full h-full object-cover" onError={() => setCustomAvatar('https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f43e.png')} />
+                                            {customAvatar.startsWith('data:') || customAvatar.startsWith('http') || isBlobRef(customAvatar) ? (
+                                                <TokenImg value={customAvatar} className="w-full h-full object-cover" onError={() => setCustomAvatar('https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/1f43e.png')} />
                                             ) : (
                                                 <span className="text-2xl">{customAvatar}</span>
                                             )}
@@ -410,8 +412,8 @@ const BankGameMenu: React.FC<Props> = ({
                                     <div key={s.id} className="bg-[#FBE9E7] p-4 rounded-2xl border border-[#FFCCBC] flex items-center justify-between hover:bg-[#FFCCBC]/40 transition-colors">
                                         <div className="flex items-center gap-3">
                                             <div className="w-12 h-12 rounded-xl bg-white/60 flex items-center justify-center text-2xl grayscale opacity-60 overflow-hidden">
-                                                {s.avatar.startsWith('http') || s.avatar.startsWith('data')
-                                                    ? <img src={s.avatar} className="w-full h-full object-cover rounded-xl" />
+                                                {s.avatar.startsWith('http') || s.avatar.startsWith('data') || isBlobRef(s.avatar)
+                                                    ? <TokenImg value={s.avatar} className="w-full h-full object-cover rounded-xl" />
                                                     : s.avatar
                                                 }
                                             </div>

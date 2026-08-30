@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useBlobRefUrl } from '../../utils/blobRef';
 
 // 角色切换「登场」过场 —— 不是换页/换 tab，而是「离开一个人，走进另一个人的空间」。
 // 设计：以「即将见到的这个人」的头像虚化铺底（ta 的色彩世界），中心头像带柔光浮现 + 名字升起 → 推进穿过进入聊天。
@@ -42,7 +43,12 @@ const CharacterEntryTransition: React.FC<Props> = ({ name, avatar, onDone }) => 
   // 轻触跳过：立刻进入退场（仍是平滑推进，不是硬切）
   const skip = () => { if (!exiting) { setExiting(true); window.setTimeout(finish, EXIT); } };
 
-  const avatarBg = avatar ? `url(${avatar})` : '';
+  // 头像字段可能是 blobref 令牌，令牌拼进 url() 是加载不出来的地址。先解析成可用地址再拼，
+  // 判空也看解析结果——否则「没头像时改用主题色光场」那条分支永远走不到，整层过场会变成
+  // 一张透明膜，底下的聊天界面直接透出来。令牌解析完成前 resolvedAvatar 是 undefined，
+  // 那一帧走光场分支，照样铺满盖住聊天。
+  const resolvedAvatar = useBlobRefUrl(avatar);
+  const avatarBg = resolvedAvatar ? `url(${resolvedAvatar})` : '';
 
   return (
     <div

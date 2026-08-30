@@ -17,10 +17,10 @@ import { DB } from '../utils/db';
 import { ContextBuilder } from '../utils/context';
 import { safeResponseJson } from '../utils/safeApi';
 import { CharacterProfile } from '../types';
-import { Capacitor } from '@capacitor/core';
-import { Filesystem, Directory } from '@capacitor/filesystem';
-import { Share } from '@capacitor/share';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
+import { shareOrDownloadBlob } from '../utils/shareExport';
+import TokenImg from './os/TokenImg';
+import { dataUrlToBlob, isImageValue, putImageBlob, resolveRefToDataUrl } from '../utils/blobRef';
 
 // ============================================================
 // 美术资产配置（用户填入实际 PNG URL 后生效）
@@ -356,7 +356,7 @@ const SpriteDialogBox: React.FC<SpriteDialogBoxProps> = ({
 }) => {
     const [showSettings, setShowSettings] = useState(false);
     const hasSprite = !!sprite;
-    const isEmoji = hasSprite && sprite.length <= 2 && !sprite.startsWith('http') && !sprite.startsWith('data');
+    const isEmoji = hasSprite && sprite.length <= 2 && !isImageValue(sprite);
     return (
         <div
             className="fixed inset-0 z-[9997] flex flex-col cursor-pointer select-none"
@@ -435,8 +435,8 @@ const SpriteDialogBox: React.FC<SpriteDialogBoxProps> = ({
                             style={{ transform: `scale(${spriteScale}) translate(${spriteX}%, ${spriteY}%)` }}
                         >{sprite}</div>
                     ) : (
-                        <img
-                            src={sprite}
+                        <TokenImg
+                            value={sprite}
                             className="h-full w-auto max-w-none drop-shadow-lg transition-all duration-300"
                             style={{ transform: `scale(${spriteScale}) translate(${spriteX}%, ${spriteY}%)` }}
                             alt=""
@@ -456,7 +456,7 @@ const SpriteDialogBox: React.FC<SpriteDialogBoxProps> = ({
                     )}
                     <div className="flex items-center gap-2 mb-2">
                         {hasSprite && (
-                            <img src={char.avatar} className="w-6 h-6 rounded-full object-cover border border-white/30 shrink-0" alt="" />
+                            <TokenImg value={char.avatar} className="w-6 h-6 rounded-full object-cover border border-white/30 shrink-0" alt="" />
                         )}
                         <span className="text-white/80 text-xs font-bold">{char.name}</span>
                         {subInfo && <span className="ml-auto text-white/40 text-xs">{subInfo}</span>}
@@ -1065,41 +1065,12 @@ ${answerSummary}
     };
 
     // ============================================================
-    // 下载/分享辅助
-    // - Capacitor 原生：Filesystem + Share.share()
-    // - Web/WebView：先触发 a.download（浏览器原生下载条），同时弹出 navigator.share（系统分享面板）
-    //   两者并行，不互斥。封装 WebView 里 a.download 可能无效但 share 有效；普通浏览器两个都能用
+    // 下载/分享辅助：原生强制系统分享，移动 Web 优先文件分享，桌面 Web 才下载。
     // ============================================================
     const downloadOrShare = async (base64: string, fileName: string, title: string) => {
-        if (Capacitor.isNativePlatform()) {
-            await Filesystem.writeFile({ path: fileName, data: base64, directory: Directory.Cache });
-            const uri = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
-            await Share.share({ title, files: [uri.uri] });
-            return;
-        }
-        // 先触发浏览器原生下载（非阻塞，立即派发）
-        const link = document.createElement('a');
-        link.download = fileName;
-        link.href = base64;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        // 同时尝试系统分享面板（iOS Safari / Android Chrome / PWA）
-        try {
-            const res = await fetch(base64);
-            const blob = await res.blob();
-            const file = new File([blob], fileName, { type: blob.type || 'image/png' });
-            if (
-                typeof navigator !== 'undefined' &&
-                typeof navigator.share === 'function' &&
-                (typeof (navigator as any).canShare !== 'function' || (navigator as any).canShare({ files: [file] }))
-            ) {
-                await navigator.share({ title, files: [file] });
-            }
-        } catch (e: any) {
-            if (e?.name === 'AbortError') return; // 用户主动取消分享，正常
-            // 其他错误忽略（下载已触发）
-        }
+        const response = await fetch(base64);
+        const blob = await response.blob();
+        await shareOrDownloadBlob({ blob, fileName, shareTitle: title });
     };
 
     // ============================================================
@@ -1141,13 +1112,19 @@ ${answerSummary}
         ctx.fillStyle = grad;
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        const loadImg = (src: string): Promise<HTMLImageElement> => new Promise((resolve, reject) => {
-            const img = new Image();
-            img.crossOrigin = 'anonymous';
-            img.onload = () => resolve(img);
-            img.onerror = reject;
-            img.src = src;
-        });
+        // Image 对象只认真正的 URL，blobref 令牌喂进去必然加载失败（而失败会被调用处的
+        // catch 静默吞掉，明信片上只剩一个空圆圈）。所以在赋给 src 之前先解析一道：
+        // resolveRefToDataUrl 对非令牌值原样返回，可以无条件走。
+        const loadImg = async (src: string): Promise<HTMLImageElement> => {
+            const resolved = await resolveRefToDataUrl(src);
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = () => resolve(img);
+                img.onerror = reject;
+                img.src = resolved;
+            });
+        };
 
         // 加载巧克力图层
         const [bottomImg, topImg] = await Promise.all([
@@ -1291,6 +1268,9 @@ ${answerSummary}
 
             // 更新角色记录（保留 quiz 数据，追加明信片图片）
             if (char) {
+                // 明信片本体是一张 300KB 上下的 PNG，落进 Blob 库，角色记录里只留 blobref 令牌。
+                // 上面的 exportedBase64 仍是真 base64——下载/分享、发到小屋、喂视觉模型都要它。
+                const imageRef = await putImageBlob(dataUrlToBlob(base64));
                 const prev = char.specialMomentRecords || {};
                 const existingContent = prev[WHITEDAY_RECORD_KEY]?.content;
                 let existingData: any = {};
@@ -1303,7 +1283,7 @@ ${answerSummary}
                                 ...existingData,
                                 score: reviewData?.finalScore ?? existingData.score ?? 0,
                             }),
-                            image: base64,
+                            image: imageRef,
                             timestamp: Date.now(),
                             source: 'generated',
                         },
@@ -1445,7 +1425,7 @@ ${answerSummary}
                                 onClick={() => { setSelectedCharId(c.id); setPhase('loading_quiz'); }}
                                 className="flex flex-col items-center gap-2 p-3 bg-white rounded-2xl border border-amber-100 shadow-sm active:scale-95 transition-transform"
                             >
-                                <img src={c.avatar} className="w-12 h-12 rounded-full object-cover border-2 border-amber-200" alt={c.name} />
+                                <TokenImg value={c.avatar} className="w-12 h-12 rounded-full object-cover border-2 border-amber-200" alt={c.name} />
                                 <span className="text-xs font-bold text-slate-700 truncate w-full text-center">{c.name}</span>
                             </button>
                         ))}
@@ -1497,7 +1477,7 @@ ${answerSummary}
                     {quizData?.intro && (
                         <div className="mb-5 flex items-start gap-3 bg-amber-50 rounded-2xl p-4 border border-amber-100">
                             {char && (
-                                <img src={char.avatar} className="w-10 h-10 rounded-full shrink-0 object-cover border-2 border-amber-200" alt="" />
+                                <TokenImg value={char.avatar} className="w-10 h-10 rounded-full shrink-0 object-cover border-2 border-amber-200" alt="" />
                             )}
                             <p className="text-sm text-amber-900 leading-relaxed">{quizData.intro}</p>
                         </div>
@@ -1904,7 +1884,7 @@ ${answerSummary}
                         </div>
                         <div className="px-4 py-3 flex items-center justify-between">
                             <div className="flex items-center gap-2">
-                                {char && <img src={char.avatar} className="w-8 h-8 rounded-full object-cover border-2 border-amber-200" alt="" />}
+                                {char && <TokenImg value={char.avatar} className="w-8 h-8 rounded-full object-cover border-2 border-amber-200" alt="" />}
                                 <div>
                                     <p className="text-xs font-bold text-amber-800">{char?.name}</p>
                                     <p className="text-[10px] text-amber-400">2026.3.14 白色情人节</p>
@@ -1994,8 +1974,11 @@ ${answerSummary}
             if (!savedImage || isExporting) return;
             setIsExporting(true);
             try {
+                // a.download / fetch / Filesystem 都只认真的 data URL，令牌得先还原回来
+                const dataUrl = await resolveRefToDataUrl(savedImage);
+                if (!dataUrl) { addToast('明信片图片已丢失', 'error'); return; }
                 const fileName = `whiteday_${char?.name || 'chocolate'}_2026.png`;
-                await downloadOrShare(savedImage, fileName, '白色情人节巧克力');
+                await downloadOrShare(dataUrl, fileName, '白色情人节巧克力');
                 addToast('导出成功！', 'success');
             } catch (e: any) {
                 if (e?.name !== 'AbortError') addToast('导出失败', 'error');
@@ -2019,7 +2002,7 @@ ${answerSummary}
                     {/* 明信片 */}
                     {savedImage ? (
                         <div className="flex flex-col items-center gap-2">
-                            <img src={savedImage} className="w-full max-w-[320px] rounded-2xl shadow-md border border-amber-200" alt="白色情人节明信片" />
+                            <TokenImg value={savedImage} className="w-full max-w-[320px] rounded-2xl shadow-md border border-amber-200" alt="白色情人节明信片" />
                             <button
                                 onClick={handleReExport}
                                 disabled={isExporting}

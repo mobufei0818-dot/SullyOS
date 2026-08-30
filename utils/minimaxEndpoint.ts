@@ -16,6 +16,7 @@
 import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import type { MinimaxRegion } from '../types';
 import { safeResponseJson } from './safeApi';
+import { isStaticWebDeployment } from './staticWebDeployment';
 
 type MiniMaxResponseLike = {
   ok: boolean;
@@ -132,11 +133,7 @@ const shouldBypassWebProxy = (proxyPath: string): boolean => {
   if (!PROXY_ENDPOINTS[proxyPath]) return false;
   if (typeof window === 'undefined') return false;
 
-  const protocol = String(window.location.protocol || '').toLowerCase();
-  if (protocol === 'file:') return true;
-
-  const host = String(window.location.hostname || '').toLowerCase();
-  return host === 'github.io' || host.endsWith('.github.io');
+  return isStaticWebDeployment(window.location.protocol, window.location.hostname);
 };
 
 const shouldRetryAgainstUpstream = (proxyPath: string, response: Response): boolean => {

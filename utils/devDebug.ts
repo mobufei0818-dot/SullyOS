@@ -6,7 +6,7 @@
 // 其余存储 / 脱敏 / 限容 / 导出逻辑全部通用，不用改。
 // 分类按「来源通道」切：api = 普通聊天直发模型；instant-push = 经 worker 的通道事件；
 // lifecycle = 页面前后台/网络状态变化（排查「请求等着等着就 NetworkError」时跟 api 类对时间线）。
-export type DevDebugCaptureCategory = 'api' | 'instant-push' | 'lifecycle';
+export type DevDebugCaptureCategory = 'api' | 'instant-push' | 'lifecycle' | 'memory-palace';
 
 export interface DevDebugCaptureCategoryMeta {
     key: DevDebugCaptureCategory;
@@ -31,6 +31,11 @@ export const DEV_DEBUG_CAPTURE_CATEGORIES: DevDebugCaptureCategoryMeta[] = [
         key: 'lifecycle',
         title: '前后台',
         detail: '页面前后台 / 焦点 / 网络状态变化（visibilitychange、focus/blur、pagehide/pageshow、online/offline、freeze/resume），用来跟 api 类对时间线，判断请求失败是不是切后台导致的。',
+    },
+    {
+        key: 'memory-palace',
+        title: '记忆',
+        detail: '记忆召回管线 Trace：入口、版本、开关快照、耗时与结果；不记录聊天原文和 API Key。',
     },
 ];
 
@@ -284,8 +289,13 @@ export function isCaptureEnabled(category: DevDebugCaptureCategory): boolean {
     return flags.captureEnabled && flags.captureLogs.includes(category);
 }
 
-function redactSecrets(value: unknown): unknown {
-    if (Array.isArray(value)) return value.map(redactSecrets);
+export function redactDevDebugSecrets(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(redactDevDebugSecrets);
+    // Multimodal requests may contain a one-frame camera data URL. Debug logs
+    // keep its size signal via requestChars, never the actual private pixels.
+    if (typeof value === 'string' && /^data:image\/[a-z0-9.+-]+;base64,/i.test(value)) {
+        return `<image data omitted · ${value.length} chars>`;
+    }
     if (!value || typeof value !== 'object') return value;
 
     const out: Record<string, unknown> = {};
@@ -293,7 +303,7 @@ function redactSecrets(value: unknown): unknown {
         if (SECRET_KEY_PATTERN.test(key)) {
             out[key] = '<redacted>';
         } else {
-            out[key] = redactSecrets(item);
+            out[key] = redactDevDebugSecrets(item);
         }
     }
     return out;
@@ -302,7 +312,7 @@ function redactSecrets(value: unknown): unknown {
 function safeJsonValue(value: unknown): unknown {
     if (value === undefined) return undefined;
     try {
-        return redactSecrets(JSON.parse(JSON.stringify(value)));
+        return redactDevDebugSecrets(JSON.parse(JSON.stringify(value)));
     } catch {
         return String(value);
     }
@@ -491,6 +501,11 @@ export function appendDevDebugApiLog(input: DevDebugHttpLogInput): void {
 /** instant-push 类：经 worker 的通道事件（消费点 activeMsgRuntime / instantPushClient）。 */
 export function appendDevDebugInstantPushLog(input: DevDebugHttpLogInput): void {
     appendDevDebugHttpLog('instant-push', input);
+}
+
+/** 记忆宫殿结构化 Trace；调用方只传脱敏后的统计与状态，不传 query / prompt 原文。 */
+export function appendDevDebugMemoryPalaceLog(input: { label?: string; data: unknown }): void {
+    appendDevDebugLog('memory-palace', input);
 }
 
 // ===== lifecycle 类：页面前后台 / 焦点 / 网络状态变化 =====

@@ -7,7 +7,8 @@ import {
   ArrowLeft, X, MagnifyingGlass,
   Play, Pause, SkipBack, SkipForward,
 } from '@phosphor-icons/react';
-import { useBlobRefUrl } from '../../utils/blobRef';
+import { isBlobRef, useBlobRefUrl } from '../../utils/blobRef';
+import TokenImg from '../../components/os/TokenImg';
 
 /* ══════════ 色板 — 水滴 × 星空 ══════════ */
 export const C = {
@@ -208,7 +209,8 @@ const TinyAvatar: React.FC<{
   size?: number;
   ring?: string;
 }> = ({ avatar, name, size = 28, ring = C.sakura }) => {
-  const isImg = !!avatar && (avatar.startsWith('http') || avatar.startsWith('data:'));
+  // 头像可能是图床直链 / base64 / blobref 令牌，三种都算图；其余当 emoji 或首字兜底。
+  const isImg = !!avatar && (avatar.startsWith('http') || avatar.startsWith('data:') || isBlobRef(avatar));
   const style: React.CSSProperties = {
     width: size,
     height: size,
@@ -216,7 +218,7 @@ const TinyAvatar: React.FC<{
     boxShadow: `0 0 0 2px ${ring}22, 0 2px 8px ${ring}40`,
   };
   if (isImg) {
-    return <img src={avatar} alt="" className="rounded-full object-cover shrink-0" style={style} />;
+    return <TokenImg value={avatar} alt="" className="rounded-full object-cover shrink-0" style={style} />;
   }
   return (
     <div

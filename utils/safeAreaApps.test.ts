@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { AppID } from '../types';
 import { shellHandlesSafeArea, SELF_SAFE_AREA_APPS } from './safeAreaApps';
 
@@ -25,5 +27,13 @@ describe('shellHandlesSafeArea', () => {
     // 双向一致：名单里有的断言里也要有，反之亦然，防止以后加/删 App 时漏更新其中一处。
     it('自理名单与断言列表一一对应（防漏登记）', () => {
         expect([...SELF_HANDLED].sort()).toEqual([...SELF_SAFE_AREA_APPS].sort());
+    });
+
+    it('笔友会所有顶栏都避开共享状态栏点击层', () => {
+        const appSource = readFileSync(path.resolve(__dirname, '../apps/NovelApp.tsx'), 'utf8');
+        const writerSource = readFileSync(path.resolve(__dirname, '../components/novel/NovelWriter.tsx'), 'utf8');
+
+        expect(appSource.match(/paddingTop: 'var\(--chrome-top\)'/g)).toHaveLength(3);
+        expect(writerSource).toContain("style={{ paddingTop: 'var(--chrome-top)' }}");
     });
 });

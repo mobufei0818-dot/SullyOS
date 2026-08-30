@@ -1,5 +1,8 @@
 let hasInstalledIOSStandaloneWorkaround = false;
 let stableStandaloneHeight = 0;
+// 这台设备要不要做键盘避让（iOS 全屏 PWA / 安卓浏览器）。装载时定下，
+// setViewportVars 靠它决定要不要碰 body 上的键盘态标记——普通桌面浏览器一律不碰。
+let keyboardFixesEnabled = false;
 // 安全区只在旋转 / 窗口尺寸变化时才变，缓存探测结果，避免 visualViewport 滚动、聚焦时反复同步重排。
 // 上下各自独立缓存：某边读到非 0 才锁定；iOS 启动早期某边可能瞬时为 0，此时该边不锁、下次继续探测，
 // 避免「一边真值、一边瞬时 0」被整体锁死（否则 home 条避让会失效，直到旋转/尺寸变化才恢复）。
@@ -103,6 +106,7 @@ const setViewportVars = () => {
 
     let fullAppHeight: number;
     let keyboardInset: number;
+    let keyboardOpen: boolean;
 
     if (shouldStabilizeHeight) {
         // 全屏 PWA 没有地址栏，可视高度只在软键盘弹出时变矮。基线取「见过的最大可视高度」。
@@ -112,7 +116,7 @@ const setViewportVars = () => {
         // 键盘态判据用「可视高度变矮」而非 obscuredHeight：iOS 26 起 standalone 会把 layout viewport 也一起缩，
         // innerHeight 跟着变矮，obscuredHeight 算出来是 0 而失效。viewportHeight > 150 是对 iOS 偶发脏值的护栏——
         // 键盘动画期 visualViewport 偶尔报错值，此时退化成「无键盘态」，宁可不避让也不要把布局撑崩成满屏白。
-        const keyboardOpen = viewportHeight > 150 && viewportHeight < stableStandaloneHeight - 100;
+        keyboardOpen = viewportHeight > 150 && viewportHeight < stableStandaloneHeight - 100;
         // 键盘态：app 高度收到当前可视区（home 条已被键盘盖，不再叠加 safe）；无键盘态：基线 + safe（底部给 home 条留位）。
         fullAppHeight = keyboardOpen ? viewportHeight : stableStandaloneHeight + bottomSafeInset;
         // standalone 下键盘避让改由「app 高度跟随可视区」统一处理，keyboard-inset 置 0，避免 CallApp 等再叠一层 padding。
@@ -128,7 +132,7 @@ const setViewportVars = () => {
         // innerHeight 会跟着缩，obscuredHeight ≈ 0（走无键盘分支，布局自行回流，什么都不用做）；
         // 若不回流而是缩小可视区/顶起整页，obscuredHeight > 120，进入键盘分支统一避让。
         const obscuredHeight = Math.max(0, innerHeight - viewportHeight - viewportOffsetTop);
-        const keyboardOpen = obscuredHeight > 120;
+        keyboardOpen = obscuredHeight > 120;
         // 键盘避让统一用「app 高度跟随可视区」，不再靠 keyboard-inset 让各 App 自己叠 padding。
         keyboardInset = 0;
         if (keyboardOpen) {
@@ -140,6 +144,16 @@ const setViewportVars = () => {
         } else {
             fullAppHeight = Math.max(innerHeight, viewportHeight + viewportOffsetTop);
         }
+    }
+
+    // 键盘态标记和 --app-height 必须同源：标记一挂，外壳就铺到 app 高度多出的那段底部安全区、
+    // 输入栏同时收掉自己的让位间隙，两者净位移为 0 —— 前提是高度也同时收到键盘上方。
+    // 所以判据只认「可视区真的变矮了」，不认「输入框拿到了焦点」：设备上键盘弹不出来时
+    // （接了外接键盘、输入法异常），焦点照样进得来，但可视区纹丝不动，此时挂标记就会把
+    // 输入条整条推出屏幕、home 条骑到输入框上。顺带这样也不再依赖 focusout 来摘标记——
+    // 聚焦中的输入框被直接卸载（退出聊天页）时 WebKit 不派发 focusout，标记会永久卡住。
+    if (keyboardFixesEnabled) {
+        document.body.classList.toggle('ios-keyboard-open', keyboardOpen);
     }
 
     document.documentElement.style.setProperty('--app-height', `${fullAppHeight}px`);
@@ -155,9 +169,10 @@ export const installIOSStandaloneWorkaround = () => {
 
     hasInstalledIOSStandaloneWorkaround = true;
     const useStandaloneFixes = isIOSStandaloneWebApp();
-    // iOS 全屏 PWA 与安卓浏览器都需要「聚焦挂 keyboard 类 + 锁外层滚动」这套键盘避让。
+    // iOS 全屏 PWA 与安卓浏览器都需要这套键盘避让：可视区一变矮就挂 keyboard 类 + 锁外层滚动。
     // 安卓 Chrome/Edge 弹键盘时会把整页顶起，同样靠这套压回去。
     const useKeyboardFixes = useStandaloneFixes || isAndroidDevice();
+    keyboardFixesEnabled = useKeyboardFixes;
     if (useStandaloneFixes) {
         document.documentElement.classList.add('ios-standalone');
         document.body.classList.add('ios-standalone');
@@ -174,9 +189,10 @@ export const installIOSStandaloneWorkaround = () => {
         setViewportVars();
     };
 
+    // 聚焦只当「立刻重算一次」的时机，不直接判键盘态：此刻键盘还没弹起来，
+    // 要等 visualViewport 真的变矮，setViewportVars 才会挂上标记、同时把高度收到键盘上方。
     const handleFocusIn = (event: FocusEvent) => {
         if (!isTextEntryElement(event.target)) return;
-        document.body.classList.add('ios-keyboard-open');
         setViewportVars();
 
         const target = event.target;
@@ -192,13 +208,10 @@ export const installIOSStandaloneWorkaround = () => {
         });
     };
 
+    // 键盘收起由 visualViewport 变化驱动，这里只做一次兜底重算，
+    // 防 iOS 偶发漏发 resize 让高度停在键盘态。
     const handleFocusOut = () => {
-        window.setTimeout(() => {
-            if (!isTextEntryElement(document.activeElement)) {
-                document.body.classList.remove('ios-keyboard-open');
-            }
-            setViewportVars();
-        }, 180);
+        window.setTimeout(setViewportVars, 180);
     };
 
     // 键盘弹出时锁死外层滚动：只放行可滚区（消息列表等 .overflow-y-auto）内部滚动，其余 touchmove 一律拦掉。

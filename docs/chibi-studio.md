@@ -36,7 +36,7 @@
 `chibiStudio` 是 `CharacterProfile` 上的普通字段，随 `characters` store 走**整合导出（full）/ 纯文字（text_only）**。导出/导入的图片抽取（`extractImagesInPlace`）与还原（`restoreAssetsInPlace`）都是**全字段递归、无白名单**，所以：
 
 - `chibiStudio.like520.img`（兜底大头贴 dataURL）、`vrState.chibi.img`、`specialMomentRecords…charChibi.dataUrl` 三处 dataURL 会被抽进 zip `assets/*`、导入时原样还原；
-- `sprites.chibi`（blobref 令牌）由 `resolveBlobRefsDeep` 先解回 dataURL 再抽取；
+- `sprites.chibi`（blobref 令牌）原样进 JSON，二进制随 zip 的 `blobs/<id>` 旁路走、导入按原 id 写回（收集免名单，见 `utils/backupBlobs.ts`）；
 - `chibiStudio.*.state`（选件 JSON，无图）随文字走，`text_only` 模式下图片被剥、但 state 仍在（可再编辑），与全局图片剥离行为一致。
 
 **媒体与美化素材（media_only）**模式的角色只导出一份手挑的视觉子集（avatar/sprites/roomItems/backgrounds…），不含 `chibiStudio`/`vrState`/`specialMomentRecords`——与这些运行时字段既有的处理一致，官方也提示「别只导媒体包」。回归测试见 `utils/backupExport.test.ts`「角色的 chibiStudio / vrState.chibi / 520 记录里的图都会被递归抽取」。

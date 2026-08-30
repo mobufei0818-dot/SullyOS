@@ -57,45 +57,6 @@ export const amsgXhsSessionKey = (clientTaskId: string) => `xhs_session:${client
 export const AMSG2_INSTANT_STUB_TEMPLATE =
   'AMSG2_INSTANT_STUB_TEMPLATE（即时对话轻量包：该角色无定时任务，模板未随发送重建；看到这条正文说明有本不该渲染模板的 fire 在渲染它）';
 
-// ─── 即时对话的收件兜底（chat_outbox） ───
-
-/**
- * 即时对话这条路上，worker 每轮生成完的推送载荷副本（每角色一份）。
- *
- * 推送是会静默丢的：手机换网、系统压制、SW 没醒，用户那边就是「一直在输入中」。
- * 服务端没有收件箱表（也不新增表），所以定稿的 push 载荷顺手在这里留一份，
- * 客户端上线 / 页面回到前台 / 等超时之前来拉一次，按 messageId 挑出没收到的补上。
- *
- * 按轮（sessionId）保留最近 CHAT_OUTBOX_MAX_SESSIONS 轮的全部条目——一轮长回复会拆成
- * 很多段逐段推送，按条数掐会把整轮掐头——另设 CHAT_OUTBOX_MAX_ENTRIES 总条数护栏。
- * 写的时候整份覆盖——它是兜底缓存不是流水账，攒着只会把一条 client_state 撑大。
- */
-export const AMSG_CHAT_OUTBOX_KEY = 'chat_outbox';
-
-/** 按轮保留最近几轮（sessionId 相同算同一轮），留下的轮次条目全保。 */
-export const CHAT_OUTBOX_MAX_SESSIONS = 3;
-
-/** 总条数护栏（防止一份 outbox 把 client_state 撑爆），超出从最老的条目丢起。 */
-export const CHAT_OUTBOX_MAX_ENTRIES = 60;
-
-export interface AmsgChatOutboxEntry {
-  /** 这条推送的 messageId，客户端拿它跟已入库的消息对账。 */
-  messageId: string;
-  /** 同一轮生成的几段共用一个 sessionId。 */
-  sessionId: string;
-  /** 写进 outbox 的时刻（epoch ms）。 */
-  at: number;
-  /** 推送载荷原样（客户端补收时走 inbox 同一条管线入库）。 */
-  payload: Record<string, unknown>;
-}
-
-export interface AmsgChatOutbox {
-  v: 1;
-  entries: AmsgChatOutboxEntry[];
-}
-
-export const createChatOutbox = (): AmsgChatOutbox => ({ v: 1, entries: [] });
-
 // ─── 即时对话的失败留痕（chat_fail） ───
 
 /**
@@ -118,6 +79,16 @@ export interface AmsgChatFailRecord {
   retryCount: number;
   /** 写入时刻（epoch ms）。 */
   at: number;
+  /**
+   * 底层错误的稳定 code，取自 fire 抛出来那个错误对象上的 `code`
+   * （`LLM_CALL_FAILED` / `AGENTIC_BAD_DECISION` / `PUSH_PAYLOAD_TOO_LARGE` …）。
+   * 客户端按它给「这次该怎么办」，不用去正则匹配 reason 那句人话。
+   *
+   * 没有配对的 `pushStatus`：那个数只有上游发 push 的那一步知道（存在包内私有的
+   * WeakMap 上），fire 收尾这里拿到的错误对象上读不到。要用它得读上游写在任务行
+   * 上的那份 lastError，客户端会把两边合起来看。
+   */
+  errorCode?: string;
 }
 
 /** 读回来的失败留痕；形状不对返回 null（这是提示通道不硬失败，没有就报笼统原因）。 */
@@ -134,57 +105,6 @@ export const parseChatFailRecord = (value: string | null | undefined): AmsgChatF
     }
   } catch { /* 非 JSON → null */ }
   return null;
-};
-
-/** 读回来的 outbox；形状不对返回 null（调用方按「没有」处理，这是兜底通道不硬失败）。 */
-export const parseChatOutbox = (value: string | null | undefined): AmsgChatOutbox | null => {
-  if (typeof value !== 'string' || !value) return null;
-  try {
-    const parsed = JSON.parse(value);
-    if (
-      parsed && typeof parsed === 'object' && parsed.v === 1
-      && Array.isArray(parsed.entries)
-      && parsed.entries.every((e: unknown) => {
-        const entry = e as Partial<AmsgChatOutboxEntry> | null;
-        return !!entry && typeof entry.messageId === 'string'
-          && typeof entry.sessionId === 'string' && typeof entry.at === 'number'
-          && !!entry.payload && typeof entry.payload === 'object';
-      })
-    ) {
-      return parsed as AmsgChatOutbox;
-    }
-  } catch { /* 非 JSON → null */ }
-  return null;
-};
-
-/**
- * 追加这一轮的几条。保留按轮算：留最近 CHAT_OUTBOX_MAX_SESSIONS 轮（sessionId 相同
- * 算同一轮）的全部条目——一轮长回复会拆成很多段逐段推送，按条数掐会把整轮掐头。
- * 另有 CHAT_OUTBOX_MAX_ENTRIES 总条数护栏，超出从最老的条目丢起（单轮独自超护栏时
- * 留的就是该轮最新的那截）。同 messageId 视为同一条（fire 重跑会重新生成同样的 id），
- * 覆盖而不是叠加，免得重试几次就把缓存刷空。
- */
-export const appendChatOutbox = (
-  outbox: AmsgChatOutbox | null,
-  entries: AmsgChatOutboxEntry[],
-): AmsgChatOutbox => {
-  const base = outbox ?? createChatOutbox();
-  if (entries.length === 0) return base;
-  const incoming = new Set(entries.map((e) => e.messageId));
-  const kept = base.entries.filter((e) => !incoming.has(e.messageId));
-  const merged = [...kept, ...entries];
-
-  // 挑最近几轮：从尾往头扫，先见到的 sessionId 就是较新的一轮，凑满上限为止。
-  // 轮次新旧按出现位置判而不是比 at——条目本来就按写入顺序追加，位置不受
-  // 时钟回拨、同毫秒并列这些影响，是这里最稳的排序依据。
-  const recentSessions = new Set<string>();
-  for (let i = merged.length - 1; i >= 0 && recentSessions.size < CHAT_OUTBOX_MAX_SESSIONS; i -= 1) {
-    recentSessions.add(merged[i].sessionId);
-  }
-  const byRecentSessions = merged.filter((e) => recentSessions.has(e.sessionId));
-
-  // 总条数护栏：从最老的条目丢起（单轮独自超护栏时，留下的就是该轮最新的那截）。
-  return { v: 1, entries: byRecentSessions.slice(-CHAT_OUTBOX_MAX_ENTRIES) };
 };
 
 // ─── client_state 的值压缩 ───
@@ -848,13 +768,22 @@ const fillSlot = (text: string, slot: string, value: string) => text.split(slot)
  *   排程现状块、list 工具共用），同一件事不该有第二套说法。
  *   realtimeWorldBlock 到点现拉的节日 / 天气 / 热搜，见 realtimeWorldCore.renderRealtimeWorldBlock。
  *
+ * extras.includeClock 不是一块内容而是个渲染开关：角色的「时间感知」关掉时传 false，
+ * 「此刻在做什么」那段就不报钟点（见 renderFireSceneBlock）。取值与今日节日同源，
+ * 都来自 tool_pack.timeAwarenessEnabled。
+ *
  * 连发提醒长在自述块里（renderSelfLogBlock 的计数行），上限取 pack.maxUnansweredSends。
  */
 export const renderFirePack = (
   pack: AmsgFirePack,
   nowMs: number,
   taskInstruction: string,
-  extras?: { selfLog?: AmsgSelfLog | null; taskListBlock?: string; realtimeWorldBlock?: string },
+  extras?: {
+    selfLog?: AmsgSelfLog | null;
+    taskListBlock?: string;
+    realtimeWorldBlock?: string;
+    includeClock?: boolean;
+  },
 ): string => {
   const tz: AmsgTzRef = { tzId: pack.tzId };
   const currentTime = formatFireTimeFull(nowMs, tz);
@@ -875,7 +804,9 @@ export const renderFirePack = (
     extras?.selfLog ?? null, nowMs, tz, resolveMaxUnansweredSends(pack.maxUnansweredSends),
   ));
   out = fillSlot(out, AMSG_SLOT_TASK_LIST, extras?.taskListBlock ?? '');
-  out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz));
+  out = fillSlot(out, AMSG_SLOT_SCENE, renderFireSceneBlock(pack.scene, nowMs, tz, {
+    includeClock: extras?.includeClock !== false,
+  }));
   // 实时世界那一段是独立的一整块，前导空行在这里补：拉到东西才隔开成段，
   // 没拉到（或功能没开）填空串，输出跟没有这个槽位时一模一样。
   const realtimeWorld = extras?.realtimeWorldBlock?.trim();

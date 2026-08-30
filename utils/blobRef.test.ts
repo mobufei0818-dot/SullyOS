@@ -5,12 +5,33 @@ import {
     dataUrlToBlob, blobToDataUrl,
     migrateDataUrlToRef, migrateAppearancePresetBlobRefs, resolveBlobRefsDeep,
 } from './blobRef';
-import { DB } from './db';
+import { DB, openDB } from './db';
 
 // fake-indexeddb 已由 test-setup.ts 注入；本组用例锁住 base64 ⇄ Blob 迁移层的核心不变量：
 // 令牌识别、Blob 存取、data URL 互转无损、深度解析（备份导出前把令牌变回 data:image）。
 
 const TINY_PNG = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+
+async function seedStore(name: string, records: any[]): Promise<void> {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(name, 'readwrite');
+        const store = tx.objectStore(name);
+        for (const r of records) store.put(r);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+async function clearStore(name: string): Promise<void> {
+    const db = await openDB();
+    await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(name, 'readwrite');
+        tx.objectStore(name).clear();
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
 
 describe('isBlobRef', () => {
     it('只认 blobref: 前缀，data:/http/空 都不是', () => {
@@ -76,6 +97,32 @@ describe('deleteBlobRefIfUnreferenced', () => {
 
         localStorage.removeItem('acnh_wallpaper_backup_test');
         expect(await deleteBlobRefIfUnreferenced(ref)).toBe(true);
+    });
+
+    // 内容去重（utils/blobDedupe.ts）会把同一张图在十几个引用面上收敛成同一个令牌，
+    // 于是「壁纸」和「发过的聊天图 / 相册 / 角色头像」很可能是同一个令牌。
+    // 只查 assets + localStorage 的话，换壁纸就会把还被别处用着的图删掉。
+    it.each([
+        ['聊天记录', 'messages', { id: 9001, type: 'image', content: '<REF>' }],
+        ['相册', 'gallery', { id: 'g_blobref_test', url: '<REF>' }],
+        ['角色头像', 'characters', { id: 'c_blobref_test', name: '小明', avatar: '<REF>' }],
+        ['角色小屋家具', 'characters', {
+            id: 'c_blobref_room_test', name: '小明',
+            roomConfig: { items: [{ id: 'i1', image: '<REF>' }] },
+        }],
+    ])('令牌只被%s引用时不删，那一面清掉后才删', async (_面, storeName, row) => {
+        const ref = await putImageBlob(dataUrlToBlob(TINY_PNG));
+        await seedStore(storeName, [JSON.parse(JSON.stringify(row).replaceAll('<REF>', ref))]);
+
+        try {
+            expect(await deleteBlobRefIfUnreferenced(ref)).toBe(false);
+            expect(await getBlobForRef(ref)).not.toBeNull();
+        } finally {
+            await clearStore(storeName);
+        }
+
+        expect(await deleteBlobRefIfUnreferenced(ref)).toBe(true);
+        expect(await getBlobForRef(ref)).toBeNull();
     });
 });
 

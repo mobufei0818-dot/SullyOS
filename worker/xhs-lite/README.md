@@ -32,7 +32,7 @@ cookie 存在本地，每次请求经 `X-Xhs-Cookie` 头发给 Worker；Worker �
 - 发帖带图：Worker `fetch` 图床/CDN 图片字节 → 算上传签名 → `PUT` 到小红书 ROS →
   拿 `file_id` 发帖。
 
-> ⚠️ `x-rap-param`（搜索/详情用的 JSVMP）已省略，多数情况不带也能用；若被拦再补。
+> ⚠️ `x-rap-param` 只在上游 RAP 白名单明确要求的链路启用；当前“我的笔记” (`user_posted`) 和评论/回复 (`comment/post`) 会携带，搜索/详情仍保留已验证的稳定请求形态。
 > 签名随小红书改版会失效，到时同步上游 xhshow 更新 `worker/index.js` 里的 `XHSLite`。
 
 ## 验证签名（与 Python 原版逐字节比对）

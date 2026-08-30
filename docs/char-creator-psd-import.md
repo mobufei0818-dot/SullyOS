@@ -65,7 +65,7 @@ SULLY 专属 special）。之后经内置素材包 / 用户上传进来的都是
 
 `CustomCreatorPart.src` / `shadowSrc` 落库前经 `creatorPartToBlobRefs` 转成 `blobref:<id>` 令牌
 （二进制进 `blob_assets` store，省配额）；读出/注入 iframe 前经 `loadCreatorPartsForRender`
-转回 base64（iframe 契约要字符串）。备份导出前 `cc_custom_parts` 的令牌会被 `resolveBlobRefsDeep`
-解析回 `data:image`，复用既有 zip 抽图管线，备份格式不变。详见 `utils/creatorPartsBlob.ts`、`docs`（Blob 迁移）。
+转回 base64（iframe 契约要字符串）。备份（v3）里令牌原样进 JSON，二进制随 zip 的 `blobs/<id>`
+旁路走、导入按原 id 写回（见 `utils/backupBlobs.ts`）。详见 `utils/creatorPartsBlob.ts`。
 
 测试：`pnpm vitest run utils/psdCreatorImport.test.ts utils/builtinPartsPack.test.ts utils/creatorPartsBlob.test.ts`。

@@ -24,6 +24,8 @@ import { getVirtualDayKey } from '../utils/localDate';
 import { resolveCharTimeZone, nowInTimeZone, tzLabel } from '../utils/timezone';
 import { getDailyScheduleForChar } from '../utils/dailySchedule';
 import { trackEvent } from '../utils/analytics';
+import { normalizeBuiltInRoomTemplateAssetsInPlace, toPortableBuiltinRoomAsset } from '../utils/roomTemplateAssets';
+import { shareOrDownloadFile } from '../utils/shareExport';
 
 const TWEMOJI_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72';
 const twemojiUrl = (codepoint: string) => `${TWEMOJI_BASE}/${codepoint}.png`;
@@ -1253,6 +1255,13 @@ ${!shouldGenerateTodo ? `(系统: 今日待办已存在，无需生成，请忽�
                 description: i.descriptionPrompt || '',
             })),
         };
+        // Older builds persisted built-in assets as deployment-specific absolute URLs.
+        // Canonicalize them before exporting a standalone room template as well.
+        if (template.room) {
+            template.room.wallImage = toPortableBuiltinRoomAsset(template.room.wallImage) as string;
+            template.room.floorImage = toPortableBuiltinRoomAsset(template.room.floorImage) as string;
+        }
+        for (const item of template.items) item.image = toPortableBuiltinRoomAsset(item.image) as string;
         await resolveBlobRefsDeep(template);
         return template;
     };
@@ -1266,16 +1275,13 @@ ${!shouldGenerateTodo ? `(系统: 今日待办已存在，无需生成，请忽�
                 await navigator.clipboard.writeText(json);
                 addToast('小屋 JSON 已复制到剪贴板', 'success');
             } else {
-                const blob = new Blob([json], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `${template.name.replace(/[\\/:*?"<>|]/g, '_')}.room.json`;
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-                addToast('小屋样板房已导出', 'success');
+                const result = await shareOrDownloadFile({
+                    content: json,
+                    fileName: `${template.name.replace(/[\\/:*?"<>|]/g, '_')}.room.json`,
+                    mimeType: 'application/json;charset=utf-8',
+                    shareTitle: `小屋样板房：${template.name}`,
+                });
+                addToast(result === 'shared' ? '已打开小屋样板房分享面板' : '小屋样板房已导出', 'success');
             }
             trackEvent('导出小屋样板房', { action });
         } catch (e: any) {
@@ -1338,22 +1344,10 @@ ${!shouldGenerateTodo ? `(系统: 今日待办已存在，无需生成，请忽�
         if (!res.ok) throw new Error(`无法读取样板房 ${template.name}`);
         const data = await res.json();
         if (!data || !Array.isArray(data.items)) throw new Error('样板房数据无效');
-        // 把 JSON 里的资源路径解析成完整 URL，兼容 GitHub Pages 子路径部署：
-        //   - 相对路径（assets/xx.png）按 template.json 所在目录解析
-        //   - 旧格式根绝对路径（/room-templates/...）按站点 BASE_URL 解析
-        const templateBase = res.url || new URL(template.templateUrl, window.location.href).href;
-        const appBase = new URL(PUBLIC_BASE, window.location.href);
-        const resolveAsset = (p: any): any => {
-            if (typeof p !== 'string' || !p || /^(data:|blob:|https?:)/i.test(p)) return p;
-            try {
-                return p.startsWith('/') ? new URL(p.slice(1), appBase).href : new URL(p, templateBase).href;
-            } catch { return p; }
-        };
-        if (data.room && typeof data.room === 'object') {
-            data.room.wallImage = resolveAsset(data.room.wallImage);
-            data.room.floorImage = resolveAsset(data.room.floorImage);
-        }
-        data.items = data.items.map((it: any) => (it && typeof it === 'object' ? { ...it, image: resolveAsset(it.image) } : it));
+        // Store built-in assets as deployment-independent references. TokenImg/useBlobRefUrl
+        // resolves them against the *current* BASE_URL when rendering, so full backups can
+        // move between web origins, GitHub Pages sub-paths, and the desktop shell.
+        normalizeBuiltInRoomTemplateAssetsInPlace(data, template.id);
         return data;
     };
 
@@ -1386,7 +1380,7 @@ ${!shouldGenerateTodo ? `(系统: 今日待办已存在，无需生成，请忽�
             const importedItems: RoomItem[] = [];
             for (let i = 0; i < templateData.items.length; i++) {
                 const it = templateData.items[i] || {};
-                const image = await toRef(it.image);
+                const image = await toRef(toPortableBuiltinRoomAsset(it.image));
                 if (!image) continue;
                 const desc = typeof it.description === 'string' && it.description
                     ? it.description
@@ -1411,8 +1405,8 @@ ${!shouldGenerateTodo ? `(系统: 今日待办已存在，无需生成，请忽�
             if (importMode === 'replace' && templateData.room) {
                 // 替换模式连墙面/地板一起应用（合并模式只追加物品，不动背景）
                 const r = templateData.room;
-                const wallImage = await toRef(r.wallImage);
-                const floorImage = await toRef(r.floorImage);
+                const wallImage = await toRef(toPortableBuiltinRoomAsset(r.wallImage));
+                const floorImage = await toRef(toPortableBuiltinRoomAsset(r.floorImage));
                 updateCharacter(char.id, {
                     roomConfig: {
                         ...char.roomConfig,
@@ -1801,7 +1795,7 @@ ${!shouldGenerateTodo ? `(系统: 今日待办已存在，无需生成，请忽�
                                                     <div className="absolute inset-[8px] rounded-full" style={{ border: `1px solid ${th.ring1}` }} />
                                                     <div className="absolute inset-[12px] rounded-full" style={{ border: `1px solid ${th.ring2}` }} />
                                                     <div className="w-[70px] h-[70px] rounded-full overflow-hidden" style={{ boxShadow: `0 0 18px ${th.avGlow}` }}>
-                                                        <img src={c.avatar} className="w-full h-full object-cover" alt={c.name} />
+                                                        <TokenImg value={c.avatar} className="w-full h-full object-cover" alt={c.name} />
                                                     </div>
                                                     <div className="absolute bottom-0 right-1.5 w-[22px] h-[22px] rounded-full flex items-center justify-center" style={{ background: th.badgeBg, boxShadow: th.badgeShadow }}>
                                                         {pixel ? <span className="text-[10px]">🎮</span> : (

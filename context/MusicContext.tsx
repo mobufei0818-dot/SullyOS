@@ -15,6 +15,7 @@ import { cachedCall as _cachedCall, invalidate as _invalidateCache, clearAll as 
 import { DB } from '../utils/db';
 import { getProxyWorkerUrl, DEFAULT_PROXY_WORKER, PROXY_WORKER_CHANGED_EVENT } from '../utils/proxyWorker';
 import type { PostProcessMusicHooks } from '../utils/applyAssistantPostProcessing';
+import { resolveRefToDataUrl } from '../utils/blobRef';
 
 /* ───────────── 类型 ───────────── */
 export type MusicQuality = 'standard' | 'higher' | 'exhigh' | 'lossless' | 'hires';
@@ -83,47 +84,57 @@ const loadLocalAlbum = (): Song[] => {
 const saveLocalAlbum = (songs: Song[]) => {
   try { localStorage.setItem(LS_LOCAL_ALBUM_KEY, JSON.stringify(songs)); } catch {}
 };
-// 音乐的默认 worker = 中心配置（设置 → 自定义网络代理）。用户没在播放器里单独
-// 设过地址时，跟着中心 worker 走；在播放器里手填过自定义地址的，那个地址覆盖生效。
-const musicDefaultWorker = (): string => getProxyWorkerUrl();
-
+// workerUrl 空串 = 跟随「设置 → 网络代理」的中心地址；非空 = 用户在播放器里手填的，
+// 只在音乐这一处生效。存的是"跟不跟随"这个意图，不是当时中心地址的一份快照——
+// 存快照的话事后分不清"用户敲的"和"当时抄的"，中心一改就留下打不通的幽灵地址。
 export const MUSIC_DEFAULT_CFG: MusicCfg = {
-  workerUrl: musicDefaultWorker(),
+  workerUrl: '',
   cookie: '',
   quality: 'exhigh',
 };
 
 /* ───────────── 工具 ───────────── */
-// worker 地址迁移：把"非自定义"的存量地址一律视为"没单独设过" → 跟随中心 worker。
-//   1. 旧的 sully-n.qegj567.workers.dev 默认（国内超时，早就该弃用）；
-//   2. 旧公共域名 sullymeow.ccwu213.cc（注册已过期、DNS 无法解析，2026-07 起）；
-//   3. 停在公共默认实例（= 中心配置的默认值）上的——中心没改时这是 no-op，
-//      中心换成自部署 worker 后，音乐自动跟着切过去。
-// 只有用户在播放器里手填的、跟默认不一样的地址才原样保留。读到需要改写时落盘一次。
-const normalizeHost = (u: string): string => u.trim().replace(/\/+$/, '').toLowerCase();
+const normalizeHost = (u: string): string => (u || '').trim().replace(/\/+$/, '');
+
+/**
+ * 音乐请求实际要打的地址。每次发请求现算，中心地址改了立刻生效。
+ * @param central 只有 MusicProvider 传：它把中心地址放进了 state，好让界面在中心
+ *                地址变化时重渲染；其余调用方省略，直接现读中心配置。
+ */
+export const resolveMusicWorkerUrl = (
+  cfg?: Pick<MusicCfg, 'workerUrl'> | null,
+  central?: string,
+): string => normalizeHost(cfg?.workerUrl || '') || normalizeHost(central || '') || getProxyWorkerUrl();
+
+// 存量迁移：把"其实是跟着中心走"的地址收敛成空串（= 跟随）。命中三种：
+//   1. 已死的两个历史公共实例（sully-n.qegj567.workers.dev 国内超时、
+//      sullymeow.ccwu213.cc 域名注册过期，2026-07 起 DNS 都解析不到）；
+//   2. 当前的公共默认实例；
+//   3. 跟当前中心地址一模一样的——老版本会把中心地址抄一份存进音乐配置。
+// 只有跟以上都不同的地址才原样保留。读到需要改写时落盘一次。
 const FOLLOW_CENTRAL_HOSTS = [/sully-n\.qegj567\.workers\.dev/i, /sullymeow\.ccwu213\.cc/i];
 const migrateWorkerUrl = (url: string | undefined): string => {
-  const central = musicDefaultWorker();
-  if (!url) return central;
-  const norm = normalizeHost(url);
-  if (norm === normalizeHost(DEFAULT_PROXY_WORKER)) return central;
-  if (FOLLOW_CENTRAL_HOSTS.some((re) => re.test(norm))) return central;
-  return url;
+  const own = normalizeHost(url || '');
+  if (!own) return '';
+  const lower = own.toLowerCase();
+  if (lower === normalizeHost(DEFAULT_PROXY_WORKER).toLowerCase()) return '';
+  if (lower === normalizeHost(getProxyWorkerUrl()).toLowerCase()) return '';
+  if (FOLLOW_CENTRAL_HOSTS.some((re) => re.test(lower))) return '';
+  return own;
 };
 
 const loadCfg = (): MusicCfg => {
   try {
     const raw = localStorage.getItem(LS_CFG_KEY);
-    if (!raw) return { ...MUSIC_DEFAULT_CFG, workerUrl: musicDefaultWorker() };
-    const parsed = JSON.parse(raw);
-    const cfg = { ...MUSIC_DEFAULT_CFG, ...parsed };
+    if (!raw) return { ...MUSIC_DEFAULT_CFG };
+    const cfg = { ...MUSIC_DEFAULT_CFG, ...JSON.parse(raw) };
     const migrated = migrateWorkerUrl(cfg.workerUrl);
     if (migrated !== cfg.workerUrl) {
       cfg.workerUrl = migrated;
       try { localStorage.setItem(LS_CFG_KEY, JSON.stringify(cfg)); } catch {}
     }
     return cfg;
-  } catch { return { ...MUSIC_DEFAULT_CFG, workerUrl: musicDefaultWorker() }; }
+  } catch { return { ...MUSIC_DEFAULT_CFG }; }
 };
 
 /**
@@ -226,7 +237,7 @@ export const musicApi = {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     const cookie = normalizeCookie(cfg.cookie);
     if (cookie) headers['X-Netease-Cookie'] = cookie;
-    const url = `${cfg.workerUrl.replace(/\/+$/, '')}/netease${path.startsWith('/') ? path : '/' + path}`;
+    const url = `${resolveMusicWorkerUrl(cfg)}/netease${path.startsWith('/') ? path : '/' + path}`;
     const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body || {}) });
     const j = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(j?.error || j?.message || `HTTP ${res.status}`);
@@ -307,6 +318,8 @@ type PlayMode = 'loop' | 'shuffle' | 'single';
 interface MusicContextType {
   cfg: MusicCfg;
   setCfg: (next: MusicCfg) => void;
+  /** 当前真正在用的服务地址：cfg.workerUrl 留空时 = 中心代理地址 */
+  effectiveWorkerUrl: string;
 
   // 播放队列 / 当前曲
   queue: Song[];
@@ -372,28 +385,38 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [cfg, setCfgState] = useState<MusicCfg>(loadCfg);
   const setCfg = useCallback((next: MusicCfg) => {
     setCfgState(prev => {
-      // cookie / workerUrl 变了 → 上一个账号的缓存全部失效，避免看到旧账号数据
-      if (prev.cookie !== next.cookie || prev.workerUrl !== next.workerUrl) {
-        _clearAllCache();
-      }
+      // 换账号 → 上一个账号的缓存全部失效，避免看到旧账号数据。
+      // 换地址那一半由下面 effectiveWorkerUrl 的 effect 统一管（中心地址变化也走那条）。
+      if (prev.cookie !== next.cookie) _clearAllCache();
       return next;
     });
     saveCfg(next);
   }, []);
 
-  // 中心配置（设置 → 自定义网络代理）变了 → 重读音乐 cfg，让"跟随中心"的地址实时切过去。
-  // 音乐 cfg 是挂载时快照进 state 的，不重读就只能等下次刷新页面；地址真的变了才清缓存重拉。
+  // 中心地址（设置 → 网络代理）。cfg.workerUrl 留空时用的就是它，进 state 是为了让
+  // 设置页显示的"当前生效地址"能跟着变——请求那边不看这份，每次现读中心配置。
+  const [centralWorkerUrl, setCentralWorkerUrl] = useState<string>(getProxyWorkerUrl);
   useEffect(() => {
     const onProxyChanged = () => {
+      setCentralWorkerUrl(getProxyWorkerUrl());
+      // 中心变了会带动存量迁移（存的地址正好等于新中心 → 收敛成"跟随"），重读一次。
       setCfgState(prev => {
         const next = loadCfg();
-        if (next.workerUrl !== prev.workerUrl) _clearAllCache();
-        return next;
+        return next.workerUrl === prev.workerUrl ? prev : next;
       });
     };
     window.addEventListener(PROXY_WORKER_CHANGED_EVENT, onProxyChanged);
     return () => window.removeEventListener(PROXY_WORKER_CHANGED_EVENT, onProxyChanged);
   }, []);
+
+  const effectiveWorkerUrl = resolveMusicWorkerUrl(cfg, centralWorkerUrl);
+  // 生效地址真的变了 → 上一个地址拉回来的东西全部作废（首次挂载不算变）
+  const lastWorkerUrlRef = useRef(effectiveWorkerUrl);
+  useEffect(() => {
+    if (lastWorkerUrlRef.current === effectiveWorkerUrl) return;
+    lastWorkerUrlRef.current = effectiveWorkerUrl;
+    _clearAllCache();
+  }, [effectiveWorkerUrl]);
 
   const initialState = useMemo(loadState, []);
   const [queue, setQueueState] = useState<Song[]>(initialState.queue);
@@ -739,13 +762,17 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       // 媒体会话（锁屏 / 通知栏）
       if ('mediaSession' in navigator) {
         try {
+          // 锁屏/通知栏的封面不是 DOM，喂不了 blobref 令牌——那边只认能直接加载的地址。
+          // 用户自己上传的歌曲封面存的就是令牌，不解析的话锁屏上是空白（而且不报错）。
+          // resolveRefToDataUrl 对非令牌原样返回，所以可以无条件走。
+          const artworkSrc = song.albumPic ? await resolveRefToDataUrl(song.albumPic) : '';
           (navigator as any).mediaSession.metadata = new (window as any).MediaMetadata({
             title: song.name,
             artist: song.artists,
             album: song.album,
-            artwork: song.albumPic ? [
-              { src: song.albumPic, sizes: '300x300', type: 'image/jpeg' },
-              { src: song.albumPic, sizes: '512x512', type: 'image/jpeg' },
+            artwork: artworkSrc ? [
+              { src: artworkSrc, sizes: '300x300', type: 'image/jpeg' },
+              { src: artworkSrc, sizes: '512x512', type: 'image/jpeg' },
             ] : [],
           });
         } catch {}
@@ -955,7 +982,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }, [current, addListeningPartner]);
 
   const value: MusicContextType = {
-    cfg, setCfg,
+    cfg, setCfg, effectiveWorkerUrl,
     queue, setQueue, idx, current,
     playing, progress, duration, loadingSong,
     lyric, tlyric, activeLyricIdx,

@@ -1,5 +1,10 @@
-// v2 备份格式：分片读写的纯逻辑，刻意不碰 React / DOM / Capacitor，只依赖一个最小的
+// v2/v3 备份格式：分片读写的纯逻辑，刻意不碰 React / DOM / Capacitor，只依赖一个最小的
 // zip 读写接口，好在 node 测试环境里拿真 jszip 单测往返。
+//
+// v3 与 v2 的分片布局完全相同，区别只有一件事：图片的 blobref 令牌不再在导出前解析回
+// data URL，而是原样留在 JSON 里，二进制走 zip 的 blobs/<id> 旁路（见 utils/backupBlobs.ts）。
+// 本文件对 blobs 旁路唯一的参与是 onSerialized 钩子——把每段真正落包的 JSON 文本吐给
+// 调用方，供其收集令牌。读端同时接受 2 和 3：两个版本的分片组装逻辑一字不差。
 //
 // 设计主线（见 notes/backup-streaming-refactor-plan.md）：
 //   导出端先按 v1 老逻辑把所有数据攒进一个 backupData 对象（角色/消息/单例/设置……，
@@ -13,12 +18,10 @@
 // 为什么单根 data.json 会崩：对单个超大数组或整包做 JSON.stringify，文本长度逼近 JS
 // 单字符串 ~512M（2^29）上限会确定性抛 RangeError。分片后每片字符串长度有界，永不触上限。
 
-export const BACKUP_FORMAT_VERSION = 2;
-/**
- * 导入端兼容范围。原版曾发出 formatVersion 3 的完整备份；它仍使用 manifest + metadata +
- * stores 分片布局，因此可安全复用同一组装器。写出端继续维持 v2，避免无必要地改变旧版本契约。
- */
-export const SUPPORTED_BACKUP_IMPORT_VERSIONS = [2, 3] as const;
+export const BACKUP_FORMAT_VERSION = 3;
+
+/** 读端接受的版本：v2（令牌已解析成 data:）与 v3（令牌 + blobs/* 旁路）分片布局相同。 */
+export const SUPPORTED_IMPORT_FORMAT_VERSIONS: readonly number[] = [2, 3];
 
 /** 分片阈值。注意这里的「Len」量的是 JS 字符串长度（UTF-16 码元数），正是 RangeError 盯的那个量，
  *  不是 UTF-8 字节数——用它当阈值刚好守住「单根字符串别逼近 512M」。 */
@@ -100,6 +103,13 @@ export interface WriteV2Options {
      * 不必先把整个 store 攒进 backupData；writeV2Backup 收尾时会把这些统计合进 manifest。
      */
     prewrittenStores?: Record<string, { parts: number; count: number }>;
+    /**
+     * 通用文本钩子：每段真正落包的 JSON 文本（分片里的每条记录 + metadata.json）都过一遍。
+     * v3 导出方靠它收集 blobref 令牌——只有这一层见得到「实际写进包里的字符串」，在上游
+     * 对象树上另扫一遍既贵又可能与真实序列化结果不一致（令牌可能藏在嵌套 JSON 字符串里，
+     * 序列化后逐字可见）。manifest / 向量 bin·index 不含用户字段值，不过钩。
+     */
+    onSerialized?: (json: string) => void;
 }
 
 export interface V2ArrayFieldWriter {
@@ -118,10 +128,11 @@ export interface V2ArrayFieldWriter {
 export function createV2ArrayFieldWriter(
     zip: ZipFileWriter,
     field: string,
-    options: Pick<WriteV2Options, 'limits' | 'onYield'> = {},
+    options: Pick<WriteV2Options, 'limits' | 'onYield' | 'onSerialized'> = {},
 ): V2ArrayFieldWriter {
     const limits = options.limits || DEFAULT_SHARD_LIMITS;
     const onYield = options.onYield;
+    const onSerialized = options.onSerialized;
     let buf: string[] = [];
     let bufLen = 0;
     let parts = 0;
@@ -148,6 +159,7 @@ export function createV2ArrayFieldWriter(
         inputIndex++;
         // JSON.stringify(undefined) === undefined；与旧 v1 JSON 语义一致地跳过空洞。
         if (s === undefined) return 0;
+        onSerialized?.(s);
         if (s.length > limits.hardMaxLen) {
             throw new Error(
                 `备份中有单条记录过大（${field}，约 ${Math.round(s.length / 1048576)}M 字符），` +
@@ -208,7 +220,7 @@ export async function writeV2Backup(
         if (Object.prototype.hasOwnProperty.call(manifestStores, field)) {
             throw new Error(`备份字段 ${field} 同时走了增量写入和普通写入，已中止以免生成重复分片。`);
         }
-        const writer = createV2ArrayFieldWriter(zip, field, { limits, onYield });
+        const writer = createV2ArrayFieldWriter(zip, field, { limits, onYield, onSerialized: options.onSerialized });
         await writer.append(arr);
         // count 用「实际写入条数」而非 arr.length：writer 会跳过 JSON.stringify(undefined)
         // 得到的空洞，避免导入端「拼出条数 === count」校验误判损坏。
@@ -227,7 +239,9 @@ export async function writeV2Backup(
         }
     }
 
-    zip.file('metadata.json', JSON.stringify(metaFields));
+    const metaJson = JSON.stringify(metaFields);
+    options.onSerialized?.(metaJson);
+    zip.file('metadata.json', metaJson);
 
     // 向量二进制旁路：bin 直写 Uint8Array（不经 base64，bin 多大都不会撞字符串上限），
     // index 是小 JSON。manifest.vectors 记 count/byteLength 供导入端校验。
@@ -278,10 +292,10 @@ export async function assembleV2Backup(
     if (!manifest || typeof manifest !== 'object') {
         throw new Error('损坏的备份包：manifest.json 无法解析。');
     }
-    if (!SUPPORTED_BACKUP_IMPORT_VERSIONS.includes(manifest.formatVersion as typeof SUPPORTED_BACKUP_IMPORT_VERSIONS[number])) {
+    if (!SUPPORTED_IMPORT_FORMAT_VERSIONS.includes(manifest.formatVersion)) {
         throw new Error(
-            `不支持的备份格式版本：${manifest.formatVersion}（本版本支持导入 formatVersion ` +
-            `${SUPPORTED_BACKUP_IMPORT_VERSIONS.join('、')} 的备份），已中止导入（数据未改动）。`,
+            `不支持的备份格式版本：${manifest.formatVersion}（本版本只能导入 formatVersion ` +
+            `${SUPPORTED_IMPORT_FORMAT_VERSIONS.join(' / ')} 的备份），已中止导入（数据未改动）。`,
         );
     }
 

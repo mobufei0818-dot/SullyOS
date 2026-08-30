@@ -13,10 +13,16 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActiveMsgClient,
   compareRemotePushSubscription,
+  fetchWorkerDiagnostics,
   readAmsgFailKind,
   type AmsgPushRegistrationState,
   type AmsgRemotePushSubscription,
 } from '../../utils/activeMsgClient';
+import {
+  judgePushDeliveryFailure,
+  type AmsgPushDeliveryProbe,
+} from '../../utils/amsgDiagnostics';
+import { catchUpMissedPushesManually } from '../../utils/activeMsgRuntime';
 import { readBrowserPushState, type BrowserPushState } from '../../utils/pushSubscribeShared';
 import {
   describeElapsed,
@@ -56,9 +62,13 @@ const REGISTRATION_TEXT: Record<AmsgPushRegistrationState, { value: string; bad:
 const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast }) => {
   const [browser, setBrowser] = useState<BrowserPushState | null>(null);
   const [remote, setRemote] = useState<AmsgRemotePushSubscription | null>(null);
+  // 「登记的确实是这台设备，但推送根本送不到」——只有 Worker 那侧的投递结果知道这件事。
+  // null = 还没问到（没填 Worker / 连不上），那时这一行照实说「没查到」。
+  const [delivery, setDelivery] = useState<AmsgPushDeliveryProbe | null>(null);
   const [workerConfigured, setWorkerConfigured] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [resetting, setResetting] = useState(false);
+  const [catchingUp, setCatchingUp] = useState(false);
   // 连续几次僵尸失败。不落盘：刷新页面就归零，用户不会莫名其妙看到一个红按钮。
   const [zombieStreak, setZombieStreak] = useState(0);
 
@@ -72,6 +82,10 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
       const configured = Boolean(config?.workerUrl?.trim());
       setWorkerConfigured(configured);
       setRemote(configured ? await ActiveMsgClient.getRemotePushSubscription() : null);
+      // 「推送有没有真的送出去」是 Worker 那侧算好的（见 /debug 的 pushDelivery）。
+      // 这一行和体检面板读的是同一份，不会一个说红一个说绿。
+      const probe = configured ? await fetchWorkerDiagnostics() : null;
+      setDelivery(probe?.reachable ? probe.report.storage.pushDelivery ?? null : null);
     } finally {
       setRefreshing(false);
     }
@@ -114,10 +128,58 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
     }
   };
 
+  /**
+   * 手动补收：去云端账本上把没收到的消息捞回来。
+   *
+   * 结果照实说，不含糊：捞回来几条、翻过多少条都报出来。「一条都没补回来」跟「压根没读成」
+   * 是两个结论，用户拿它决定下一步该干嘛（前者说明消息不在账本上、该查别处，后者只是这趟
+   * 没读成、再点一次就行），混在一起说等于什么都没说。
+   */
+  const handleCatchUp = async () => {
+    setCatchingUp(true);
+    try {
+      const { written, scanned, stale } = await catchUpMissedPushesManually();
+      if (written > 0) {
+        // 补回来了，但同一趟里还有超窗的——两件事都得说，不然用户以为全找回来了。
+        addToast(
+          stale > 0
+            ? `补回 ${written} 条消息，去聊天里看看。另有 ${stale} 条超过两天，拿不回来了。`
+            : `补回 ${written} 条消息，去聊天里看看。`,
+          'success',
+        );
+      } else if (stale > 0) {
+        // 有本该收到的消息、但全都过了两天：说清楚是「丢了」不是「没有」——这是用户
+        // 唯一一次知道这件事的机会，含糊过去他会以为链路是好的。
+        addToast(`有 ${stale} 条消息超过两天没能收到，已经拿不回来了。`, 'error');
+      } else if (scanned > 0) {
+        // 账本上有行，但没一条是该上屏的聊天内容（思维链、工具请求这些不进聊天流）。
+        addToast('账本上剩下的都不是聊天内容，没有可补的消息。', 'info');
+      } else {
+        addToast('账本上没有漏收的消息——这条链路是通的。', 'info');
+      }
+    } catch (error: any) {
+      addToast(error?.message || '读云端账本失败，待会儿再试。', 'error');
+    } finally {
+      setCatchingUp(false);
+    }
+  };
+
   const registration: AmsgPushRegistrationState = workerConfigured
     ? compareRemotePushSubscription(browser?.endpoint, remote)
     : 'worker-unset';
   const registrationText = REGISTRATION_TEXT[registration];
+
+  // 上一次推送到底送没送到。判定跟体检面板共用 judgePushDeliveryFailure——两处各写一套的话，
+  // 用户会看到一个红一个绿，而这正是他判断该不该重置订阅的唯一依据。
+  const deliveryVerdict = judgePushDeliveryFailure(delivery);
+  const deliveryText: { value: string; bad: boolean } = !workerConfigured || !delivery
+    ? { value: '没查到（要先连上 Worker）', bad: false }
+    : !delivery.probed
+      ? { value: delivery.reason === 'unsupported' ? '这台 Worker 还不查' : '没查成', bad: false }
+      : delivery.gone && deliveryVerdict
+        ? { value: `被推送服务退回（${delivery.gone.status}）`, bad: true }
+        // 有旧账但已经不算数了：说清楚「那是上一条订阅的事」，别让人以为从来没坏过。
+        : { value: delivery.gone ? '这条订阅登记之后没被退回过' : '没有被退回的记录', bad: false };
 
   const resetLabel = resetting
     ? (deepMode ? '深度重置中…' : '重置中…')
@@ -145,6 +207,11 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
                 // 「接口全在但这台设备就是建不出订阅」的唯一可见出口。取的是共用层那个
                 // 固定枚举，不含报错原文。
                 lastFailure: liveFailureKind(browser) ?? 'none',
+                // 「登记全对但推送被退回」有多普遍。四个取值全是这儿写死的字面量，
+                // 不带状态码原文、不带端点、不带失败原因。
+                delivery: !delivery || !delivery.probed ? 'unknown'
+                  : delivery.gone && deliveryVerdict ? 'gone'
+                    : delivery.gone ? 'recovered' : 'clean',
               } : undefined);
               void refresh();
             }}
@@ -167,6 +234,9 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
             />
             <Row label="推送通道" value={browser.channel} />
             <Row label="云端登记" value={registrationText.value} bad={registrationText.bad} />
+            {/* 上面每一行答的都是「配好了吗」，这一行答的是「实际推出去了吗」。前面全绿
+                后面照样能红——那正是「任务建得成、到点没消息」最难自己发现的一种坏法。 */}
+            <Row label="上次投递" value={deliveryText.value} bad={deliveryText.bad} />
 
             {browser.endpoint && (
               <div className="pt-2 mt-2 border-t border-slate-200">
@@ -191,10 +261,10 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
                 <div className="mt-2 p-2 bg-rose-50 border border-rose-200 rounded-lg text-[10px] text-rose-700 leading-relaxed">
                   <p className="font-semibold mb-1">上次建订阅失败{elapsed && `（${elapsed}）`}</p>
                   <p>{failure.text}。</p>
-                  {failure.kind === 'channel-unreachable' && (
+                  {(failure.kind === 'channel-unreachable' || failure.kind === 'no-subscription') && (
                     <p className="mt-1.5 pt-1.5 border-t border-rose-200">
                       这一类<b>重试多少次都是一样的结果</b>，问题不在这个站点、也不在权限，
-                      换一个浏览器或换台设备才有用。
+                      换个浏览器、换个网络或换台设备才有用。
                     </p>
                   )}
                 </div>
@@ -205,6 +275,25 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
                 订阅地址变成了 <code className="font-mono">permanently-removed.invalid</code>，
                 意思是浏览器把这条订阅吊销了（常见原因：很久没打开、通知权限被改过、站点数据被清过）。
                 这个域名全球都不会解析，推送发过去必然失败。点下面的「重置订阅」重建一条就行。
+              </div>
+            )}
+            {deliveryVerdict?.level === 'bad' && (
+              <div className={`mt-2 p-2 border rounded-lg text-[10px] leading-relaxed ${
+                deliveryVerdict.level === 'bad'
+                  ? 'bg-rose-50 border-rose-200 text-rose-700'
+                  : 'bg-amber-50 border-amber-200 text-amber-700'
+              }`}>
+                <p className="font-semibold mb-1">推送被退回了</p>
+                <p>{deliveryVerdict.what}。</p>
+                {/* 这段解释只在坐实了的时候说：warn 那档是 Worker 问不到，上面几行本来
+                    就红着，再说一句「上面都没问题」只会自相矛盾。 */}
+                {deliveryVerdict.level === 'bad' && (
+                  <p className="mt-1.5 pt-1.5 border-t border-current/20">
+                    上面每一行<b>都没问题</b>，坏的是那条订阅本身——它在推送服务
+                    （Chrome 走 FCM、Firefox 走 Mozilla、iOS 走 Apple）那侧已经作废了，
+                    这件事只有推送服务知道，前面几行谁都查不出来。点下面的「重置订阅」换一条新的。
+                  </p>
+                )}
               </div>
             )}
             {registration === 'other-endpoint' && (
@@ -244,7 +333,7 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
           className={`mt-4 w-full py-2 rounded-xl text-xs font-bold border ${
             resetting || refreshing || browser?.capacitorNative
               ? 'bg-slate-100 text-slate-400 border-slate-200'
-              : deepMode || browser?.endpointDead || registrationText.bad
+              : deepMode || browser?.endpointDead || registrationText.bad || deliveryText.bad
                 ? 'bg-rose-500 text-white border-rose-500 hover:bg-rose-600'
                 : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
           }`}
@@ -256,6 +345,30 @@ const PushSubscriptionPanel: React.FC<PushSubscriptionPanelProps> = ({ addToast 
           或者订阅被吊销之后点它。
           {deepMode && <><br/>连着几次都没成，已经切到「深度重置」——它会把 Service Worker 整个装一遍，更彻底。</>}
         </p>
+
+        {/* 上面那条链路修好了也追不回已经丢掉的消息——那些还在云端账本上躺着，得有人去拿。
+            平时冷启动和回到前台会自动捞一次，这个按钮是给「我确实少收了东西」的时候用的：
+            它连头一趟的账本存量也当补收处理，而自动那条路会把存量整批销掉（分不清哪些是
+            真丢的、哪些是当时收到了只是老版本不会销账，倒出来就是重放）。 */}
+        {workerConfigured && !browser?.capacitorNative && (
+          <>
+            <button
+              disabled={catchingUp || resetting || refreshing}
+              onClick={() => void handleCatchUp()}
+              className={`mt-3 w-full py-2 rounded-xl text-xs font-bold border ${
+                catchingUp || resetting || refreshing
+                  ? 'bg-slate-100 text-slate-400 border-slate-200'
+                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+              }`}
+            >
+              {catchingUp ? '正在找…' : '找回没收到的消息'}
+            </button>
+            <p className="text-[10px] text-slate-400 mt-2 leading-relaxed">
+              每条消息发出去之前，云端都先记了一行，你这边收到了才销账。所以推送要是在路上丢了
+              （网络不稳、挂着代理、手机压后台），内容还留在云端——点它把最近一天里漏掉的捞回来。
+            </p>
+          </>
+        )}
       </div>
     </div>
   );

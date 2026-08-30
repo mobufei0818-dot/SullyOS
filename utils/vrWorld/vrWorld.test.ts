@@ -4,8 +4,8 @@ import { parseVROutput, parseMusicOutput, parseGuestbookOutput, parseGymOutput, 
 import { rollPoemLines, SIGNAL_LINES_MIN, SIGNAL_LINES_MAX, signalActFor } from './constants';
 import { maskPen } from './postOffice';
 import { decodeBytes } from './decodeText';
-import { VRScheduler } from './scheduler';
-import { rollRoom } from './runSession';
+import { VRScheduler, VR_FAIL_LIMIT } from './scheduler';
+import { pickNovel, rollRoom, vrAutoGapMs } from './runSession';
 
 // scheduler 的 attachListeners 会访问 document/window（node 环境下没有），补最简 stub。
 const g = globalThis as any;
@@ -43,6 +43,85 @@ describe('VRScheduler.reconcile', () => {
         VRScheduler.reconcile([{ charId: 'c1', intervalMinutes: 240 }]);
         expect(VRScheduler.getIntervalMinutes('c1')).toBe(240);
         expect(JSON.parse(localStorage.getItem('vr_last_fire')!).c1).toBe(fireBefore);
+    });
+});
+
+describe('VRScheduler 熔断', () => {
+    beforeEach(() => {
+        localStorage.removeItem('vr_schedules');
+        localStorage.removeItem('vr_last_fire');
+        localStorage.removeItem('vr_fail_streak');
+    });
+
+    it('连续调不通模型就掐掉自主登入（令牌失效时别通宵一轮轮撞下去）', () => {
+        VRScheduler.start('c1', 120);
+        for (let i = 1; i < VR_FAIL_LIMIT; i++) {
+            expect(VRScheduler.report('c1', 'failed').tripped).toBe(false);
+            expect(VRScheduler.isActiveFor('c1')).toBe(true);
+        }
+        const last = VRScheduler.report('c1', 'failed');
+        expect(last.tripped).toBe(true);
+        expect(last.streak).toBe(VR_FAIL_LIMIT);
+        expect(VRScheduler.isActiveFor('c1')).toBe(false);
+    });
+
+    it('中间成功一次，失败计数归零', () => {
+        VRScheduler.start('c1', 120);
+        VRScheduler.report('c1', 'failed');
+        VRScheduler.report('c1', 'failed');
+        VRScheduler.report('c1', 'ok');
+        expect(VRScheduler.getFailStreak('c1')).toBe(0);
+        expect(VRScheduler.report('c1', 'failed').tripped).toBe(false);
+        expect(VRScheduler.isActiveFor('c1')).toBe(true);
+    });
+
+    it('压根没走到模型的轮次不算账（没书没歌、房间被别人占着）', () => {
+        VRScheduler.start('c1', 120);
+        for (let i = 0; i < VR_FAIL_LIMIT + 2; i++) VRScheduler.report('c1', 'skipped');
+        expect(VRScheduler.getFailStreak('c1')).toBe(0);
+        expect(VRScheduler.isActiveFor('c1')).toBe(true);
+    });
+
+    it('重新启用会把上一轮的失败账清掉', () => {
+        VRScheduler.start('c1', 120);
+        for (let i = 0; i < VR_FAIL_LIMIT; i++) VRScheduler.report('c1', 'failed');
+        expect(VRScheduler.isActiveFor('c1')).toBe(false);
+
+        VRScheduler.start('c1', 120);   // 用户换了 API 重新开
+        expect(VRScheduler.getFailStreak('c1')).toBe(0);
+        expect(VRScheduler.report('c1', 'failed').tripped).toBe(false);
+        expect(VRScheduler.isActiveFor('c1')).toBe(true);
+    });
+
+    it('熔断只掐当事角色，不连累别人', () => {
+        VRScheduler.start('c1', 120);
+        VRScheduler.start('c2', 120);
+        for (let i = 0; i < VR_FAIL_LIMIT; i++) VRScheduler.report('c1', 'failed');
+        expect(VRScheduler.isActiveFor('c1')).toBe(false);
+        expect(VRScheduler.isActiveFor('c2')).toBe(true);
+    });
+});
+
+describe('自动登入的最小间隔闸', () => {
+    const MINUTE = 60_000;
+
+    it('取设定间隔的一半，给后台节流留余量', () => {
+        expect(vrAutoGapMs(120)).toBe(60 * MINUTE);
+        expect(vrAutoGapMs(30)).toBe(15 * MINUTE);
+    });
+
+    it('间隔是脏数据时不能让闸失效 —— NaN 会让所有比较恒为 false', () => {
+        // 这几个值以前会算出 NaN 或 0，闸形同虚设：真正失控时一次都拦不住
+        for (const dirty of [NaN, 0, -5, undefined, Infinity]) {
+            const gap = vrAutoGapMs(dirty as any);
+            expect(Number.isFinite(gap)).toBe(true);
+            expect(gap).toBeGreaterThanOrEqual(5 * MINUTE);
+        }
+    });
+
+    it('间隔被写成极小值时由下限兜底', () => {
+        expect(vrAutoGapMs(1)).toBe(5 * MINUTE);
+        expect(vrAutoGapMs(4)).toBe(5 * MINUTE);
     });
 });
 
@@ -135,6 +214,49 @@ describe('parseMusicOutput', () => {
 describe('彼方手动指定房间', () => {
     it('手动点听歌房时，即使角色没有歌单且房间没在放歌也不会随机跳走', () => {
         expect(rollRoom({} as any, [], null, 'music')).toBe('music');
+    });
+});
+
+describe('彼方图书馆自动选书', () => {
+    const novel = (id: string, segments = 10) => ({
+        id,
+        title: id,
+        segments: Array.from({ length: segments }, (_, idx) => ({ idx, text: `${id}-${idx}`, chars: 4 })),
+        totalChars: segments * 4,
+        createdAt: 1,
+        updatedAt: 1,
+    }) as any;
+
+    it('默认在全部未读完书目中 roll，而不是永远选择最近开始的那本', () => {
+        const books = [novel('a'), novel('b'), novel('c')];
+        const char = { vrState: { novelBookmarks: { c: 2 } } } as any;
+        expect(pickNovel(books, char, () => 0)?.id).toBe('a');
+        expect(pickNovel(books, char, () => 0.99)?.id).toBe('c');
+    });
+
+    it('有多个候选时不会连续两轮选择同一本', () => {
+        const books = [novel('a'), novel('b'), novel('c')];
+        const char = { vrState: { lastNovelId: 'b' } } as any;
+        expect(pickNovel(books, char, () => 0)?.id).toBe('a');
+        expect(pickNovel(books, char, () => 0.99)?.id).toBe('c');
+    });
+
+    it('优先书单有未读内容时只在优先书目中轮换', () => {
+        const books = [novel('a'), novel('b'), novel('c')];
+        const char = { vrState: { preferredNovelIds: ['b', 'c'], lastNovelId: 'b' } } as any;
+        expect(pickNovel(books, char, () => 0)?.id).toBe('c');
+        expect(pickNovel(books, char, () => 0.99)?.id).toBe('c');
+    });
+
+    it('优先书目读完后回到全书库的未读书目', () => {
+        const books = [novel('a'), novel('b'), novel('c')];
+        const char = { vrState: { preferredNovelIds: ['b'], novelBookmarks: { b: 10 } } } as any;
+        expect(pickNovel(books, char, () => 0)?.id).toBe('a');
+        expect(pickNovel(books, char, () => 0.99)?.id).toBe('c');
+    });
+
+    it('空书和损坏书不会进入候选池', () => {
+        expect(pickNovel([novel('empty', 0), novel('ok')], {} as any, () => 0)?.id).toBe('ok');
     });
 });
 

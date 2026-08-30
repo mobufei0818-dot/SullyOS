@@ -22,6 +22,7 @@
 
 import { sanitizeForNotification } from '../../../utils/sanitize';
 import { extractTransferCommands, parseTransferAmount } from '../../../utils/transferFormat';
+import { extractScheduleChangeDirectives } from '../../../utils/scheduleChangeParse';
 
 export type ToolCall = {
   id: string;
@@ -52,6 +53,10 @@ export type Directive =
   | { type: 'transfer_accept' }
   | { type: 'transfer_return' }
   | { type: 'add_event'; title: string; date: string }
+  // 角色改自己今天的日程 [[ACTION:CHANGE_SCHEDULE | 22:00 | 陪你聊天]]。不在 SIDE_EFFECT_TAGS
+  // 里而走旁路，理由同转账：解析要认中文别名 / 全角标点 / 漏括号那一堆写法，那份容错
+  // 跟客户端共用一份源码（utils/scheduleChangeParse）。
+  | { type: 'change_schedule'; time: string; activity: string }
   | { type: 'schedule_message'; time: string; text: string }
   // song 是可选的后补字段（见 MusicActionSong），只有主动消息 2.0 的定时路径会填。
   | { type: 'music_action'; verb: string; args: string[]; song?: MusicActionSong }
@@ -372,8 +377,20 @@ export function classifyLLMOutput(text: string): ClassificationResult {
     }
   }
 
+  // 2.0b 日程修改同理走 directive 通道。不走的话标签会留在正文里，被 sanitizeIntoSegments
+  // 的 stripBusinessTagsForNotification（正则含 ACTION）连 raw 一起剥掉——客户端永远收不到，
+  // 角色嘴上说「日程改好了」而表其实没动，下一轮它读到的还是旧安排。
+  // 解析跟客户端 scheduleChange 共用一份（中文「修改日程」、全角冒号、漏括号都认）。
+  // 一个标签都没认出来时 cleanedText 就是原文——这条由 extractScheduleChangeDirectives
+  // 自己保证，两侧都不必在外面再守一道（守漏的那一侧正文会悄悄少一截）。
+  const scheduleParsed = extractScheduleChangeDirectives(textAfterTransfers);
+  const textAfterSchedule = scheduleParsed.cleanedText;
+  for (const d of scheduleParsed.directives) {
+    directives.push({ type: 'change_schedule', time: d.startTime, activity: d.activity });
+  }
+
   for (const spec of SIDE_EFFECT_TAGS) {
-    const matches = Array.from(textAfterTransfers.matchAll(spec.re));
+    const matches = Array.from(textAfterSchedule.matchAll(spec.re));
     for (const m of matches) {
       const d = spec.toDirective(m);
       if (d) directives.push(d);
@@ -397,7 +414,7 @@ export function classifyLLMOutput(text: string): ClassificationResult {
   }
 
   // 3. 不管 directives 有没有, 都剥光所有标签 (数据 + 副作用) 出干净文本.
-  let cleanedText = textAfterTransfers;
+  let cleanedText = textAfterSchedule;
   for (const spec of DATA_TAGS) cleanedText = cleanedText.replace(spec.re, '');
   for (const spec of SIDE_EFFECT_TAGS) cleanedText = cleanedText.replace(spec.re, '');
   cleanedText = cleanedText.trim();

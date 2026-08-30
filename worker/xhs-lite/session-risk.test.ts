@@ -130,6 +130,88 @@ describe('XHS Lite session-risk headers', () => {
     expect(headers.get('sec-ch-ua')).toContain('Chromium";v="138"');
   });
 
+  it('adds the upstream-required RAP envelope when loading the signed-in user notes', async () => {
+    const upstream = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      const headers = new Headers(init?.headers);
+      if (url.pathname.endsWith('/api/sns/web/v1/user/otherinfo')) {
+        expect(headers.has('x-rap-param')).toBe(false);
+        return new Response(JSON.stringify({
+          success: true,
+          data: { basic_info: { nickname: 'owner' } },
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (url.pathname.endsWith('/api/sns/web/v1/user_posted')) {
+        expect(headers.get('x-rap-param')).toBeTruthy();
+        expect(url.searchParams.get('user_id')).toBe('owner-id');
+        expect(url.searchParams.get('xsec_source')).toBe('pc_user');
+        return new Response(JSON.stringify({
+          success: true,
+          data: { notes: [{ id: 'owned-note-id', note_card: { title: 'mine' } }] },
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    const response = await callLite('user-profile', {
+      user_id: 'owner-id',
+      xsec_token: 'owner-token',
+    });
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(2);
+    expect(body).toMatchObject({
+      success: true,
+      notes_status: 'loaded',
+      notes: [{ note_id: 'owned-note-id', title: 'mine' }],
+    });
+  });
+
+  it('uses RAP and exact note/comment ids when replying to a comment', async () => {
+    const upstream = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe('/api/sns/web/v1/comment/post');
+      const headers = new Headers(init?.headers);
+      expect(headers.get('x-rap-param')).toBeTruthy();
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        note_id: 'owned-note-id',
+        target_comment_id: 'comment-id',
+        content: 'reply text',
+      });
+      return new Response(JSON.stringify({ success: true, data: { comment: { id: 'reply-id' } } }), {
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+
+    const response = await callLite('reply-comment', {
+      feed_id: 'owned-note-id',
+      comment_id: 'comment-id',
+      content: 'reply text',
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream).toHaveBeenCalledTimes(1);
+    expect(await response.json()).toMatchObject({ success: true });
+  });
+
+  it('surfaces an upstream reply rejection as an operation error', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ success: false, msg: 'risk control' }), {
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    const response = await callLite('reply-comment', {
+      feed_id: 'owned-note-id',
+      comment_id: 'comment-id',
+      content: 'reply text',
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ error: '评论失败: risk control' });
+  });
+
   it('does not call the protected XHS comment endpoint when no managed provider is configured', async () => {
     const upstream = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input);

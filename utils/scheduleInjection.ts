@@ -20,6 +20,25 @@ import type { DailySchedule, ScheduleSlot } from '../types';
  */
 export type RenderableSchedule = Pick<DailySchedule, 'slots' | 'flowNarrative'>;
 
+export interface ScheduleInjectionOptions {
+    /** ChatApp 主请求需要让角色看到今天的整张表；主动消息到点场景仍只看当前与下一条。 */
+    includeFullDay?: boolean;
+    /**
+     * 教不教角色改自己的日程。前台聊天和主动消息到点生成都能落地——后者的标签由
+     * worker classifier 摘成 change_schedule directive 随 push 回来，客户端落库
+     * （不摘的话会被 sanitize 连 raw 一起剥掉，见 utils/scheduleChangeParse.ts）。
+     * 措辞对两边都成立：主动消息里没有「完整日程表」可指，所以只让它抄上面出现过的时段。
+     */
+    includeChangeInstruction?: boolean;
+    /**
+     * 能不能报钟点（默认能）。角色关掉「时间感知」时传 false：日程照给——那是这个
+     * 功能自己的开关——但 `07:00` 这种精确钟点属于时间感知的范畴，不该从日程块漏出去。
+     * 跟天气块的处理对齐（那边天气照给、只抽掉 timeLine）。
+     * 关掉钟点时也不教改日程：那条指令拿时段当定位符，角色看不到时刻就写不出来。
+     */
+    includeClock?: boolean;
+}
+
 /** 意识流独白按一天三档取：早 / 午 / 晚。 */
 export function getFlowNarrativeKey(hour: number): 'morning' | 'afternoon' | 'evening' {
     if (hour < 12) return 'morning';
@@ -62,9 +81,13 @@ export const buildScheduleInjection = (
     schedule: RenderableSchedule | null,
     evolvedNarrative?: string,
     now: Date = new Date(),
+    options: ScheduleInjectionOptions = {},
 ): string => {
     if (!schedule || !schedule.slots || schedule.slots.length === 0) return '';
     const { current: currentSlot, next: nextSlot } = resolveScheduleSlots(schedule, now);
+    const withClock = options.includeClock !== false;
+    /** 报钟点时写「活动（07:00）」，不报时只留活动本身。 */
+    const withTime = (text: string, startTime: string) => (withClock ? `${text}（${startTime}）` : text);
 
     // 凌晨还没轮到今天第一条日程时，人其实还在昨晚里没睡。主动消息经常在这个点触发，
     // 按「今天刚要开始」写，半夜一点的角色就会顶着清晨的心境说话。
@@ -73,14 +96,20 @@ export const buildScheduleInjection = (
     // 1. 当前时段硬事实（每轮独立注入）
     let slotHeader = '';
     if (currentSlot) {
-        slotHeader = `当前时段：${currentSlot.startTime} 你正在${currentSlot.activity}`;
+        slotHeader = withClock
+            ? `当前时段：${currentSlot.startTime} 你正在${currentSlot.activity}`
+            : `当前时段：你正在${currentSlot.activity}`;
         if (currentSlot.location) slotHeader += `（${currentSlot.location}）`;
-        if (nextSlot) slotHeader += `\n之后安排：${nextSlot.startTime} ${nextSlot.activity}`;
+        if (nextSlot) {
+            slotHeader += withClock
+                ? `\n之后安排：${nextSlot.startTime} ${nextSlot.activity}`
+                : `\n之后安排：${nextSlot.activity}`;
+        }
         slotHeader += '\n';
     } else if (nextSlot) {
         slotHeader = isPreDawnCarryOver
-            ? `夜深了，今天的安排还没开始，最早的一件是${nextSlot.activity}（${nextSlot.startTime}）\n`
-            : `今天还没开始活动，稍后先${nextSlot.activity}（${nextSlot.startTime}）\n`;
+            ? `夜深了，今天的安排还没开始，最早的一件是${withTime(nextSlot.activity, nextSlot.startTime)}\n`
+            : `今天还没开始活动，稍后先${withTime(nextSlot.activity, nextSlot.startTime)}\n`;
     }
 
     // 2. 意识流独白
@@ -103,9 +132,30 @@ export const buildScheduleInjection = (
     const preamble = `此刻你的心中盘旋着这些想法……\n`;
     const footnote = `\n（不是台词，不用说出口——让它影响你的语气和情绪就好。）`;
 
-    let out = slotHeader;
+    let out = '';
+    if (options.includeFullDay) {
+        const rows = schedule.slots.map((slot) => {
+            let line = withClock ? `- ${slot.startTime} ${slot.activity}` : `- ${slot.activity}`;
+            if (slot.location) line += `（${slot.location}）`;
+            if (slot.description) line += `：${slot.description}`;
+            return line;
+        });
+        out += `你今天的完整日程：\n${rows.join('\n')}\n`;
+    }
+    out += slotHeader;
     if (narrative) {
         out += preamble + narrative + footnote;
+    }
+    // 能改的是「当前这一条和它之后的」，所以两者有一个在就有落点。落点优先取下一条；
+    // 一天最后一条日程开始之后没有下一条了，这时用当前这条——那条通常是睡觉，正好是
+    // 最需要「我今晚不睡了」这个出口的时候。
+    const changeTarget = nextSlot ?? currentSlot;
+    if (options.includeChangeInstruction && withClock && changeTarget) {
+        out += '\n日程是你早上给自己排的计划，不是必须履行的命令。真实发生的事跟它对不上时'
+            + '（比如这会儿表上写着睡觉、你却醒着在跟对方说话），把它改成你实际在做的事就好。\n'
+            + '需要时在回复末尾单独输出：'
+            + `[[ACTION:CHANGE_SCHEDULE | ${changeTarget.startTime} | 去超市]]`
+            + '（时段要原样抄上面出现过的那几个；正在进行的这一条和它之后的都能改，已经过去的不能）。';
     }
     out += '\n';
     return out;

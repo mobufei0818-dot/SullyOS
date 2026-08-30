@@ -1,0 +1,57 @@
+{
+	"Version": 3,
+	"FileReferences": {
+		"Moc": "Sully.moc3",
+		"Textures": [
+			"Sully.4096/texture_00.png"
+		],
+		"Physics": "Sully.physics3.json",
+		"DisplayInfo": "Sully.cdi3.json",
+		"Expressions": [
+			{
+				"Name": "失去高光",
+				"File": "1.exp3.json"
+			},
+			{
+				"Name": "抬手",
+				"File": "2.exp3.json"
+			},
+			{
+				"Name": "戴上墨镜",
+				"File": "3.exp3.json"
+			},
+			{
+				"Name": "生气",
+				"File": "4.exp3.json"
+			},
+			{
+				"Name": "开心",
+				"File": "5.exp3.json"
+			},
+			{
+				"Name": "幸福",
+				"File": "6.exp3.json"
+			},
+			{
+				"Name": "难过",
+				"File": "7.exp3.json"
+			}
+		]
+	},
+	"Groups": [
+		{
+			"Target": "Parameter",
+			"Name": "EyeBlink",
+			"Ids": [
+				"ParamEyeLOpen",
+				"ParamEyeROpen"
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Name": "LipSync",
+			"Ids": []
+		}
+	],
+	"HitAreas": []
+}

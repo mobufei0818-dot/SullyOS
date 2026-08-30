@@ -17,6 +17,7 @@ import { MemoryNodeDB } from '../../utils/memoryPalace/db';
 import { processImage } from '../../utils/file';
 import { pixelizeImage, removeBackground } from '../../utils/pixelizer';
 import { trackEvent } from '../../utils/analytics';
+import TokenImg from '../../components/os/TokenImg';
 
 interface Props {
   charId: string;
@@ -815,7 +816,7 @@ const PixelRoomEditor: React.FC<Props> = ({ charId, charName, charSprite, userNa
                 transform: `translate(-50%, -100%) scaleX(${charFlip ? -1 : 1})`,
                 zIndex: Math.round(charPos.y * 4) + 20,
               }}>
-                <img src={charSprite} className="drop-shadow-md"
+                <TokenImg value={charSprite} className="drop-shadow-md"
                   style={{
                     display: 'block',
                     width: '100%',

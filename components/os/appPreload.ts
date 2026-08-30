@@ -1,5 +1,27 @@
 import { AppID } from '../../types';
-import { isIOSStandaloneWebApp } from '../../utils/iosStandalone';
+
+type PreloadConnection = {
+  saveData?: boolean;
+  effectiveType?: string;
+};
+
+type PreloadNavigator = {
+  hardwareConcurrency?: number;
+  deviceMemory?: number;
+  connection?: PreloadConnection;
+};
+
+/** Low-end / constrained devices keep all bandwidth and CPU for explicit user actions. */
+export const shouldUseIdleAppPreload = (
+  nav: PreloadNavigator = navigator as Navigator & PreloadNavigator,
+): boolean => {
+  const connection = nav.connection;
+  if (connection?.saveData) return false;
+  if (connection?.effectiveType === 'slow-2g' || connection?.effectiveType === '2g') return false;
+  if (typeof nav.hardwareConcurrency === 'number' && nav.hardwareConcurrency > 0 && nav.hardwareConcurrency <= 4) return false;
+  if (typeof nav.deviceMemory === 'number' && nav.deviceMemory > 0 && nav.deviceMemory <= 4) return false;
+  return true;
+};
 
 // AppID → 该 App 代码块的 import 工厂（路径相对本文件 components/os/）。
 // 与 PhoneShell 的 lazy 定义指向同一批模块；Vite 按模块 URL 去重，
@@ -47,29 +69,23 @@ const importers: Partial<Record<AppID, () => Promise<unknown>>> = {
 // 已发起预取的 App（去重，避免同一图标多次 pointerdown 重复触发）。
 const requested = new Set<AppID>();
 
-const IOS_STANDALONE_SAFE_PRELOAD_APPS = new Set<AppID>([
-  AppID.Character,
-  AppID.Call,
-  AppID.Room,
-]);
-
-// 负载预热挂钩：由 PhoneShell 注入，按 AppID 解析对应 React.lazy 的负载本身
-// （不仅下载模块），使首次打开不再 suspend、无切换瞬间露底色的闪烁。
+// 负载预热挂钩：由 PhoneShell 注入，按 AppID 复用对应 React.lazy 的模块 Promise。
 // 解耦放这里是为了让 AppIcon（pointerdown）也能触发，而无需直接依赖 PhoneShell 的 lazy 定义。
-let payloadWarmer: ((id: AppID) => void) | null = null;
-export const setAppPayloadWarmer = (fn: (id: AppID) => void): void => { payloadWarmer = fn; };
+let payloadWarmer: ((id: AppID) => Promise<unknown> | undefined) | null = null;
+export const setAppPayloadWarmer = (fn: (id: AppID) => Promise<unknown> | undefined): void => { payloadWarmer = fn; };
 
 /**
  * 「按下即预取」：手指刚按到图标（pointerdown，早于 tap 完成约 100ms）即预热该 App。
- * 兜住「开机后空闲预取还没轮到、用户就抢先点了某个冷门 App」的极端情况。
- * 优先走负载预热（连 React.lazy 负载一起解析 → 无闪烁）；未注入时退化为仅预热 Vite 模块。
+ * 这里只加载用户正在按下的一个 App，不在冷启动时批量预取。优先复用 PhoneShell 的模块 Promise；
+ * 未注入时退化为直接预取 Vite 模块。
  */
 export const preloadApp = (id: AppID): void => {
-  if (isIOSStandaloneWebApp() && !IOS_STANDALONE_SAFE_PRELOAD_APPS.has(id)) return;
   if (requested.has(id)) return;
   requested.add(id);
-  if (payloadWarmer) { payloadWarmer(id); return; }
-  const factory = importers[id];
-  if (factory) Promise.resolve(factory()).catch(() => { requested.delete(id); });
-  else requested.delete(id);
+  const request = payloadWarmer ? payloadWarmer(id) : importers[id]?.();
+  if (!request) {
+    requested.delete(id);
+    return;
+  }
+  void request.catch(() => { requested.delete(id); });
 };

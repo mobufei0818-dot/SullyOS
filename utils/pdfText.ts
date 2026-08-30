@@ -1,5 +1,5 @@
-const PDFJS_SCRIPT_SRC = 'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js';
-const PDFJS_WORKER_SRC = 'https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+import * as bundledPdfJs from 'pdfjs-dist';
+import bundledPdfWorkerSrc from 'pdfjs-dist/build/pdf.worker.min.js?url';
 
 type PdfTextItemLike = {
     str?: unknown;
@@ -50,43 +50,21 @@ export interface ExtractPdfTextOptions {
 
 let pdfjsPromise: Promise<PdfJsLike> | null = null;
 
-const loadScript = (src: string): Promise<void> => new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[data-src="${src}"]`) as HTMLScriptElement | null;
-    if (existing) {
-        if (existing.dataset.loaded === 'true' || (window as any).pdfjsLib) {
-            resolve();
-            return;
-        }
-        existing.addEventListener('load', () => resolve(), { once: true });
-        existing.addEventListener('error', () => reject(new Error(`load failed: ${src}`)), { once: true });
-        return;
-    }
-
-    const script = document.createElement('script');
-    script.src = src;
-    script.async = true;
-    script.dataset.src = src;
-    script.onload = () => {
-        script.dataset.loaded = 'true';
-        resolve();
-    };
-    script.onerror = () => reject(new Error(`load failed: ${src}`));
-    document.head.appendChild(script);
-});
-
+/**
+ * PDF.js 与 worker 都随站点/APK 构建，不再从第三方 CDN 动态加载。
+ * Android WebView 因而不会再被跨域 Worker、CDN 可达性或离线状态卡住。
+ */
 const loadPdfJs = async (): Promise<PdfJsLike> => {
     if (!pdfjsPromise) {
-        pdfjsPromise = loadScript(PDFJS_SCRIPT_SRC)
-            .then(() => {
-                const pdfjs = (window as any).pdfjsLib as PdfJsLike | undefined;
-                if (!pdfjs) throw new Error('PDF.js 加载失败');
-                if (pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_SRC;
-                return pdfjs;
-            })
-            .catch(error => {
-                pdfjsPromise = null;
-                throw error;
-            });
+        pdfjsPromise = Promise.resolve().then(() => {
+            const pdfjs = bundledPdfJs as unknown as PdfJsLike;
+            if (!pdfjs?.getDocument) throw new Error('PDF.js 加载失败');
+            if (pdfjs.GlobalWorkerOptions) pdfjs.GlobalWorkerOptions.workerSrc = bundledPdfWorkerSrc;
+            return pdfjs;
+        }).catch(error => {
+            pdfjsPromise = null;
+            throw error;
+        });
     }
     return pdfjsPromise;
 };
@@ -96,7 +74,7 @@ export const isPdfFile = (file: Pick<File, 'name' | 'type'>): boolean =>
 
 const CJK_CHAR = /[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]/;
 const NO_SPACE_BEFORE = /^[,.;:!?%。，、；：！？）》】』”’]/;
-const NO_SPACE_AFTER = /[(（《【『“‘]$/;
+const NO_SPACE_AFTER = /[(（《【『“‘，。、；：！？）》】』”’…]$/;
 const CHAPTER_HEADING = /^(?:第.{1,12}[章节回部卷篇]|chapter\b)/i;
 
 const finiteNumber = (value: unknown): number | undefined =>
@@ -123,6 +101,52 @@ const isNewVisualLine = (line: PdfTextLine, item: PdfTextItemLike): boolean => {
     return Math.abs(line.y - next.y) > height * 0.55;
 };
 
+const median = (values: number[]): number | undefined => {
+    if (values.length === 0) return undefined;
+    const sorted = [...values].sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0
+        ? (sorted[middle - 1] + sorted[middle]) / 2
+        : sorted[middle];
+};
+
+/**
+ * 估算正文的常用左边界，而不是直接取全页最小 x。
+ *
+ * PDF 的页眉、页码、章节装饰经常比正文更靠左。把它们的 x 当正文左边界后，
+ * 每一行正文都会看起来像“缩进了两格”，继而被误判成新段落。正文续行的 x
+ * 通常会在一个很窄的范围内反复出现，因此取最密集的 x 簇更可靠。
+ */
+const estimateBodyLeftEdge = (lines: PdfTextLine[]): number | undefined => {
+    const positioned = lines.filter((line): line is PdfTextLine & { x: number } =>
+        !!line.text && line.x != null && Number.isFinite(line.x));
+    if (positioned.length === 0) return undefined;
+
+    const typicalHeight = median(positioned
+        .map(line => line.height)
+        .filter((value): value is number => value != null && value > 0)) || 10;
+    const tolerance = Math.max(1.5, typicalHeight * 0.35);
+    const sorted = [...positioned].sort((a, b) => a.x - b.x);
+    const clusters: Array<{ xs: number[]; chars: number }> = [];
+
+    for (const line of sorted) {
+        const last = clusters[clusters.length - 1];
+        const center = last ? (median(last.xs) ?? line.x) : line.x;
+        if (last && Math.abs(line.x - center) <= tolerance) {
+            last.xs.push(line.x);
+            last.chars += line.text.length;
+        } else {
+            clusters.push({ xs: [line.x], chars: line.text.length });
+        }
+    }
+
+    clusters.sort((a, b) =>
+        b.xs.length - a.xs.length
+        || b.chars - a.chars
+        || (median(a.xs) || 0) - (median(b.xs) || 0));
+    return median(clusters[0].xs);
+};
+
 const shouldKeepParagraphBreak = (previous: PdfTextLine, current: PdfTextLine, leftEdge?: number): boolean => {
     if (previous.blank || current.blank) return true;
     if (CHAPTER_HEADING.test(previous.text.trim()) || CHAPTER_HEADING.test(current.text.trim())) return true;
@@ -139,12 +163,7 @@ const shouldKeepParagraphBreak = (previous: PdfTextLine, current: PdfTextLine, l
 
 const joinPdfLines = (lines: PdfTextLine[]): string => {
     const contentLines = lines.filter(line => line.text || line.blank);
-    const xValues = contentLines
-        .map(line => line.x)
-        .filter((value): value is number => value != null);
-    const leftEdge = xValues.length
-        ? xValues.reduce((minimum, value) => Math.min(minimum, value), xValues[0])
-        : undefined;
+    const leftEdge = estimateBodyLeftEdge(contentLines);
     let output = '';
     let previous: PdfTextLine | undefined;
     let pendingBlank = false;

@@ -11,6 +11,7 @@ import type { PixelHomeState, PixelHomeTheme, PixelAsset } from './types';
 import { DEFAULT_HOME_THEME, decodeColorField } from './types';
 import type { MemoryRoom } from '../../utils/memoryPalace/types';
 import { ROOM_META, ROOM_SIZES } from './roomTemplates';
+import TokenImg from '../../components/os/TokenImg';
 
 interface Props {
   homeState: PixelHomeState;
@@ -433,7 +434,7 @@ const PixelHomeMap: React.FC<Props> = ({ homeState, assets, charSprite, userName
                       height: 24,
                       transform: `translate(-50%, -100%) scaleX(${charFlip ? -1 : 1})`,
                     }}>
-                    <img src={charSprite} className="drop-shadow-sm"
+                    <TokenImg value={charSprite} className="drop-shadow-sm"
                       style={{
                         display: 'block',
                         width: '100%',

@@ -22,6 +22,7 @@ import {
 } from '@phosphor-icons/react';
 import { DB } from '../utils/db';
 import { getChibi } from '../utils/vrWorld/chibi';
+import TokenImg from '../components/os/TokenImg';
 import { WorldScheduler, toTickEntries } from '../utils/worldHome/scheduler';
 import { isWorldRunning, injectWorldCard } from '../utils/worldHome/engine';
 import { worldTimeLabel, worldTzLabel, isNightWorld, houseOf, NARRATIVE_STYLES, buildNpcRollPrompt, parseRolledNpcs, realObserveTarget, clampRealClockToNow, migrateWorldDaySegs, SEGMENTS_PER_DAY } from '../utils/worldHome/prompts';
@@ -162,8 +163,8 @@ const ChibiFigure: React.FC<{ char: CharacterProfile; size?: number; bob?: boole
     }
     return (
         <div className="flex flex-col items-center" style={{ width: size, animation: bob ? 'wh-bob 2.6s ease-in-out infinite' : undefined }}>
-            <img
-                src={c.img}
+            <TokenImg
+                value={c.img}
                 alt={char.name}
                 className={c.isFallback ? 'rounded-full object-cover' : 'object-contain'}
                 style={{
@@ -213,7 +214,7 @@ const ThreadBubbles: React.FC<{
             <div key={m.id} className={`flex items-end gap-1.5 ${mine ? 'justify-end' : 'justify-start'}`}>
                 {!mine && (
                     avatarOf(m.fromId)
-                        ? <img src={avatarOf(m.fromId)} className="w-[22px] h-[22px] rounded-full object-cover shrink-0" alt="" />
+                        ? <TokenImg value={avatarOf(m.fromId)} className="w-[22px] h-[22px] rounded-full object-cover shrink-0" alt="" />
                         : <div className="w-[22px] h-[22px] rounded-full bg-white/15 flex items-center justify-center text-[11px] shrink-0">{isNpc(m.fromId) ? emojiOf(m.fromId) : m.fromName.slice(0, 1)}</div>
                 )}
                 <div className={`max-w-[78%] ${mine ? 'items-end' : 'items-start'} flex flex-col`}>
@@ -337,7 +338,7 @@ const PhoneModal: React.FC<{
                         {/* 机主栏 */}
                         <div className="px-4 pt-2 pb-3 flex items-center gap-2.5 shrink-0">
                             {avatar
-                                ? <img src={avatar} className="w-9 h-9 rounded-2xl object-cover ring-2 ring-white/20" alt="" />
+                                ? <TokenImg value={avatar} className="w-9 h-9 rounded-2xl object-cover ring-2 ring-white/20" alt="" />
                                 : <div className="w-9 h-9 rounded-2xl bg-white/15 flex items-center justify-center text-white font-bold">{ownerName.slice(0, 1)}</div>}
                             <div className="min-w-0">
                                 <div className="text-[13px] font-bold text-white truncate">{ownerName} 的手机</div>
@@ -369,7 +370,7 @@ const PhoneModal: React.FC<{
                                                 <div key={i} className="rounded-2xl bg-white/95 p-3 shadow-sm">
                                                     <div className="flex items-center gap-2">
                                                         {avatar
-                                                            ? <img src={avatar} className="w-6 h-6 rounded-full object-cover" alt="" />
+                                                            ? <TokenImg value={avatar} className="w-6 h-6 rounded-full object-cover" alt="" />
                                                             : <div className="w-6 h-6 rounded-full bg-slate-200 flex items-center justify-center text-[10px] font-bold text-slate-600">{ownerName.slice(0, 1)}</div>}
                                                         <div>
                                                             <div className="text-[10.5px] font-bold text-slate-800 leading-none">{ownerName}</div>
@@ -465,7 +466,7 @@ const PhoneModal: React.FC<{
                                                         <button key={t.id} onClick={() => setDmOpenId(t.id)}
                                                             className="w-full flex items-center gap-2.5 rounded-2xl bg-white/95 px-3 py-2.5 text-left active:scale-[0.98] transition-transform">
                                                             {av
-                                                                ? <img src={av} className="w-9 h-9 rounded-full object-cover shrink-0" alt="" />
+                                                                ? <TokenImg value={av} className="w-9 h-9 rounded-full object-cover shrink-0" alt="" />
                                                                 : <div className="w-9 h-9 rounded-full bg-slate-200 flex items-center justify-center text-[14px] shrink-0">{isNpc ? (world.npcs.find(n => n.id === otherId)?.emoji || '🙂') : otherName.slice(0, 1)}</div>}
                                                             <div className="min-w-0 flex-1">
                                                                 <div className="flex items-center gap-1.5">
@@ -851,7 +852,7 @@ const WorldEditor: React.FC<{
                     {filterCharactersByGroup(characters, characterGroups, memberGroupId).map(c => (
                         <button key={c.id} onClick={() => toggleMember(c.id)}
                             className={`flex items-center gap-1.5 pl-1 pr-2.5 py-1 rounded-full border transition-all ${w.memberIds.includes(c.id) ? 'bg-stone-900 border-stone-900 text-white shadow-md' : 'bg-white border-stone-200 text-stone-700'}`}>
-                            <img src={c.avatar} className="w-6 h-6 rounded-full object-cover" alt="" />
+                            <TokenImg value={c.avatar} className="w-6 h-6 rounded-full object-cover" alt="" />
                             <span className="text-[12px] font-semibold">{c.name}</span>
                         </button>
                     ))}

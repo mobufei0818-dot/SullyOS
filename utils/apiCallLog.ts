@@ -31,11 +31,43 @@ export interface ApiCallMeta {
     purpose?: string;
 }
 
+/**
+ * 这一次请求是谁发出去的。
+ *
+ * 不填 = 浏览器自己直连模型（绝大多数记录，不占存储）。带值的这几种都是主动消息 2.0
+ * 交给云端跑的：本地只把活儿交上去，真正那条 `/chat/completions` 由用户自己的
+ * Cloudflare Worker 在云端发出。
+ *   - `cloud-instant-chat`：即时对话（用户此刻正等着的那一轮）
+ *   - `cloud-plate-consolidate`：门牌整理（记忆宫殿的后台活儿，用的是副 API）
+ */
+export type ApiCallRoute = 'cloud-instant-chat' | 'cloud-plate-consolidate';
+
 /** 落库的一条记录。 */
 export interface ApiCallLogEntry extends ApiCallMeta {
     id: string;
     /** 调用发起（实际是响应回来）时间戳 ms */
     timestamp: number;
+    /** 见 ApiCallRoute。空 = 浏览器直连。 */
+    route?: ApiCallRoute;
+    /**
+     * 云端收下了这一轮，结果还没回来。回复落库（或云端点名说这轮没成）时回填掉。
+     * 本地直连的记录没有这一档：那边是响应回来才记，天生就是终态。
+     */
+    pending?: boolean;
+    /**
+     * 这一轮被下一条消息顶掉了（还没等到回复就又发了一条，云端把两句合成一次回）。
+     * 不算失败，但也等不到属于它自己的回复——不单独收尾的话，这笔会一直写着
+     * 「云端生成中」，直到 5 天后被裁掉。
+     */
+    superseded?: boolean;
+    /**
+     * Token 数只覆盖这一轮里的**最后一次**模型调用，不是全部。
+     *
+     * 云端带工具时一轮对话会连着调好几次模型（查完东西再接着说），而回传的用量只有
+     * 最后那次——不标出来的话，用户拿这个数去对供应商账单会一直对不上，还以为是被
+     * 多扣了。只在确实跑过工具时才置位。
+     */
+    tokensPartial?: boolean;
     /** 命中的预设名；匹配不到时回退成 baseUrl 的 host */
     presetName: string;
     baseUrl: string;
@@ -983,5 +1015,105 @@ export function recordApiCall(input: {
             .catch(() => {});
     } catch {
         // best-effort：任何异常都不影响主请求
+    }
+}
+
+// ── 交给云端跑的那一轮 ────────────────────────────────────────────────
+//
+// 这条路上本地只发一个 POST 给用户自己的 Worker，真正那条 `/chat/completions` 是云端
+// 发的——全局 fetch 拦截器只认 `/chat/completions`，够不着它。不专门记的话，开了即时
+// 对话之后「API 调用记录」里聊天这一格就是空的，看着像调用凭空消失了。
+//
+// 同一条记录分两笔写（DB 层按 id 合并非空字段，见 appendApiCallLog）：
+//   1. 云端受理时先落一笔——那会儿只知道「发给谁、用哪个模型、发过去些什么」；
+//   2. 回复回来时把 Token 补上（云端随最后一条推送捎回来）。
+// 中间这段时间记录是 pending，界面上写「云端生成中」。
+
+/** 云端那一轮在本地日志里的记录 id。两笔写入靠它对上号，所以两边都从 uuid 现算。 */
+export const cloudApiCallLogId = (uuid: string): string => `cloud-${uuid}`;
+
+/** 第一笔：云端收下了这一轮。 */
+export function recordCloudApiCall(input: {
+    id: string;
+    route: ApiCallRoute;
+    /** 预设里存的那个形态（`https://host/v1`），云端就用这份凭据去发请求。 */
+    baseUrl: string;
+    model: string;
+    /** 交上去的消息数组，用来算输入构成。 */
+    messages: unknown;
+    meta?: ApiCallMeta;
+    timestamp?: number;
+    /**
+     * 这一轮连交都没交上去（POST 就失败了）。这种记录当场就是终态，不等回填——
+     * 云端根本没收下，不会有回复也不会有用量。输入构成照记：上传超时这类失败正是
+     * 「这次包太大了」的直接线索。
+     */
+    sendFailed?: boolean;
+}): void {
+    try {
+        const baseUrl = stripTrailingSlash(input.baseUrl || '');
+        const meta = hasMeta(input.meta) ? input.meta! : ambientMeta;
+        const entry: ApiCallLogEntry = {
+            id: input.id,
+            timestamp: input.timestamp ?? Date.now(),
+            route: input.route,
+            pending: !input.sendFailed,
+            presetName: resolvePresetName(baseUrl, input.model),
+            baseUrl,
+            model: input.model,
+            // 受理成功本身没出错；这一轮的成败等回填那一笔改写。
+            ok: !input.sendFailed,
+            promptBreakdown: buildPromptBreakdown({ messages: input.messages }),
+            appId: meta.appId,
+            appName: meta.appName,
+            charId: meta.charId,
+            charName: meta.charName,
+            purpose: meta.purpose,
+        };
+        import('./db')
+            .then(({ DB }) => DB.appendApiCallLog(entry))
+            .catch(() => {});
+    } catch {
+        // 同 recordApiCall：记日志不能反过来影响这一轮对话
+    }
+}
+
+/**
+ * 第二笔：云端那一轮有结论了。
+ *
+ * 只写这次才知道的字段，`timestamp` 一个字都不带——记录的时间要停在「发起那一刻」，
+ * 不然列表顺序会随着回复先后跳来跳去。第一笔已经被 5 天裁剪掉时这一笔会落空（合并不
+ * 上、又没有时间戳，写库时当场被裁掉），正是想要的收场。
+ */
+export function settleCloudApiCall(input: {
+    id: string;
+    ok: boolean;
+    promptTokens?: number;
+    completionTokens?: number;
+    /** 见 ApiCallLogEntry.tokensPartial。 */
+    tokensPartial?: boolean;
+    /** 见 ApiCallLogEntry.superseded。 */
+    superseded?: boolean;
+}): void {
+    try {
+        const { promptTokens, completionTokens } = input;
+        const patch: Partial<ApiCallLogEntry> & { id: string } = {
+            id: input.id,
+            pending: false,
+            ok: input.ok,
+            superseded: input.superseded || undefined,
+            promptTokens,
+            completionTokens,
+            // 云端只报入和出两个数，总数这边自己加——列表顶上的合计读的是这个字段。
+            totalTokens: promptTokens != null && completionTokens != null
+                ? promptTokens + completionTokens
+                : undefined,
+            tokensPartial: input.tokensPartial || undefined,
+        };
+        import('./db')
+            .then(({ DB }) => DB.appendApiCallLog(patch))
+            .catch(() => {});
+    } catch {
+        // 同上
     }
 }

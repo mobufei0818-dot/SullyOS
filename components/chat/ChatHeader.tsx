@@ -3,6 +3,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { CaretLeft, Lightning } from '@phosphor-icons/react';
 import { CharacterProfile, CharacterBuff } from '../../types';
+import TokenImg from '../os/TokenImg';
 
 interface TokenBreakdown {
     prompt: number;
@@ -189,7 +190,7 @@ const ChatHeader: React.FC<ChatHeaderProps> = ({
                     </button>
                     
                     <div onClick={onShowCharsPanel} className="flex-1 min-w-0 flex items-center gap-3 cursor-pointer">
-                        <img src={activeCharacter.avatar} className={`w-10 h-10 object-cover shadow-sm ${avatarShape === 'square' ? 'rounded-sm' : avatarShape === 'circle' ? 'rounded-full' : 'rounded-xl'}`} alt="avatar" />
+                        <TokenImg value={activeCharacter.avatar} className={`w-10 h-10 object-cover shadow-sm ${avatarShape === 'square' ? 'rounded-sm' : avatarShape === 'circle' ? 'rounded-full' : 'rounded-xl'}`} alt="avatar" />
                         <div className="flex-1 min-w-0">
                             <div className="font-bold text-slate-800">{activeCharacter.name}</div>
                             <div className="flex items-center gap-2">

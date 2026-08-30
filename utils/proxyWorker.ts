@@ -15,13 +15,15 @@
  * 把自己部署的 worker 地址填进「设置 → 网络代理 (Worker)」即可，
  * 以上全部能力会自动切到你的实例，无需改任何代码。
  *
- * 注意：网易云音乐（MusicContext）和小红书 Lite 各自在自己的 App / 设置里有
- * 独立的 worker 地址输入框，走各自的持久化，不受这里影响。
+ * 网易云音乐（MusicContext）在播放器设置里另有一个服务地址输入框：留空 = 跟随这里，
+ * 填了则只有音乐走那个地址。小红书 Lite 的 serverUrl 指向用户自己电脑上跑的服务，
+ * 跟这里是两回事。
  */
 
 export const DEFAULT_PROXY_WORKER = 'https://sullymeow.ccwu.cc';
 
 const LS_KEY = 'sully_proxy_worker_url_v1';
+const SETTINGS_FOCUS_SESSION_KEY = 'sully_settings_focus_proxy_worker_v1';
 
 // 已死/弃用的历史公共实例域名。老用户 localStorage 里如果还存着这些，
 // 读出来时自动当成"用的是默认"，回落到 DEFAULT_PROXY_WORKER（与
@@ -102,10 +104,30 @@ const notifyProxyWorkerChanged = (): void => {
 /** 当前是否在用自定义（非默认）worker。用于设置页提示文案。 */
 export const isCustomProxyWorker = (): boolean => getProxyWorkerUrl() !== DEFAULT_PROXY_WORKER;
 
+/** 从公告等入口打开设置时，请设置页自动展开并定位到网络代理。 */
+export const requestProxyWorkerSettingsFocus = (): void => {
+  try {
+    sessionStorage.setItem(SETTINGS_FOCUS_SESSION_KEY, '1');
+  } catch {
+    /* sessionStorage 不可用时仍可正常打开设置，只是不自动定位。 */
+  }
+};
+
+/** 一次性读取定位请求，避免用户以后每次打开设置都被拉到页面底部。 */
+export const consumeProxyWorkerSettingsFocus = (): boolean => {
+  try {
+    const requested = sessionStorage.getItem(SETTINGS_FOCUS_SESSION_KEY) === '1';
+    if (requested) sessionStorage.removeItem(SETTINGS_FOCUS_SESSION_KEY);
+    return requested;
+  } catch {
+    return false;
+  }
+};
+
 /**
  * 把指向已死历史实例的 url 改写到当前生效的 worker（保留路径和 query）；
- * 其余地址原样返回。给音乐播放器 / 小红书等「独立持久化 worker 地址」的
- * 模块做存量迁移用——它们各自存的地址不走上面的 LS_KEY，得在自己的读取层调这个。
+ * 其余地址原样返回。给小红书 serverUrl 这类「自己存一份地址」的模块做存量迁移用——
+ * 它们存的地址不走上面的 LS_KEY，得在自己的读取层调这个。
  */
 export const rewriteStaleWorkerUrl = (url: string): string => {
   if (typeof url !== 'string' || !url || !STALE_HOSTS.some((re) => re.test(url))) return url;

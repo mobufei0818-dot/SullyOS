@@ -2,8 +2,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useOS } from '../../context/OSContext';
 import { CharacterProfile, SpriteConfig, SkinSet, DateStyleConfig } from '../../types';
-import { processImage } from '../../utils/file';
+import { processImageToBlob } from '../../utils/file';
+import { putImageBlob, useBlobRefUrl } from '../../utils/blobRef';
 import { pickDateFallbackSprite } from '../../utils/dateSprites';
+import TokenImg from '../os/TokenImg';
 import { DATE_STYLE_PRESETS } from '../../utils/datePrompts';
 import ObserveSettings from './ObserveSettings';
 
@@ -30,6 +32,9 @@ const Section: React.FC<{ title: string; defaultOpen?: boolean; children: React.
 const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
     const { updateCharacter, addToast, userProfile } = useOS();
     const fileInputRef = useRef<HTMLInputElement>(null);
+    // 背景字段存的是 blobref 令牌（二进制在 IndexedDB），CSS url() 喂不了令牌，
+    // 先在这里解析成能直接用的地址。非令牌值（旧 data: / 外链）原样透传。
+    const dateBackgroundUrl = useBlobRefUrl(char.dateBackground);
 
     // 文风与叙事（即时生效：system prompt 每次请求重建，存上就影响下一条回复）
     const styleConfig = char.dateStyleConfig || {};
@@ -100,17 +105,28 @@ const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
         if (!file) return;
 
         try {
-            const base64 = await processImage(file);
             if (uploadTarget === 'bg') {
-                updateCharacter(char.id, { dateBackground: base64 });
+                // 背景改存 Blob：原画质不重绘，二进制进 blob_assets，字段只存 blobref 令牌
+                // （省 ~33% 空间、不占 JS 堆）。参考 apps/Appearance.tsx 的壁纸上传。
+                const blob = await processImageToBlob(file, { skipCompression: true });
+                const ref = await putImageBlob(blob);
+                updateCharacter(char.id, { dateBackground: ref });
                 addToast('背景已更新', 'success');
-            } else if (uploadTarget === 'skin-sprite') {
+                return;
+            }
+
+            // 立绘也改存 Blob，字段里只留 blobref 令牌。压缩口径和以前一模一样：
+            // 不传参 = 长边 1200 / 质量 0.85 / PNG·WebP 保留透明通道，只是产物从
+            // base64 换成二进制。别跟着背景抄 skipCompression，那是背景要原画质。
+            const blob = await processImageToBlob(file);
+            const ref = await putImageBlob(blob);
+            if (uploadTarget === 'skin-sprite') {
                 // Upload to a specific skin set
                 const key = targetEmotionKey.trim().toLowerCase();
                 const skinId = editingSkinId;
                 if (!key || !skinId) { addToast('参数丢失', 'error'); return; }
                 const updatedSets = (char.dateSkinSets || []).map(s =>
-                    s.id === skinId ? { ...s, sprites: { ...s.sprites, [key]: base64 } } : s
+                    s.id === skinId ? { ...s, sprites: { ...s.sprites, [key]: ref } } : s
                 );
                 updateCharacter(char.id, { dateSkinSets: updatedSets });
                 addToast(`皮肤立绘 [${key}] 已保存`, 'success');
@@ -118,7 +134,7 @@ const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
             } else {
                 const key = targetEmotionKey.trim().toLowerCase();
                 if (!key) { addToast('情绪Key丢失', 'error'); return; }
-                const newSprites = { ...(char.sprites || {}), [key]: base64 };
+                const newSprites = { ...(char.sprites || {}), [key]: ref };
                 updateCharacter(char.id, { sprites: newSprites });
                 addToast(`立绘 [${key}] 已保存`, 'success');
                 setTargetEmotionKey('');
@@ -230,10 +246,10 @@ const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
             
             {/* Live Preview Area */}
             <div className="h-64 bg-black relative overflow-hidden shrink-0 border-b border-slate-200">
-                    <div className="absolute inset-0 bg-cover bg-center opacity-60" style={{ backgroundImage: char.dateBackground ? `url(${char.dateBackground})` : 'none' }}></div>
+                    <div className="absolute inset-0 bg-cover bg-center opacity-60" style={{ backgroundImage: dateBackgroundUrl ? `url("${dateBackgroundUrl}")` : 'none' }}></div>
                     <div className="absolute inset-0 flex items-end justify-center pointer-events-none">
-                        <img 
-                        src={currentSpriteImg}
+                        <TokenImg
+                        value={currentSpriteImg}
                         className="max-h-[90%] object-contain transition-transform"
                         style={{ 
                             transform: `translate(${tempSpriteConfig.x}%, ${tempSpriteConfig.y}%) scale(${tempSpriteConfig.scale})`
@@ -261,17 +277,37 @@ const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
                     </div>
                 </Section>
 
-                <section className="bg-white p-4 rounded-2xl border border-slate-100 shadow-sm">
-                    <div className="flex items-center justify-between">
-                        <div>
+                <section className="bg-white rounded-2xl border border-slate-100 shadow-sm divide-y divide-slate-100">
+                    <div className="flex items-center justify-between gap-4 p-4">
+                        <div className="min-w-0">
                             <h3 className="text-xs font-bold text-slate-400 uppercase">浅色阅读模式</h3>
                             <p className="text-[11px] text-slate-400 mt-1">小说视图使用浅色背景，减少眼睛疲劳</p>
                         </div>
                         <button
                             onClick={() => updateCharacter(char.id, { dateLightReading: !char.dateLightReading })}
-                            className={`w-12 h-7 rounded-full transition-colors relative ${char.dateLightReading ? 'bg-primary' : 'bg-slate-200'}`}
+                            type="button"
+                            role="switch"
+                            aria-checked={!!char.dateLightReading}
+                            aria-label="切换浅色阅读模式"
+                            className={`w-12 h-7 shrink-0 rounded-full transition-colors relative ${char.dateLightReading ? 'bg-primary' : 'bg-slate-200'}`}
                         >
                             <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-transform ${char.dateLightReading ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
+                        </button>
+                    </div>
+                    <div className="flex items-center justify-between gap-4 p-4">
+                        <div className="min-w-0">
+                            <h3 className="text-xs font-bold text-slate-400 uppercase">阅读模式显示头像</h3>
+                            <p className="text-[11px] text-slate-400 mt-1">在双方的见面记录旁显示对应头像</p>
+                        </div>
+                        <button
+                            onClick={() => updateCharacter(char.id, { dateReadingShowAvatars: !char.dateReadingShowAvatars })}
+                            type="button"
+                            role="switch"
+                            aria-checked={!!char.dateReadingShowAvatars}
+                            aria-label="切换阅读模式头像"
+                            className={`w-12 h-7 shrink-0 rounded-full transition-colors relative ${char.dateReadingShowAvatars ? 'bg-primary' : 'bg-slate-200'}`}
+                        >
+                            <div className={`absolute top-0.5 w-6 h-6 bg-white rounded-full shadow-md transition-transform ${char.dateReadingShowAvatars ? 'translate-x-5' : 'translate-x-0.5'}`}></div>
                         </button>
                     </div>
                 </section>
@@ -358,7 +394,7 @@ const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
                     >
                         {char.dateBackground ? (
                             <>
-                                <img src={char.dateBackground} className="w-full h-full object-cover" />
+                                <TokenImg value={char.dateBackground} className="w-full h-full object-cover" />
                                 <div className="absolute inset-0 bg-black/30 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><span className="text-white text-xs font-bold">更换背景</span></div>
                             </>
                         ) : <span className="text-slate-400 text-xs">+ 上传背景图</span>}
@@ -372,7 +408,7 @@ const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
                                 <div className={`aspect-[3/4] rounded-xl overflow-hidden relative border ${sprites[key] ? 'border-slate-200 bg-white' : 'border-dashed border-slate-300 bg-slate-100'} shadow-sm flex items-center justify-center transition-all group-hover:border-primary`}>
                                     {sprites[key] ? (
                                         <>
-                                            <img src={sprites[key]} className="w-full h-full object-cover" />
+                                            <TokenImg value={sprites[key]} className="w-full h-full object-cover" />
                                             <div className="absolute inset-0 bg-black/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><span className="text-white text-[10px]">更换</span></div>
                                         </>
                                     ) : <span className="text-slate-300 text-2xl">+</span>}
@@ -399,7 +435,7 @@ const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
                                     >
                                         {sprites[key] ? (
                                             <>
-                                                <img src={sprites[key]} className="w-full h-full object-cover" />
+                                                <TokenImg value={sprites[key]} className="w-full h-full object-cover" />
                                                 <div className="absolute inset-0 bg-black/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><span className="text-white text-[10px]">更换</span></div>
                                             </>
                                         ) : <span className="text-slate-300 text-2xl">+</span>}
@@ -494,7 +530,7 @@ const DateSettings: React.FC<DateSettingsProps> = ({ char, onBack }) => {
                                                     <div className={`aspect-[3/4] rounded-lg overflow-hidden relative border ${skin.sprites[emoKey] ? 'border-slate-200 bg-white' : 'border-dashed border-slate-300 bg-slate-50'} flex items-center justify-center transition-all group-hover:border-primary`}>
                                                         {skin.sprites[emoKey] ? (
                                                             <>
-                                                                <img src={skin.sprites[emoKey]} className="w-full h-full object-cover" />
+                                                                <TokenImg value={skin.sprites[emoKey]} className="w-full h-full object-cover" />
                                                                 <div className="absolute inset-0 bg-black/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><span className="text-white text-[9px]">更换</span></div>
                                                             </>
                                                         ) : <span className="text-slate-300 text-lg">+</span>}

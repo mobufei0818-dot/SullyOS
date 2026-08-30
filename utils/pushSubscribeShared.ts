@@ -83,9 +83,13 @@ export function describePushCapabilityGap(): string | null {
  * 但底下那条通往推送服务商的路不通。Chromium 系（Chrome / Edge）安卓版的网页
  * 推送是转交系统里的谷歌服务（GMS）去注册的，国行安卓机默认不装 GMS，于是
  * 能力检测全绿、subscribe() 必挂。
+ *
+ * 'no-subscription' 是它的邻居：subscribe() 既没抛错、也没给订阅，直接兑现成空。
+ * 拿不到任何错误对象，所以只报事实、不替浏览器猜原因。
  */
 export type SubscribeFailureKind =
   | 'channel-unreachable'
+  | 'no-subscription'
   | 'unsupported'
   | 'permission'
   | 'state'
@@ -321,7 +325,7 @@ export async function subscribeWithRetry(
   };
 
   for (let attempt = 0; attempt < SUBSCRIBE_ATTEMPTS_MAX; attempt++) {
-    let sub: PushSubscription;
+    let sub: PushSubscription | null;
     try {
       sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
@@ -330,6 +334,16 @@ export async function subscribeWithRetry(
     } catch (e) {
       console.warn(`${logPrefix} pushManager.subscribe failed`, e);
       return fail(explainSubscribeError(e));
+    }
+    // 安卓 Firefox 实测：连不上 Mozilla 的推送服务器时，subscribe() 既不抛错、也不给订阅，
+    // 而是直接兑现成 null。少这一手的话，下一行读 endpoint 就抛 TypeError——用户看到的是
+    // 一句「can't access property "endpoint"」的英文报错，面板上还一条失败记录都留不下。
+    if (!sub) {
+      console.warn(`${logPrefix} pushManager.subscribe resolved without a subscription`);
+      return fail({
+        kind: 'no-subscription',
+        text: '浏览器没给出推送订阅——没报错，也没拿到订阅。换个网络、或者换个浏览器再试试',
+      });
     }
     if (!isDeadPushEndpoint(sub.endpoint)) {
       clearSubscribeFailure();

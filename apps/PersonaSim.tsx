@@ -7,7 +7,9 @@ import { ContextBuilder } from '../utils/context';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { safeResponseJson } from '../utils/safeApi';
+import { parsePersonaScriptApiResponse } from '../utils/personaSimParser';
 import { trackEvent } from '../utils/analytics';
+import { useBlobRefUrl } from '../utils/blobRef';
 import {
     CaretLeft, Play, Pause, FastForward, Lock, MagnifyingGlass, MusicNotes,
     BellRinging, ImageSquare, NotePencil, Globe, CloudSun, ArrowClockwise,
@@ -107,8 +109,16 @@ export async function generatePersonaScript(opts: {
     const data = await safeResponseJson(res);
     // 截断直接报错，不兜底：模型输出被 token 上限截断时 finish_reason 为 'length'
     if (data.choices?.[0]?.finish_reason === 'length') throw new Error('演出生成被截断');
-    const parsed = parseScript(data.choices[0].message.content);
-    if (!parsed || !parsed.beats?.length) throw new Error('parse');
+    const finishReason = data?.choices?.[0]?.finish_reason;
+    if (finishReason === 'content_filter' || finishReason === 'safety') {
+        throw new Error('演出生成被模型安全策略中止');
+    }
+    const { content, script: parsed } = parsePersonaScriptApiResponse(data);
+    if (!content) throw new Error('模型没有返回演出正文');
+    if (!parsed) {
+        console.warn('[persona] script parse failed', { finishReason, contentLength: content.length });
+        throw new Error(`演出格式无法解析（模型返回 ${content.length} 字）`);
+    }
     // 不兜底：结尾必须是模型自己收束好的 end，否则视为不完整/被截断，报错让用户重试
     if (parsed.beats[parsed.beats.length - 1].kind !== 'end') throw new Error('演出结尾不完整');
     return parsed;
@@ -913,14 +923,19 @@ const AppView: React.FC<{ app: NonNullable<Beat['app']>; char: CharacterProfile 
 // ============================================================
 //  SHARED CHROME
 // ============================================================
-const Shell: React.FC<{ children: React.ReactNode; wallpaper?: string }> = ({ children, wallpaper }) => (
+const Shell: React.FC<{ children: React.ReactNode; wallpaper?: string }> = ({ children, wallpaper }) => {
+    // 传进来的是角色见面背景的原始字段值（blobref 令牌 / 旧 data: / 外链），
+    // 令牌喂不了 CSS url()，在这儿解析一次；非令牌值原样透传。
+    const wallpaperUrl = useBlobRefUrl(wallpaper);
+    return (
     <div className="absolute inset-0 z-[80] flex flex-col overflow-hidden text-white" style={{ background: '#07080c' }}>
         <div className="absolute inset-0 pointer-events-none" style={{ background: 'radial-gradient(130% 80% at 50% 0%, #1a1726 0%, #0a0b12 60%, #07080c 100%)' }} />
-        {wallpaper && <div className="absolute inset-0 opacity-20 pointer-events-none" style={{ backgroundImage: `url(${wallpaper})`, backgroundSize: 'cover', backgroundPosition: 'center' }} />}
+        {wallpaperUrl && <div className="absolute inset-0 opacity-20 pointer-events-none" style={{ backgroundImage: `url("${wallpaperUrl}")`, backgroundSize: 'cover', backgroundPosition: 'center' }} />}
         <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(to bottom, rgba(7,8,12,0.4), rgba(7,8,12,0.2) 40%, rgba(7,8,12,0.9))' }} />
         <div className="relative z-10 flex flex-col flex-1 min-h-0">{children}</div>
     </div>
-);
+    );
+};
 
 const TopBar: React.FC<{ onBack: () => void; right?: React.ReactNode; title?: string }> = ({ onBack, right, title }) => (
     // 顶部安全区：iOS 刘海/状态栏会盖住返回键和「生活记录」，给个 safe-area-inset 兜底
@@ -1265,31 +1280,6 @@ kind 取值与字段：
 - {"kind":"end","time":"23:40"}  // 最后一个 beat 必须是 end
 
 请严格贴合上面的【本场变奏】，并把【下猛料】那段吃透：beats 给足 40~64 个、独白密集、细节具体、数字行为反复、高潮拉长、结尾收束落地。**务必保证 JSON 完整闭合、结尾收好**——若篇幅吃紧，宁可砍掉几个中段 beat，也要留足收尾、把括号全部闭合，绝不允许写到一半被截断。直接输出 JSON 对象。`;
-}
-
-function parseScript(raw: string): SimScript | null {
-    if (!raw) return null;
-    let s = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
-    const first = s.indexOf('{');
-    const last = s.lastIndexOf('}');
-    if (first === -1 || last === -1) return null;
-    s = s.slice(first, last + 1);
-    const repair = (str: string) => {
-        let inStr = false, esc = false, out = '';
-        for (let i = 0; i < str.length; i++) {
-            const ch = str[i];
-            if (esc) { out += ch; esc = false; continue; }
-            if (ch === '\\') { out += ch; esc = true; continue; }
-            if (ch === '"') { inStr = !inStr; out += ch; continue; }
-            if (inStr && ch === '\n') { out += '\\n'; continue; }
-            if (inStr && ch === '\r') { out += '\\r'; continue; }
-            if (inStr && ch === '\t') { out += '\\t'; continue; }
-            out += ch;
-        }
-        return out;
-    };
-    try { return JSON.parse(s); } catch { }
-    try { return JSON.parse(repair(s)); } catch (e) { console.warn('persona parse failed', e); return null; }
 }
 
 export default PersonaSim;

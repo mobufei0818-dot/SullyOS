@@ -18,6 +18,7 @@ import {
     type DiaryPreview,
     type FeishuDiaryPreview,
 } from './realtimeFetchCore';
+import { formatFeishuWriteFailure } from './feishuDiagnostics';
 import {
     fetchWeatherWithFallback,
     generateWeatherAdvice as generateWeatherAdviceCore,
@@ -77,6 +78,7 @@ export interface RealtimeConfig {
     xhsEnabled?: boolean;
     xhsMcpConfig?: {
         enabled: boolean;
+        mode?: 'local' | 'lite';
         serverUrl: string;
         cookie?: string;        // Lite 模式：登录后的完整小红书 cookie
         platform?: 'xhs' | 'rednote'; // Lite 自动识别出的国内 / 全球后端
@@ -104,6 +106,7 @@ export const defaultRealtimeConfig: RealtimeConfig = {
     xhsEnabled: false,
     xhsMcpConfig: {
         enabled: false,
+        mode: 'lite',
         serverUrl: `${getProxyWorkerUrl()}/api`,
         cookie: undefined,
         platform: undefined,
@@ -1376,7 +1379,7 @@ export const FeishuManager = {
             const tables = data.data?.items || [];
             const targetTable = tables.find((t: any) => t.table_id === tableId);
             if (targetTable) {
-                return { success: true, message: `连接成功! 数据表: ${targetTable.name}` };
+                return { success: true, message: `读取连接成功！数据表: ${targetTable.name}。注意：这里不创建测试记录，新增记录权限会在角色首次写日记时验证。` };
             } else {
                 const tableNames = tables.map((t: any) => `${t.name}(${t.table_id})`).join(', ');
                 return { success: false, message: `多维表格中未找到表 ${tableId}。可用表: ${tableNames || '无'}` };
@@ -1436,9 +1439,9 @@ export const FeishuManager = {
             if (!response.ok) {
                 try {
                     const errJson = JSON.parse(text);
-                    return { success: false, message: `写入失败: ${errJson.msg || errJson.error || response.status}` };
+                    return { success: false, message: formatFeishuWriteFailure(response.status, errJson) };
                 } catch {
-                    return { success: false, message: `写入失败: ${response.status}` };
+                    return { success: false, message: formatFeishuWriteFailure(response.status, { error: text }) };
                 }
             }
 

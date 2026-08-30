@@ -28,7 +28,8 @@
 
 import type { APIConfig, CloudBackupConfig, CharacterProfile, OSTheme, RealtimeConfig } from '../types';
 import { PRESET_THEMES } from '../components/chat/ChatConstants';
-import { anyCharToggle, bucketFewCount, presetOrCustom, readStorageBytes, tweakedOrDefault } from './analytics';
+import { anyCharToggle, bucketFewCount, presetOrCustom, tweakedOrDefault } from './analytics';
+import { readStorageOverview } from './storageStats';
 import { BUILTIN_SOUNDS } from './whiteboxSound';
 import { DB } from './db';
 import { isStandaloneDisplayMode } from './iosStandalone';
@@ -40,6 +41,7 @@ import { isPushVapidReady } from './pushVapid';
 import { getPendingTasks, isAmsg2EnabledForChar } from './amsg2Tasks';
 import { ActiveMsgStore } from './activeMsgStore';
 import { getVRApi } from './vrWorld/vrApi';
+import { isBuiltinSullyLive2D } from './builtinSullyLive2D';
 
 /** 布尔开关转「开 / 关」，带默认值。 */
 const onOff = (v: boolean | undefined, dflt = false) => ((v ?? dflt) ? '开' : '关');
@@ -55,18 +57,24 @@ export async function collectDataScale(characters: CharacterProfile[]): Promise<
     maxMemoryCount: number;
     maxMessageCount: number;
     storageBytes: number | null;
+    storageQuotaBytes: number | null;
+    persistedStorage: boolean | null;
     standalone: boolean;
 }> {
     const messageCounts = await Promise.all(
         characters.map(c => DB.countMessagesByCharId(c.id).catch(() => 0)),
     );
     const memoryCounts = characters.map(c => c.memories?.length ?? 0);
+    // 用量和持久化许可一次取回：两者都出自同一个 StorageManager，分两次问纯属浪费。
+    const storage = await readStorageOverview();
     return {
         characterCount: characters.length,
         memoryCount: memoryCounts.reduce((a, b) => a + b, 0),
         maxMemoryCount: Math.max(0, ...memoryCounts),
         maxMessageCount: Math.max(0, ...messageCounts),
-        storageBytes: await readStorageBytes(),
+        storageBytes: storage.usageBytes,
+        storageQuotaBytes: storage.quotaBytes,
+        persistedStorage: storage.persisted,
         // 用通用的「装成 PWA 独立窗口」判定，不只认 iOS——配合 umami 自带的
         // 系统字段，查询时就能分出 iOS 全屏、安卓全屏还是桌面装机。
         standalone: isStandaloneDisplayMode(),
@@ -132,12 +140,47 @@ export function collectAppearance(
     };
 }
 
+/** 桌面陪伴形象来源的中文标签，跟「切换桌面陪伴形象来源」事件的取值一致，方便两张表对照着看。 */
+const COMPANION_SOURCE_LABELS: Record<string, string> = {
+    model: '动态模型',
+    upload: '静态图片',
+    date: '见面立绘',
+};
+
+/**
+ * 用户自己导入的通话形象。内置 Sully 那份不算——预置角色开箱就绑着它，
+ * 数进去的话人人至少 1，真正想知道的「有多少人自己导过模型」会被这个底噪盖住。
+ */
+const importedAvatars = (characters: CharacterProfile[]) =>
+    characters.filter(c => c.videoAvatar && !isBuiltinSullyLive2D(c.videoAvatar));
+
+/** 自己导入的是哪种格式。两种都导过的人单独占一档，不然会被算进先判断的那一边。 */
+function importedAvatarFormat(characters: CharacterProfile[]): string {
+    const formats = new Set(importedAvatars(characters).map(c => c.videoAvatar?.format));
+    if (formats.has('live2d') && formats.has('vrm')) return '都有';
+    if (formats.has('live2d')) return 'live2d';
+    if (formats.has('vrm')) return 'vrm';
+    return '没导入';
+}
+
+/**
+ * 用内置 Sully 的人选了哪档纹理。2K 和 4K 差一倍多的下载量和显存，
+ * 「有多少人切到 4K 了」直接关系到要不要继续维护两份贴图。
+ */
+function builtinSullyQuality(characters: CharacterProfile[]): string {
+    const builtin = characters.map(c => c.videoAvatar).filter(isBuiltinSullyLive2D);
+    if (!builtin.length) return '没用内置';
+    return builtin.some(cfg => cfg.builtinQuality === 'hd') ? '4K' : '2K';
+}
+
 /**
  * 收集角色级设置。两种问法，别混：
  *   · 开关类 → 问「有没有人开过 / 有没有人特意关掉」，看的是这个功能有没有人要
  *   · 选择类 → 报当前活跃角色选的那个，看的是各选项的占比
  *
  * 全程只有枚举值和「有/无」，不带角色名、不带任何设定内容。
+ * 形象这一族尤其要注意：`videoAvatar.fileName` 是用户自己的文件名，
+ * 只能拿来判断格式，一个字都不许进上报。
  *
  * 刻意没报的：每个世界一份（家园）、每局一份（跑团）的那些设置。一个用户能有十几个
  * 世界，报哪个都不代表他，而且这些选择本来就有「选择世界时间模式」这类事件在记。
@@ -158,6 +201,7 @@ export function collectCharSettings(
         日程与情绪: anyOn(x => x.scheduleFeatureEnabled),
         HTML卡片: anyOn(x => x.htmlModeEnabled),
         角色级聊天装扮: anyOn(x => x.chatFineTune?.enabled),
+        日常聊天协同: anyOn(x => x.chatCollaborationEnabled),
         自定义时区: anyOn(x => x.customTimezoneEnabled),
         生活记录注入: anyOn(x => x.lifeRecordEnabled),
         小红书: anyOn(x => x.xhsEnabled),
@@ -192,6 +236,31 @@ export function collectCharSettings(
         ),
         // 角色专属提示音同样只分「内置哪个 / 自己弄的」
         角色提示音: presetOrCustom(c.chatSound?.src, Object.keys(BUILTIN_SOUNDS), '没设'),
+        // 只问有没有角色选过粤语；不报角色名，也不拆成可关联的逐角色记录。
+        粤语语音: characters.some(x => [
+            x.chatVoiceLang,
+            x.dateVoiceLang,
+            x.callVoiceLang,
+            x.companionTouchSettings?.voiceLanguage,
+            x.companionTouchSettings?.startup?.voiceLanguage,
+        ].includes('yue')) ? '有人选' : '没人选',
+
+        // ── 桌面陪伴与通话形象 ──
+        // 「有多少人在用桌面陪伴」不在这里问：「当前外观」的桌面皮肤已经回答了
+        // （skin === 'companion'）。这几格问的是用起来的人手上是什么形象。
+        //
+        // 都数全部角色，不是当前活跃角色：一个人挂十几个角色时，导了模型的
+        // 恰好不是当前这个的概率很大，只看活跃角色会把重度用户报成没导过。
+        自己导入形象的角色数: bucketFewCount(importedAvatars(characters).length),
+        导入的形象格式: importedAvatarFormat(characters),
+        内置Sully画质: builtinSullyQuality(characters),
+        // 缺省就是「动态模型」，所以这一格里的「动态模型」含从没设过的人；
+        // 有信息量的是另外两档，只有主动换过的人才会落进去。
+        // 认不出的取值一并算「动态模型」，跟界面的渲染回落同口径（见 companionAvatarSource）。
+        桌面陪伴形象来源: COMPANION_SOURCE_LABELS[c.companionAvatar?.source || 'model'] ?? '动态模型',
+        换掉动态模型的角色数: bucketFewCount(
+            characters.filter(x => x.companionAvatar?.source && x.companionAvatar.source !== 'model').length,
+        ),
     };
 }
 
@@ -204,6 +273,11 @@ interface MemoryPalaceConfigShape {
     embedding?: { apiKey?: string };
     lightLLM?: { apiKey?: string };
     rerank?: { enabled?: boolean; apiKey?: string };
+    featureFlags?: {
+        recallRouter?: boolean;
+        interactionAdaptation?: boolean;
+        deepEngagement?: boolean;
+    };
 }
 
 /** 远程向量（记忆云端同步）配置里我们要看的字段。 */
@@ -255,7 +329,7 @@ export function amsg2Stage(
 const BACKUP_PROVIDERS = ['webdav', 'github'] as const;
 
 /** 语音合成服务商白名单。 */
-const TTS_PROVIDERS = ['minimax', 'fishaudio'] as const;
+const TTS_PROVIDERS = ['minimax', 'fishaudio', 'elevenlabs'] as const;
 
 /** 命中白名单就报那个值，否则报 custom；空值报 fallback。 */
 function enumOrCustom(
@@ -319,6 +393,8 @@ export interface FeatureSources {
      * Worker 地址和共享密钥本身不进上报。
      */
     amsg2Global: { workerUrl?: string; initializedAt?: number; instantChatEnabled?: boolean };
+    /** 协同 sidecar 只用 count() 取出的行数，不读取窗口标题、消息、文件名或 Blob。 */
+    collaborationUsage: { sessions: number; messages: number; assets: number };
 }
 
 /**
@@ -336,6 +412,12 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
     // 「用起来了的角色」= 在面板里把开关打开过的（enabled:true 是用户表过态的真痕迹），
     // 与工具注入门同一个判定。
     const amsg2ActiveChars = src.characters.filter(isAmsg2EnabledForChar);
+    const contextFlags = src.memoryPalaceConfig.featureFlags;
+    const contextEnabledCount = [
+        contextFlags?.recallRouter,
+        contextFlags?.interactionAdaptation,
+        contextFlags?.deepEngagement,
+    ].filter(value => value === true).length;
 
     return {
         // ── 外部服务接入 ──
@@ -384,10 +466,20 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
             Boolean(src.remoteVectorConfig.supabaseUrl?.trim() && src.remoteVectorConfig.supabaseAnonKey?.trim()),
             Boolean(src.remoteVectorConfig.enabled),
         ),
+        智能语境: contextEnabledCount === 3 ? '全开' : contextEnabledCount > 0 ? '部分开' : '全关',
+
+        // ── 协同工作 ──
+        // 三个数字都来自 IndexedDB.count()，不会把窗口标题、对话正文或文件名读进统计层。
+        协同工作: src.collaborationUsage.sessions > 0 || src.collaborationUsage.messages > 0 || src.collaborationUsage.assets > 0
+            ? '用过'
+            : '没用过',
+        协同窗口数: bucketFewCount(src.collaborationUsage.sessions),
+        协同消息数: bucketFewCount(src.collaborationUsage.messages),
+        协同文件数: bucketFewCount(src.collaborationUsage.assets),
 
         // ── 模型线路 ──
         // 服务商是枚举，可以报；baseUrl / key / 模型名一律不报。
-        语音合成: src.apiConfig.apiKey || src.apiConfig.minimaxApiKey || src.apiConfig.fishAudioApiKey
+        语音合成: src.apiConfig.apiKey || src.apiConfig.minimaxApiKey || src.apiConfig.fishAudioApiKey || src.apiConfig.elevenLabsApiKey
             ? enumOrCustom(src.apiConfig.ttsProvider, TTS_PROVIDERS, 'minimax')
             : '没配',
         API线路预设数: bucketFewCount(src.apiPresetCount),
@@ -434,12 +526,15 @@ export function collectFeatureFlags(src: FeatureSources): Record<string, string>
  * 存在哪、要不要 await。
  */
 export async function collectFeatureFlagsAsync(
-    src: Omit<FeatureSources, 'vrIndependentApi' | 'amsg2Global'>,
+    src: Omit<FeatureSources, 'vrIndependentApi' | 'amsg2Global' | 'collaborationUsage'>,
 ): Promise<Record<string, string>> {
     // 读不出来就当没配。为一条统计去打断启动流程不值得。
-    const [vrIndependentApi, amsg2Global] = await Promise.all([
+    const [vrIndependentApi, amsg2Global, collaborationUsage] = await Promise.all([
         getVRApi().then(cfg => Boolean(cfg)).catch(() => false),
         ActiveMsgStore.getGlobalConfig().catch(() => ({ workerUrl: '' })),
+        import('../features/collaboration/store')
+            .then(module => module.CollaborationStore.getUsageCounts())
+            .catch(() => ({ sessions: 0, messages: 0, assets: 0 })),
     ]);
-    return collectFeatureFlags({ ...src, vrIndependentApi, amsg2Global });
+    return collectFeatureFlags({ ...src, vrIndependentApi, amsg2Global, collaborationUsage });
 }

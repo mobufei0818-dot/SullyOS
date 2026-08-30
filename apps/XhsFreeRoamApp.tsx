@@ -2,13 +2,15 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { XhsActivityRecord, CharacterProfile } from '../types';
+import { XhsActivityRecord, XhsOwnedPost } from '../types';
 import { XhsFreeRoamEngine, FreeRoamCallbacks } from '../utils/xhsFreeRoam';
-import { XhsMcpClient } from '../utils/xhsMcpClient';
+import { XhsMcpClient, extractNotesFromMcpData, normalizeNote } from '../utils/xhsMcpClient';
+import { collectOwnedPostsFromActivities } from '../utils/xhsFreeRoamOwnership';
 import ConfirmDialog from '../components/os/ConfirmDialog';
 import { trackEvent } from '../utils/analytics';
 import { Book, PencilSimple, MagnifyingGlass, DeviceMobileCamera, ChatCircleDots, PushPin, Moon, House } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import TokenImg from '../components/os/TokenImg';
 
 const TwemojiImg: React.FC<{ code: string; alt?: string; className?: string }> = ({ code, alt, className = 'w-4 h-4 inline-block' }) => (
   <img src={`https://cdnjs.cloudflare.com/ajax/libs/twemoji/14.0.2/72x72/${code}.png`} alt={alt || ''} className={className} draggable={false} />
@@ -55,12 +57,18 @@ const XhsFreeRoamApp: React.FC = () => {
 
     // State
     const [activities, setActivities] = useState<XhsActivityRecord[]>([]);
+    const [ownedPosts, setOwnedPosts] = useState<XhsOwnedPost[]>([]);
+    const [viewMode, setViewMode] = useState<'profile' | 'activity'>('profile');
     const [isRunning, setIsRunning] = useState(false);
     const [status, setStatus] = useState('');
     const [thinking, setThinking] = useState('');
     const [liveActivities, setLiveActivities] = useState<XhsActivityRecord[]>([]);
     const [mcpStatus, setMcpStatus] = useState<'unknown' | 'connected' | 'error'>('unknown');
     const [showDetail, setShowDetail] = useState<XhsActivityRecord | null>(null);
+    const [showOwnedPost, setShowOwnedPost] = useState<XhsOwnedPost | null>(null);
+    const [claimCandidates, setClaimCandidates] = useState<ReturnType<typeof normalizeNote>[]>([]);
+    const [showClaimPicker, setShowClaimPicker] = useState(false);
+    const [claimLoading, setClaimLoading] = useState(false);
     const [confirmDialog, setConfirmDialog] = useState<{
         isOpen: boolean; title: string; message: string;
         variant: 'danger' | 'warning' | 'info'; onConfirm: () => void;
@@ -73,9 +81,19 @@ const XhsFreeRoamApp: React.FC = () => {
 
     // Load history for selected character
     const loadActivities = useCallback(async () => {
-        if (!char) { setActivities([]); return; }
-        const acts = await DB.getXhsActivities(char.id, 50);
-        setActivities(acts);
+        if (!char) { setActivities([]); setOwnedPosts([]); return; }
+        const [allActivities, storedPosts] = await Promise.all([
+            DB.getXhsActivities(char.id),
+            DB.getXhsOwnedPosts(char.id),
+        ]);
+        const knownIds = new Set(storedPosts.map(post => post.noteId));
+        const migrated = collectOwnedPostsFromActivities(allActivities)
+            .filter(post => !knownIds.has(post.noteId));
+        if (migrated.length > 0) {
+            await Promise.all(migrated.map(post => DB.saveXhsOwnedPost(post)));
+        }
+        setActivities(allActivities.slice(0, 50));
+        setOwnedPosts([...storedPosts, ...migrated].sort((a, b) => b.publishedAt - a.publishedAt));
     }, [char]);
 
     useEffect(() => { loadActivities(); }, [loadActivities]);
@@ -160,6 +178,55 @@ const XhsFreeRoamApp: React.FC = () => {
         });
     };
 
+    const handleLoadClaimCandidates = async () => {
+        if (!char || claimLoading) return;
+        const userId = realtimeConfig?.xhsMcpConfig?.loggedInUserId;
+        if (!mcpEnabled || !mcpUrl || !userId) {
+            addToast('请先在设置中连接小红书并获取登录用户 ID', 'error');
+            return;
+        }
+        setClaimLoading(true);
+        try {
+            XhsMcpClient.setCookie(realtimeConfig?.xhsMcpConfig?.cookie);
+            const result = await XhsMcpClient.getUserProfile(
+                mcpUrl,
+                userId,
+                realtimeConfig?.xhsMcpConfig?.userXsecToken,
+            );
+            if (!result.success) throw new Error(result.error || '真实账号主页读取失败');
+            const accountNotes = extractNotesFromMcpData(result.data).map(normalizeNote).filter(note => note.noteId);
+            const claimedIds = new Set((await DB.getAllXhsOwnedPosts()).map(post => post.noteId));
+            setClaimCandidates(accountNotes.filter(note => !claimedIds.has(note.noteId)));
+            setShowClaimPicker(true);
+        } catch (error: any) {
+            addToast(error?.message || '读取真实账号帖子失败', 'error');
+        } finally {
+            setClaimLoading(false);
+        }
+    };
+
+    const handleClaimPost = async (note: ReturnType<typeof normalizeNote>) => {
+        if (!char || !note.noteId) return;
+        const now = Date.now();
+        await DB.saveXhsOwnedPost({
+            id: `${char.id}:${note.noteId}`,
+            characterId: char.id,
+            noteId: note.noteId,
+            title: note.title || '无标题',
+            body: note.desc || '',
+            publishedAt: now,
+            updatedAt: now,
+            xsecToken: note.xsecToken,
+            likes: note.likes,
+            collects: note.collects,
+            commentCount: note.commentCount,
+            shareCount: note.shareCount,
+        });
+        setClaimCandidates(previous => previous.filter(candidate => candidate.noteId !== note.noteId));
+        await loadActivities();
+        addToast(`已归入${char.name}的主页`, 'success');
+    };
+
     const formatTime = (ts: number) => {
         const d = new Date(ts);
         const now = new Date();
@@ -190,7 +257,7 @@ const XhsFreeRoamApp: React.FC = () => {
                                     ${c.id === selectedCharId ? 'bg-rose-50' : 'active:bg-slate-50'}`}
                             >
                                 {c.avatar ? (
-                                    <img src={c.avatar} className="w-8 h-8 rounded-full object-cover" alt="" />
+                                    <TokenImg value={c.avatar} className="w-8 h-8 rounded-full object-cover" alt="" />
                                 ) : (
                                     <div className="w-8 h-8 rounded-full bg-slate-200 flex items-center justify-center text-xs font-bold text-slate-500">{c.name[0]}</div>
                                 )}
@@ -347,6 +414,93 @@ const XhsFreeRoamApp: React.FC = () => {
         );
     };
 
+    const renderOwnedPostModal = () => {
+        if (!showOwnedPost) return null;
+        const post = showOwnedPost;
+        return (
+            <div
+                className="fixed inset-0 z-50 bg-black/40 flex items-end justify-center"
+                style={{ paddingBottom: 'var(--safe-bottom)', paddingTop: 'var(--safe-top)' }}
+                onClick={() => setShowOwnedPost(null)}
+            >
+                <div className="w-full max-w-lg bg-white rounded-t-3xl px-5 pt-5 pb-6 max-h-[78vh] overflow-y-auto animate-slide-up" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-start justify-between gap-4">
+                        <div className="min-w-0">
+                            <p className="text-[10px] font-bold tracking-[0.16em] text-rose-400 uppercase">{char?.name}的笔记</p>
+                            <h2 className="text-lg font-bold text-slate-900 mt-1 leading-snug">{post.title || '无标题'}</h2>
+                        </div>
+                        <button onClick={() => setShowOwnedPost(null)} className="text-xs text-slate-400 px-2 py-1 active:text-slate-700">关闭</button>
+                    </div>
+
+                    <p className="text-sm text-slate-600 leading-7 whitespace-pre-wrap mt-5">{post.body || '（没有正文）'}</p>
+
+                    {post.tags && post.tags.length > 0 && (
+                        <div className="flex flex-wrap gap-2 mt-4">
+                            {post.tags.map(tag => <span key={tag} className="text-xs text-rose-500">#{tag}</span>)}
+                        </div>
+                    )}
+
+                    <div className="grid grid-cols-3 gap-4 border-y border-slate-100 py-4 mt-6 text-center">
+                        <div><p className="text-base font-bold text-slate-800">{post.likes || 0}</p><p className="text-[10px] text-slate-400">赞</p></div>
+                        <div><p className="text-base font-bold text-slate-800">{post.collects || 0}</p><p className="text-[10px] text-slate-400">收藏</p></div>
+                        <div><p className="text-base font-bold text-slate-800">{post.commentCount || 0}</p><p className="text-[10px] text-slate-400">评论</p></div>
+                    </div>
+
+                    <div className="mt-4 space-y-1 text-[10px] text-slate-400">
+                        <p>发布于 {new Date(post.publishedAt).toLocaleString()}</p>
+                        <p className="font-mono break-all">note_id: {post.noteId}</p>
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
+    const renderClaimPicker = () => {
+        if (!showClaimPicker) return null;
+        return (
+            <div
+                className="fixed inset-0 z-50 bg-black/40 flex items-end justify-center"
+                style={{ paddingBottom: 'var(--safe-bottom)', paddingTop: 'var(--safe-top)' }}
+                onClick={() => setShowClaimPicker(false)}
+            >
+                <div className="w-full max-w-lg bg-white rounded-t-3xl max-h-[82vh] flex flex-col animate-slide-up" onClick={e => e.stopPropagation()}>
+                    <div className="px-5 pt-5 pb-4 border-b border-slate-100">
+                        <div className="flex items-start justify-between gap-4">
+                            <div>
+                                <h2 className="text-base font-bold text-slate-900">认领旧帖子</h2>
+                                <p className="text-[11px] text-slate-500 mt-1">从共享真实账号中，选择由{char?.name || '该角色'}发布的帖子。</p>
+                            </div>
+                            <button onClick={() => setShowClaimPicker(false)} className="text-xs text-slate-400 px-2 py-1 active:text-slate-700">关闭</button>
+                        </div>
+                    </div>
+
+                    <div className="overflow-y-auto min-h-0">
+                        {claimCandidates.length === 0 ? (
+                            <div className="px-6 py-14 text-center">
+                                <p className="text-sm font-medium text-slate-500">没有可认领的帖子</p>
+                                <p className="text-[11px] text-slate-400 mt-1">账号帖子可能已经归属其他角色，或主页暂时没有笔记。</p>
+                            </div>
+                        ) : claimCandidates.map(note => (
+                            <div key={note.noteId} className="px-5 py-4 border-b border-slate-100 flex items-start gap-4">
+                                <div className="min-w-0 flex-1">
+                                    <p className="text-sm font-bold text-slate-800 line-clamp-2">{note.title || '无标题'}</p>
+                                    {note.desc && <p className="text-[11px] text-slate-500 mt-1 leading-relaxed line-clamp-2">{note.desc}</p>}
+                                    <p className="text-[9px] text-slate-300 font-mono mt-2 truncate">{note.noteId}</p>
+                                </div>
+                                <button
+                                    onClick={() => handleClaimPost(note)}
+                                    className="shrink-0 px-3 py-2 rounded-full bg-rose-500 text-white text-[11px] font-bold active:scale-95 transition-transform"
+                                >
+                                    归到主页
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            </div>
+        );
+    };
+
     // Live activity panel (during run)
     const renderLivePanel = () => (
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
@@ -360,7 +514,7 @@ const XhsFreeRoamApp: React.FC = () => {
             {thinking && char && (
                 <div className="bg-violet-50 rounded-2xl p-3 animate-fade-in">
                     <div className="flex items-center gap-1.5 mb-1">
-                        {char.avatar && <img src={char.avatar} className="w-5 h-5 rounded-full object-cover" alt="" />}
+                        {char.avatar && <TokenImg value={char.avatar} className="w-5 h-5 rounded-full object-cover" alt="" />}
                         <span className="text-[10px] font-bold text-violet-400">{char.name}在想...</span>
                     </div>
                     <p className="text-xs text-violet-700 leading-relaxed italic">"{thinking}"</p>
@@ -391,6 +545,85 @@ const XhsFreeRoamApp: React.FC = () => {
             )}
         </div>
     );
+
+    const renderProfile = () => {
+        const ownedNoteIds = new Set(ownedPosts.map(post => post.noteId));
+        const successfulReplies = activities.filter(activity =>
+            activity.actionType === 'comment'
+            && activity.result === 'success'
+            && !!activity.content.commentTarget?.noteId
+            && ownedNoteIds.has(activity.content.commentTarget.noteId)
+        ).length;
+
+        return (
+            <div className="flex-1 overflow-y-auto min-h-0 bg-white">
+                <section className="px-5 pt-6 pb-5">
+                    <div className="flex items-center gap-4">
+                        {char?.avatar ? (
+                            <TokenImg value={char.avatar} className="w-16 h-16 rounded-full object-cover ring-2 ring-rose-100" alt="" />
+                        ) : (
+                            <div className="w-16 h-16 rounded-full bg-rose-50 flex items-center justify-center text-xl font-bold text-rose-500 ring-2 ring-rose-100">
+                                {char?.name?.[0] || '?'}
+                            </div>
+                        )}
+                        <div className="min-w-0 flex-1">
+                            <h2 className="text-xl font-bold text-slate-900 truncate">{char?.name || '角色'}</h2>
+                            <p className="text-xs text-slate-400 mt-1">角色独立小红书主页</p>
+                        </div>
+                    </div>
+
+                    <div className="flex items-end gap-8 mt-5">
+                        <div><p className="text-lg font-bold text-slate-900">{ownedPosts.length}</p><p className="text-[10px] text-slate-400">发布</p></div>
+                        <div><p className="text-lg font-bold text-slate-900">{successfulReplies}</p><p className="text-[10px] text-slate-400">已回复</p></div>
+                    </div>
+
+                    <p className="text-[11px] text-slate-500 leading-relaxed mt-4 border-l-2 border-rose-200 pl-3">
+                        真实账号可以与其他角色共用；这里仅保存{char?.name || '该角色'}亲自发布的 note_id。清除活动记录不会删除主页归属。
+                    </p>
+                    <button
+                        onClick={handleLoadClaimCandidates}
+                        disabled={claimLoading || !mcpEnabled}
+                        className="mt-4 text-xs font-medium text-rose-500 disabled:text-slate-300 active:opacity-60"
+                    >
+                        {claimLoading ? '正在读取真实账号…' : '从真实账号认领旧帖子 →'}
+                    </button>
+                </section>
+
+                <div className="h-px bg-slate-100" />
+                <div className="px-5 py-3 flex items-center justify-between">
+                    <h3 className="text-xs font-bold text-slate-700">笔记</h3>
+                    <span className="text-[10px] text-slate-400">按发布时间排序</span>
+                </div>
+
+                {ownedPosts.length === 0 ? (
+                    <div className="px-6 py-14 text-center">
+                        <PencilSimple size={36} weight="thin" className="text-slate-300 mx-auto" />
+                        <p className="text-sm font-medium text-slate-500 mt-3">还没有发布过笔记</p>
+                        <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">下一次成功发帖后，会用唯一 note_id 自动出现在这里。</p>
+                    </div>
+                ) : (
+                    <div className="grid grid-cols-2 gap-px bg-slate-100 border-y border-slate-100">
+                        {ownedPosts.map(post => (
+                            <button
+                                key={post.id}
+                                onClick={() => { setShowOwnedPost(post); trackEvent('打开角色小红书主页帖子'); }}
+                                className="bg-white min-h-44 p-4 text-left flex flex-col active:bg-rose-50 transition-colors"
+                            >
+                                <div className="flex-1">
+                                    <p className="text-sm font-bold text-slate-800 leading-snug line-clamp-3">{post.title || '无标题'}</p>
+                                    {post.body && <p className="text-[11px] text-slate-500 leading-relaxed line-clamp-4 mt-2">{post.body}</p>}
+                                </div>
+                                <div className="pt-3 mt-3 border-t border-slate-50 flex items-center justify-between gap-2">
+                                    <span className="text-[10px] text-slate-400">{formatTime(post.publishedAt)}</span>
+                                    <span className="text-[10px] text-slate-400">♡ {post.likes || 0} · ◯ {post.commentCount || 0}</span>
+                                </div>
+                            </button>
+                        ))}
+                    </div>
+                )}
+            </div>
+        );
+    };
 
     // History list
     const renderHistory = () => (
@@ -484,7 +717,7 @@ const XhsFreeRoamApp: React.FC = () => {
                         disabled={isRunning}
                     >
                         {char?.avatar ? (
-                            <img src={char.avatar} className="w-7 h-7 rounded-full object-cover border-2 border-rose-200" alt="" />
+                            <TokenImg value={char.avatar} className="w-7 h-7 rounded-full object-cover border-2 border-rose-200" alt="" />
                         ) : (
                             <div className="w-7 h-7 rounded-full bg-rose-100 flex items-center justify-center text-xs font-bold text-rose-500 border-2 border-rose-200">
                                 {char?.name?.[0] || '?'}
@@ -497,7 +730,7 @@ const XhsFreeRoamApp: React.FC = () => {
                                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2.5} stroke="currentColor" className="w-3 h-3 text-slate-400"><path strokeLinecap="round" strokeLinejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" /></svg>
                                 )}
                             </div>
-                            <p className="text-[10px] text-slate-400">自由活动</p>
+                            <p className="text-[10px] text-slate-400">{viewMode === 'profile' ? '角色主页' : '活动记录'}</p>
                         </div>
                     </button>
                 </div>
@@ -505,7 +738,7 @@ const XhsFreeRoamApp: React.FC = () => {
                     {/* MCP status indicator */}
                     <div className={`w-2 h-2 rounded-full ${mcpStatus === 'connected' ? 'bg-emerald-400' : mcpStatus === 'error' ? 'bg-red-400' : 'bg-slate-300'}`} title={mcpStatus === 'connected' ? 'MCP已连接' : mcpStatus === 'error' ? 'MCP未连接' : '未检测'} />
 
-                    {activities.length > 0 && !isRunning && (
+                    {activities.length > 0 && !isRunning && viewMode === 'activity' && (
                         <button onClick={handleClearHistory} className="text-[10px] text-slate-400 active:text-red-400">
                             清除记录
                         </button>
@@ -523,8 +756,27 @@ const XhsFreeRoamApp: React.FC = () => {
                 </div>
             )}
 
+            {!isRunning && (
+                <div className="shrink-0 flex border-b border-slate-100 bg-white px-4">
+                    <button
+                        onClick={() => setViewMode('profile')}
+                        className={`flex-1 py-3 flex items-center justify-center gap-1.5 text-xs font-medium border-b-2 transition-colors ${viewMode === 'profile' ? 'text-rose-500 border-rose-400' : 'text-slate-400 border-transparent'}`}
+                    >
+                        <House size={15} weight={viewMode === 'profile' ? 'fill' : 'regular'} />
+                        主页
+                    </button>
+                    <button
+                        onClick={() => setViewMode('activity')}
+                        className={`flex-1 py-3 flex items-center justify-center gap-1.5 text-xs font-medium border-b-2 transition-colors ${viewMode === 'activity' ? 'text-rose-500 border-rose-400' : 'text-slate-400 border-transparent'}`}
+                    >
+                        <Book size={15} weight={viewMode === 'activity' ? 'fill' : 'regular'} />
+                        活动
+                    </button>
+                </div>
+            )}
+
             {/* Main content */}
-            {isRunning ? renderLivePanel() : renderHistory()}
+            {isRunning ? renderLivePanel() : viewMode === 'profile' ? renderProfile() : renderHistory()}
 
             {/* Bottom action area */}
             <div className="shrink-0 px-4 pb-5 pt-3 border-t border-slate-100 bg-white/80 backdrop-blur-sm">
@@ -559,6 +811,8 @@ const XhsFreeRoamApp: React.FC = () => {
             {/* Modals */}
             {renderCharPicker()}
             {renderDetailModal()}
+            {renderOwnedPostModal()}
+            {renderClaimPicker()}
             {confirmDialog && (
                 <ConfirmDialog
                     isOpen={confirmDialog.isOpen}

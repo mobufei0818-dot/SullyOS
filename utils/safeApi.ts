@@ -12,10 +12,11 @@
 // 后者的 meta 通过下面 safeFetchJson 的第 5 个参数挂到 __sullyMeta 上传出去。
 import { appendDevDebugApiLog, makeDebugLogger } from './devDebug';
 import { getApiCallAmbientContext, recordApiCall, type ApiCallMeta } from './apiCallLog';
+import { resolveBlobRefsInRequestBody } from './apiBlobRefs';
 
 const log = makeDebugLogger('api', 'SafeAPI');
 
-function isChatCompletionUrl(url: string): boolean {
+export function isChatCompletionUrl(url: string): boolean {
     // 设置 → API 调用记录除了聊天补全，也需要能看见聊天照片的真实生图请求与报错。
     return url.includes('/chat/completions') || url.includes('/images/generations') || url.includes('/ai/generate-image');
 }
@@ -109,6 +110,8 @@ export function parseSseToCompletion(raw: string): any | null {
 interface SseFeedDelta {
     content: string;
     reasoning: string;
+    /** The provider has explicitly finished this completion. */
+    done: boolean;
 }
 
 class SseAssembler {
@@ -133,11 +136,12 @@ class SseAssembler {
 
     /** 喂一行 SSE 文本，分别返回正文与思考增量（没有则为空串）。 */
     feedLine(line: string): SseFeedDelta {
-        if (!line.startsWith('data:')) return { content: '', reasoning: '' };
+        if (!line.startsWith('data:')) return { content: '', reasoning: '', done: false };
         const payload = line.slice(5).trim();
-        if (!payload || payload === '[DONE]') return { content: '', reasoning: '' };
+        if (!payload) return { content: '', reasoning: '', done: false };
+        if (payload === '[DONE]') return { content: '', reasoning: '', done: true };
         let chunk: any;
-        try { chunk = JSON.parse(payload); } catch { return { content: '', reasoning: '' }; }
+        try { chunk = JSON.parse(payload); } catch { return { content: '', reasoning: '', done: false }; }
         return this.feedChunk(chunk);
     }
 
@@ -148,7 +152,7 @@ class SseAssembler {
         // 始终取最后一个非空的 usage，兼容各家代理。
         if (chunk.usage) this.usage = chunk.usage;
         const choice = chunk.choices?.[0];
-        if (!choice) return { content: '', reasoning: '' };
+        if (!choice) return { content: '', reasoning: '', done: false };
         let delta = '';
         let reasoningDelta = '';
         // delta 路径（OpenAI 流式常见）
@@ -202,7 +206,7 @@ class SseAssembler {
             if (Array.isArray(choice.message.tool_calls)) this.toolCalls.push(...choice.message.tool_calls);
         }
         if (choice.finish_reason) this.finishReason = choice.finish_reason;
-        return { content: delta, reasoning: reasoningDelta };
+        return { content: delta, reasoning: reasoningDelta, done: Boolean(choice.finish_reason) };
     }
 
     get reasoningContent(): string {
@@ -272,9 +276,11 @@ async function readBodyWithStreaming(
     let pending = '';       // SSE 模式下未消费完的半行缓冲
     let mode: 'undecided' | 'sse' | 'raw' = 'undecided';
     let sawFirstDelta = false;
+    let sawTerminalEvent = false;
     const contentType = response.headers.get('content-type');
 
     const emit = (delta: SseFeedDelta) => {
+        if (delta.done) sawTerminalEvent = true;
         if (delta.content) {
             if (!sawFirstDelta) {
                 sawFirstDelta = true;
@@ -318,6 +324,13 @@ async function readBodyWithStreaming(
             pending += textChunk;
         }
         if (mode === 'sse') consumeLines();
+        if (sawTerminalEvent) {
+            // A few OpenAI-compatible Claude proxies send [DONE]/finish_reason but
+            // keep the HTTP socket alive. The completion is already whole; waiting
+            // for reader.done would leave the Qixi loader spinning forever.
+            try { await reader.cancel(); } catch { /* completion is already assembled */ }
+            break;
+        }
     }
     const tail = decoder.decode();
     if (tail) {
@@ -335,8 +348,10 @@ async function readBodyWithStreaming(
 }
 
 /**
- * Fetch with automatic retry for transient errors.
- * Retries on: 429, 500, 502, 503, 504 and network failures.
+ * Fetch with automatic retry for transient errors on non-billable endpoints.
+ * Chat completions never retry automatically: a timeout/network error does not
+ * prove the upstream generation stopped, so retrying can charge the user twice.
+ * Other endpoints retry on: 429, 500, 502, 503, 504 and network failures.
  * Returns the parsed JSON data directly.
  *
  * `timeoutMs`：每次尝试的硬超时。如果调用方没在 options.signal 里自带 AbortController，
@@ -356,6 +371,9 @@ export async function safeFetchJson(
     const retryableStatuses = new Set([429, 500, 502, 503, 504]);
     let lastError: Error | null = null;
     const urlStr = String(url);
+    const automaticRetryLimit = isChatCompletionUrl(urlStr)
+        ? 0
+        : Math.max(0, Math.floor(Number(maxRetries) || 0));
     let lastStatus: number | undefined;
 
     // 显式 meta 挂到 RequestInit 给全局 fetch 兜底；同时快照环境标签，避免长响应期间
@@ -363,13 +381,21 @@ export async function safeFetchJson(
     const metaOptions: RequestInit = meta ? { ...options, __sullyMeta: meta } as RequestInit : options;
     const logMeta = meta || getApiCallAmbientContext();
 
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // 图片在本机存成 `blobref:` 令牌，发出去对面读不懂——在这里统一还原成 data URL。
+    // 各处构造请求的地方就不用各记一遍这件事了（详见 utils/apiBlobRefs.ts）。
+    // 循环外做一次：重试用的是同一份 body。
+    const resolvedBody = await resolveBlobRefsInRequestBody(metaOptions.body);
+    const sendOptions: RequestInit = resolvedBody === metaOptions.body
+        ? metaOptions
+        : { ...metaOptions, body: resolvedBody as BodyInit };
+
+    for (let attempt = 0; attempt <= automaticRetryLimit; attempt++) {
         // 全局 fetch 拦截器和这里的“已解析响应兜底”共享 ID。前者覆盖裸 fetch，
         // 后者不依赖 Response.clone()，避免部分 iOS/WebView 克隆流不结束时漏记。
         const requestId = `api-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
         // 每次 attempt 建一个独立的 AbortController（仅用于 timeout）
         // 调用方自己的 options.signal 仍然有效，两者任一触发就 abort
-        let attemptOptions = { ...metaOptions, __sullyApiCallId: requestId } as RequestInit;
+        let attemptOptions = { ...sendOptions, __sullyApiCallId: requestId } as RequestInit;
         let timeoutHandle: any = null;
         if (timeoutMs > 0) {
             const ac = new AbortController();
@@ -393,9 +419,9 @@ export async function safeFetchJson(
 
             if (!response.ok) {
                 // For retryable status codes, retry before giving up
-                if (retryableStatuses.has(response.status) && attempt < maxRetries) {
+                if (retryableStatuses.has(response.status) && attempt < automaticRetryLimit) {
                     const delay = Math.pow(2, attempt) * 1000; // 1s, 2s
-                    log.warn('HTTP retry', { status: response.status, attempt: attempt + 1, maxRetries, delay });
+                    log.warn('HTTP retry', { status: response.status, attempt: attempt + 1, maxRetries: automaticRetryLimit, delay });
                     await new Promise(r => setTimeout(r, delay));
                     continue;
                 }
@@ -448,15 +474,15 @@ export async function safeFetchJson(
             const isAbort = e?.name === 'AbortError' || /aborted|timeout/i.test(e?.message || '');
 
             // Network errors (fetch itself failed) are retryable
-            if ((e?.name === 'TypeError' || isAbort) && attempt < maxRetries) {
+            if ((e?.name === 'TypeError' || isAbort) && attempt < automaticRetryLimit) {
                 const delay = Math.pow(2, attempt) * 1000;
-                log.warn(isAbort ? 'Timeout/Abort retry' : 'Network error retry', { attempt: attempt + 1, maxRetries, delay, message: e?.message });
+                log.warn(isAbort ? 'Timeout/Abort retry' : 'Network error retry', { attempt: attempt + 1, maxRetries: automaticRetryLimit, delay, message: e?.message });
                 await new Promise(r => setTimeout(r, delay));
                 continue;
             }
 
             // For HTML/parse errors on non-ok responses during retry, continue
-            if (attempt < maxRetries && e?.message?.includes('API返回了HTML')) {
+            if (attempt < automaticRetryLimit && e?.message?.includes('API返回了HTML')) {
                 const delay = Math.pow(2, attempt) * 1000;
                 log.warn('HTML response retry', { attempt: attempt + 1, maxRetries, delay });
                 await new Promise(r => setTimeout(r, delay));

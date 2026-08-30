@@ -6,6 +6,12 @@ import { sanitizeForBubble } from './sanitize';
 import { extractTransferCommands } from './transferFormat';
 import { executeLifeDirectives } from './lifeRecords';
 import { wallClockToTimestamp } from './timezone';
+import { CollaborationStore } from '../features/collaboration/store';
+import {
+    collaborationFileMessageMetadata,
+    extractCollaborationFileDirectives,
+    resolveCollaborationFileByTitle,
+} from '../features/collaboration/chatLibrary';
 
 export interface MusicActionSnapshot {
     songId: number;
@@ -164,6 +170,40 @@ export const ChatParser = {
             // 卡片自己的字段优先，inheritMeta 只补它没有的键（两边键名本来就不重叠，这里是防御）
             ...(inheritMeta ? { metadata: { ...inheritMeta, ...(msg.metadata || {}) } } : {}),
         });
+
+        // COLLAB_FILE — current-chat collaboration mode can hand the user an
+        // existing file from the sidecar cabinet. The chat message stores only
+        // metadata + assetId; the canonical Blob remains in CollaborationStore.
+        const fileDirectives = extractCollaborationFileDirectives(content);
+        if (fileDirectives.requestedTitles.length > 0) {
+            content = fileDirectives.visibleText;
+            try {
+                const chars = await DB.getAllCharacters();
+                const collaborationEnabled = !!chars.find(char => char.id === charId)?.chatCollaborationEnabled;
+                if (!collaborationEnabled) {
+                    console.warn('[CollaborationFileCabinet] 忽略未开启协同能力时的文件标记:', { charId });
+                } else {
+                    const files = await CollaborationStore.listLibraryFiles(charId);
+                    for (const requestedTitle of fileDirectives.requestedTitles) {
+                        const file = resolveCollaborationFileByTitle(files, requestedTitle);
+                        if (!file) {
+                            addToast(`文件柜里找不到《${requestedTitle}》，已跳过发送`, 'error');
+                            continue;
+                        }
+                        await persist({
+                            charId,
+                            role: 'assistant',
+                            type: 'collaboration_file',
+                            content: `[协同文件：${file.name}]`,
+                            metadata: collaborationFileMessageMetadata(file),
+                        });
+                    }
+                }
+            } catch (error) {
+                console.warn('[CollaborationFileCabinet] 发送文件失败:', error);
+                addToast('协同文件柜暂时读取失败', 'error');
+            }
+        }
 
         // POKE
         if (content.includes('[[ACTION:POKE]]')) {
@@ -528,19 +568,11 @@ export const ChatParser = {
         return parts;
     },
 
-    // Chunking text for typing effect - splits into separate chat bubbles
-    // Primary: split on line breaks (AI decides where to break)
-    // Fallback: if no line breaks and text is long, split on spaces between CJK characters
-    //   (Chinese text normally has no spaces, so "汉字 汉字" means the AI intended a line break)
+    // Chunking text for typing effect - splits into separate chat bubbles.
+    // Only explicit line breaks are bubble boundaries. Ordinary whitespace must stay in the
+    // same bubble: models often put spaces inside Japanese/Chinese mixed-language prose, and
+    // treating those spaces as implicit newlines cuts a single sentence in half.
     chunkText: (text: string): string[] => {
-        // CJK character + punctuation ranges (Chinese text normally has no spaces between these)
-        const CJK = '\\u4e00-\\u9fff\\u3400-\\u4dbf\\u3000-\\u303f\\uff00-\\uffef\\u2000-\\u206f\\u2e80-\\u2eff\\u3001-\\u3003\\u2018-\\u201f\\u300a-\\u300f\\uff01-\\uff0f\\uff1a-\\uff20';
-        // 在两个 CJK 之间的空格处断行. 不用后行断言 (?<=…): iOS Safari <16.4 的 JSC 不支持,
-        // 旧设备上 new RegExp 会直接抛 "invalid group specifier name". 改成「捕获左侧 CJK + 零宽
-        // 前瞻右侧」, 用 $1 补回左字符, 行为与原 (?<=[CJK])\s+(?=[CJK]) 字节一致 (见 lookbehindFree.test.ts).
-        const cjkSplitRe = new RegExp(`([${CJK}])\\s+(?=[${CJK}])`, 'g');
-        const SPLIT = String.fromCharCode(1);  // CJK 切点标记
-
         // 0. 保护 <语音…>…</语音> 原子块。外语语音字幕对齐模式下 (见 chatPrompts
         //    voiceActingGuide) 标签内部常按空行分成好几段，一旦被下面的换行断句切碎，
         //    <语音> 的开 / 闭标签就会散落到不同气泡里；MessageItem 的 hasVoiceTag 要求
@@ -562,27 +594,10 @@ export const ChatParser = {
             .map(c => c.trim())
             .filter(c => c.length > 0);
 
-        // 2. For each chunk, also split on spaces between CJK chars/punctuation
-        //    (中文里不该有空格, so "汉字 汉字" means the AI intended a bubble break)
-        //    括号内的空格要保护: 否则裸括号表情包 / 标签 (如 "[你 交给我吧]" 或
-        //    "[[SEND_EMOJI: a b]]") 会被这条规则劈成 "[你" + "交给我吧]" 掉格式.
-        //    做法: 先把 [...] / [[...]] 内空格换成占位符, split 后再换回.
-        const SENTINEL = String.fromCharCode(0);
-        const ATOM_SOLO = new RegExp(`^${ATOM}(\\d+)${ATOM}$`);
         const ATOM_GLOBAL = new RegExp(`${ATOM}(\\d+)${ATOM}`, 'g');
         const restoreVoice = (s: string) => s.replace(ATOM_GLOBAL, (_m, n) => voiceBlocks[Number(n)] ?? '');
-        const result: string[] = [];
-        for (const chunk of lineChunks) {
-            // 独占一行的语音占位符 → 直接还原成完整语音块，不参与 CJK 空格切分
-            const solo = chunk.match(ATOM_SOLO);
-            if (solo) { result.push(voiceBlocks[Number(solo[1])]); continue; }
-            const guarded = chunk.replace(/\[{1,2}[^\[\]]*\]{1,2}/g, m => m.replace(/\s/g, SENTINEL));
-            const sub = guarded.replace(cjkSplitRe, `$1${SPLIT}`).split(SPLIT)
-                .map(c => restoreVoice(c.split(SENTINEL).join(' ').trim()))  // 安全网: 同行残留占位符还原
-                .filter(c => c.length > 0);
-            result.push(...sub);
-        }
-
-        return result;
+        return lineChunks
+            .map(restoreVoice)
+            .filter(c => c.length > 0);
     }
 }

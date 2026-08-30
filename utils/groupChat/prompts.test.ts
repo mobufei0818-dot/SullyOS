@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { buildGroupHistoryBlock, GROUP_HISTORY_GAP_THRESHOLD_MS } from './prompts';
+import {
+    buildDirectorInstruction,
+    buildGroupHistoryBlock,
+    buildRoundRobinInstruction,
+    GROUP_HISTORY_GAP_THRESHOLD_MS,
+} from './prompts';
 import type { Message, CharacterProfile } from '../../types';
 
 const char = (id: string, name: string): CharacterProfile => ({ id, name } as CharacterProfile);
@@ -62,5 +67,28 @@ describe('buildGroupHistoryBlock 识图 API', () => {
         expect(history.attachedImages).toEqual([]);
         expect(history.attachedImagesNote).toBe('');
         expect(history.text).not.toContain('data:image');
+    });
+});
+
+describe('群聊中的 U 与关系连续性', () => {
+    const history = { text: '用户: 今天大家聊什么？', attachedImages: [], attachedImagesNote: '' };
+
+    it('导演模式坚持群像，但不会因切换场景重置角色与 U 的关系', () => {
+        const prompt = buildDirectorInstruction(history, '无');
+
+        expect(prompt).toContain('群像优先，不等于忽视用户');
+        expect(prompt).toContain('U 还是 U');
+        expect(prompt).toContain('关系不能因场景切换而重置');
+        expect(prompt).toContain('不要自动全员跟队');
+        expect(prompt).toContain('不要让所有人重复同一种态度');
+    });
+
+    it('轮询模式允许自然沉默，并要求成员从自己与 U 的关系出发', () => {
+        const prompt = buildRoundRobinInstruction('小夏', history, '无');
+
+        expect(prompt).toContain('只输出 `[[SKIP]]` 保持沉默');
+        expect(prompt).toContain('U 还是 U');
+        expect(prompt).toContain('不能因进入群聊就重置关系');
+        expect(prompt).toContain('按你自己和 U 的关系反应');
     });
 });

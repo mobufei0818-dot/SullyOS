@@ -68,8 +68,11 @@ import { installReiSW } from '@rei-standard/amsg-sw';
  *            并往 ActiveMsg 库 kv store 写「订阅已变化」标记（主线程据此把新订阅逐条
  *            写回已排程的远端任务，见 utils/activeMsgRuntime.ts）。onupgradeneeded 补建
  *            kv store（SW-first 安装时主线程 schema 还没建过）。
+ *  - 1.17.0: 升级 amsg-sw，通知的 silent 认 'when-visible' 这一档：静不静音改由 SW 按
+ *            收到推送那一刻的窗口可见性算，用户看着页面时安静、切后台照常响铃震动。
+ *            老 SW 把这个字符串当真值，会一律静音。
  */
-const SW_VERSION = '1.16.0';
+const SW_VERSION = '1.17.0';
 
 const PING_INTERVAL = 15_000;
 const MAX_MANUAL_ALIVE_MS = 5 * 60_000;
@@ -650,7 +653,7 @@ async function saveIncomingActiveMessage(payload: any) {
 
     case 'error':
       // 失败告知 push: 不写 inbox（不是聊天内容）。通知横幅由包层按 notification.show
-      // 决定（即时对话的终态失败带 show:'when-hidden'——前台不弹、后台弹）。这里把
+      // 决定（即时对话的终态失败带 show:'always' + 折叠 + 静音，前后台都弹）。这里把
       // metadata 整份带给页面: 即时对话靠里面的 taskUuid/reason 当场收尾那一轮
       // （落系统消息、熄灯），见 activeMsgRuntime 的 active-msg-error 分支。
       console.error('[amsg] error push', payload?.code, payload?.message, payload?.metadata?.reason);
@@ -661,6 +664,13 @@ async function saveIncomingActiveMessage(payload: any) {
         charId: payload?.metadata?.charId,
         metadata: payload?.metadata,
       });
+      return;
+
+    case 'result':
+      // 宿主自定义结果（worker 的 ctx.emitResult），不是聊天内容: 不写 inbox, 原样
+      // 转给页面按 resultKind 分流。落进 content 分支的话, 结果里那些不是正文的字段
+      // 会被当角色说的一句话渲染成气泡。
+      await notifyClients({ type: 'active-msg-result', payload });
       return;
 
     default:

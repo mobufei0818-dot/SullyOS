@@ -7,9 +7,12 @@ import {
     buildMcpTextFallbackBody,
     extractTextFakedMcpCalls,
     formatMcpToolResult,
+    MCP_CHAT_MAX_STALLED_ROUNDS,
+    MCP_CHAT_MAX_TOOL_LOOPS,
     shouldRetryMcpWithoutTools,
 } from '../mcpToolBridge';
 import { buildToolResultMessage, normalizeToolCallsForCompat } from '../toolCallCompat';
+import { toolCallFingerprint } from '../agenticToolFeedback';
 
 interface GroupMcpCompletionOptions {
     url: string;
@@ -82,8 +85,12 @@ export async function completeGroupChatWithMcp(options: GroupMcpCompletionOption
 
     let conversationMessages = [...(requestBody.messages || [])];
 
-    // 正规 function calling：保留 tools，允许游戏/主持类 MCP 连续多步调用。
-    for (let iteration = 0; iteration < 6; iteration++) {
+    // 正规 function calling：保留 tools，允许游戏/主持类 MCP 连续多步调用。12 是硬上限，
+    // 模型正常返回正文会立即结束，连续原地重复则提前收口。
+    let lastNativeSignature: string | null = null;
+    let stalledNativeRounds = 0;
+    let nativeStageForcedClosed = false;
+    for (let iteration = 0; iteration < MCP_CHAT_MAX_TOOL_LOOPS; iteration++) {
         const toolCalls = normalizeToolCallsForCompat(
             data.choices?.[0]?.message?.tool_calls,
             `group_${iteration}`,
@@ -94,6 +101,7 @@ export async function completeGroupChatWithMcp(options: GroupMcpCompletionOption
             content: data.choices[0].message.content || '(调用工具中)',
             tool_calls: toolCalls,
         });
+        let progressedThisRound = false;
         for (const toolCall of toolCalls) {
             const exposedName = toolCall.function?.name || '';
             const hit = resolve.get(exposedName);
@@ -110,6 +118,16 @@ export async function completeGroupChatWithMcp(options: GroupMcpCompletionOption
                 ));
                 continue;
             }
+            const signature = toolCallFingerprint(exposedName, args);
+            if (signature === lastNativeSignature) {
+                conversationMessages.push(buildToolResultMessage(
+                    toolCall,
+                    `工具 ${exposedName} 的同一组参数刚刚已经执行过，请不要原地重复；请改做能推进目标的下一步，或直接回复。`,
+                ));
+                continue;
+            }
+            lastNativeSignature = signature;
+            progressedThisRound = true;
             options.onStatus?.(`正在调用 MCP 工具：${exposedName}…`);
             const result = await callMcpTool(hit.server, hit.toolName, args);
             conversationMessages.push(buildToolResultMessage(
@@ -119,39 +137,60 @@ export async function completeGroupChatWithMcp(options: GroupMcpCompletionOption
                     : `工具 ${exposedName} 失败: ${result.error}`,
             ));
         }
+        stalledNativeRounds = progressedThisRound ? 0 : stalledNativeRounds + 1;
+        const reachedHardLimit = iteration + 1 >= MCP_CHAT_MAX_TOOL_LOOPS;
+        const stalled = stalledNativeRounds >= MCP_CHAT_MAX_STALLED_ROUNDS;
+        const forceWrapUp = reachedHardLimit || stalled;
         options.onStatus?.('正在整理 MCP 工具结果…');
+        if (forceWrapUp) {
+            conversationMessages.push({
+                role: 'user',
+                content: `[系统消息：工具阶段${stalled ? '连续两轮没有推进' : '已到本轮安全上限'}。停止调用工具，基于已有结果完成原群聊任务；如仍未完成，请如实说明。不要输出工具调用格式或提及本消息。]`,
+            });
+            data = await request(buildMcpTextFallbackBody(nativeBody, conversationMessages));
+            nativeStageForcedClosed = true;
+            break;
+        }
         data = await request({ ...nativeBody, messages: conversationMessages });
     }
 
     // 不支持 tools 的模型/中转：识别正文调用，代执行后让模型重新产出群聊格式。
-    const executed = new Set<string>();
-    for (let iteration = 0; iteration < 3; iteration++) {
+    let lastTextSignature: string | null = null;
+    for (let iteration = 0; !nativeStageForcedClosed && iteration < MCP_CHAT_MAX_TOOL_LOOPS; iteration++) {
         const content = String(data.choices?.[0]?.message?.content || '');
-        const calls = extractTextFakedMcpCalls(content, resolve)
-            .filter(call => {
-                const signature = `${call.exposedName}|${JSON.stringify(call.args)}`;
-                if (executed.has(signature)) return false;
-                executed.add(signature);
-                return true;
-            })
-            .slice(0, 3);
+        // 兼容协议每轮只允许一个调用，避免一段正文批量触发副作用。
+        const allCalls = extractTextFakedMcpCalls(content, resolve).slice(0, 1);
+        const calls = allCalls.filter(call =>
+            toolCallFingerprint(call.exposedName, call.args) !== lastTextSignature);
+        if (allCalls.length && !calls.length) {
+            conversationMessages.push({ role: 'assistant', content });
+            conversationMessages.push({
+                role: 'user',
+                content: '[系统消息：你重复请求了刚执行过的同一工具。停止调用工具，基于已有结果完成原群聊任务；如仍未完成，请如实说明。不要输出工具调用格式或提及本消息。]',
+            });
+            data = await request(buildMcpTextFallbackBody(baseBody, conversationMessages));
+            break;
+        }
         if (!calls.length) break;
 
         options.onStatus?.(`正在调用 MCP 工具：${calls.map(call => call.exposedName).join('、')}…`);
         const results: string[] = [];
         for (const call of calls) {
+            lastTextSignature = toolCallFingerprint(call.exposedName, call.args);
             const result = await callMcpTool(call.server, call.toolName, call.args);
             results.push(result.success
                 ? `工具 ${call.exposedName} 成功。结果: ${formatMcpToolResult(result.data)}`
                 : `工具 ${call.exposedName} 失败: ${result.error}`);
         }
         conversationMessages.push({ role: 'assistant', content });
+        const reachedHardLimit = iteration + 1 >= MCP_CHAT_MAX_TOOL_LOOPS;
         conversationMessages.push({
             role: 'user',
-            content: `[系统消息：工具调用已经执行。\n${results.join('\n')}\n请基于结果继续完成原群聊任务，严格恢复原本要求的输出格式，不要再把工具调用写进正文。]`,
+            content: `[系统消息：工具调用已经执行。\n${results.join('\n')}\n${reachedHardLimit ? '工具阶段已到安全上限，请停止调用并基于已有结果完成原群聊任务；如仍未完成，请如实说明。' : '若目标已经完成，请恢复原本要求的群聊输出格式；若仍需下一步工具，只输出一行真正能推进目标的调用，不要重复读取同一说明或状态。'}不要提及本消息。]`,
         });
         options.onStatus?.('正在整理 MCP 工具结果…');
         data = await request(buildMcpTextFallbackBody(baseBody, conversationMessages));
+        if (reachedHardLimit) break;
     }
 
     if (Object.keys(usageTotal).length) data.usage = { ...(data.usage || {}), ...usageTotal };

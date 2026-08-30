@@ -55,12 +55,22 @@ export function getRoomLabel(room: MemoryRoom, userName?: string): string {
 
 // ─── 记忆节点 ─────────────────────────────────────────
 
+export interface MemoryEntity {
+    /** 记忆中明确出现的专名；不收录“他 / 朋友 / 那个项目”这类泛称。 */
+    name: string;
+    type?: 'person' | 'place' | 'organization' | 'project' | 'product' | 'account' | 'domain' | 'other';
+    /** 第一版不自动推断别名，只消费已经明确存下来的别名。 */
+    aliases?: string[];
+}
+
 export interface MemoryNode {
     id: string;
     charId: string;
     content: string;            // 记忆内容（提取记忆为第三人称叙事，消化衍生记忆为第一人称内心独白）
     room: MemoryRoom;
     tags: string[];
+    /** 用于显式实体精确召回；旧数据没有此字段时会回退到 tags/content 精确匹配。 */
+    entities?: MemoryEntity[];
     importance: number;         // 1–10
     mood: string;               // 情绪标签，如 'happy', 'sad', 'angry'
     /** Russell 环形情感模型 · 效价：-1 极痛苦 → +1 极愉悦。未填则由 emotionSpace.getEmotionVA() 查表兜底 */
@@ -313,6 +323,11 @@ export interface DigestReport {
     outcomes: DigestReportSection[];    // 状态机结果（化解/加深/淡忘/实现/落空/新困惑）
     plateSubmissions: DigestReportSection[]; // 提交给门牌的蒸馏候选
     plateUpdated: string[];             // 门牌实际更新的房间（PlateRoom）
+    /**
+     * 这次的门牌整理交给云端跑了，结果还在路上（几分钟后落地）。
+     * 缺字段 = 这条日志是这个标记出现之前记的，当 false 看。
+     */
+    plateCloudPending?: boolean;
 }
 
 /** 每角色保留的消化报告条数上限 */
@@ -383,4 +398,6 @@ export interface ScoredMemory {
     similarity: number;         // 向量余弦相似度
     bm25Score: number;          // BM25 分数
     roomScore: number;          // 房间评分后的最终分
+    /** 精确信号的硬保底；formatter 会在普通分数排序前优先保留。 */
+    recallGuarantee?: 'explicit_entity';
 }

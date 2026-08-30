@@ -13,6 +13,7 @@ import { safeResponseJson } from '../../utils/safeApi';
 import { DB } from '../../utils/db';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../character/CharacterGroupFilter';
 import { getLocalDateKey } from '../../utils/localDate';
+import TokenImg from '../os/TokenImg';
 
 interface NovelWriterProps {
     activeBook: NovelBook;
@@ -491,7 +492,10 @@ ${chapterText.substring(0, 200000)}
 
             {/* Header */}
             {/* Removed 'sticky top-0' to fix layout overlap. It is now a standard flex child. */}
-            <div className={`flex flex-col border-b border-black/5 shrink-0 z-20 backdrop-blur-md ${activeTheme.bg}/90 transition-all`}>
+            <div
+                className={`flex flex-col border-b border-black/5 shrink-0 z-20 backdrop-blur-md ${activeTheme.bg}/90 transition-all`}
+                style={{ paddingTop: 'var(--chrome-top)' }}
+            >
                 <div className="h-16 flex items-center justify-between px-4 pt-2">
                     <button onClick={onBack} className="p-3 -ml-3 rounded-full hover:bg-black/5 active:scale-90 transition-transform">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={`w-6 h-6 ${activeTheme.text}`}><path strokeLinecap="round" strokeLinejoin="round" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
@@ -512,7 +516,7 @@ ${chapterText.substring(0, 200000)}
                 <div className="px-4 pb-3 flex gap-3 overflow-x-auto no-scrollbar">
                     {collaborators.map(c => (
                         <button key={c.id} onClick={() => setTargetCharId(c.id)} className={`flex items-center gap-2 px-3 py-1.5 rounded-full border transition-all relative ${targetCharId === c.id ? 'bg-slate-800 text-white border-slate-800' : 'bg-white/50 border-black/5 hover:bg-white text-slate-600'}`}>
-                            <img src={c.avatar} className="w-6 h-6 rounded-full object-cover" />
+                            <TokenImg value={c.avatar} className="w-6 h-6 rounded-full object-cover" />
                             <span className="text-xs font-bold whitespace-nowrap">{c.name}</span>
                             {c.writerPersona && <span className="absolute -top-1 -right-1 w-2 h-2 bg-purple-500 rounded-full border border-white"></span>}
                         </button>
@@ -525,7 +529,7 @@ ${chapterText.substring(0, 200000)}
                 <div className="px-4 py-2 flex items-center justify-between">
                     <div className="flex items-center gap-3 overflow-x-auto no-scrollbar flex-1 mr-4">
                         <div className="flex items-center gap-2 shrink-0">
-                            {targetChar && <img src={targetChar.avatar} className="w-6 h-6 rounded-full object-cover" />}
+                            {targetChar && <TokenImg value={targetChar.avatar} className="w-6 h-6 rounded-full object-cover" />}
                             <span className="text-xs font-bold text-slate-700">{targetChar?.name ? `${targetChar.name}的风格` : '未选择角色'}</span>
                         </div>
                         <div className="flex-1 flex gap-2 overflow-x-auto no-scrollbar">
@@ -573,14 +577,14 @@ ${chapterText.substring(0, 200000)}
                         <div key={seg.id} className={`p-6 rounded-sm shadow-sm leading-loose text-justify text-[17px] relative group transition-all ${activeTheme.paper} ${activeTheme.text} ${isUser ? 'border-l-4 border-slate-300' : ''}`}>
                             {hoverMenu}
                             <div className="absolute -top-3 left-4 bg-white/90 border border-black/5 px-2 py-0.5 rounded text-[9px] font-sans font-bold uppercase tracking-wider text-slate-500 shadow-sm flex items-center gap-1.5">
-                                {isUser ? null : <img src={char?.avatar} className="w-3 h-3 rounded-full object-cover" />}<span>{isUser ? '我 (User)' : char?.name} 执笔</span>{!isUser && seg.meta?.mood && <span className="bg-slate-100 px-1.5 rounded text-[9px] text-slate-600 normal-case">{seg.meta.mood}</span>}
+                                {isUser ? null : <TokenImg value={char?.avatar} className="w-3 h-3 rounded-full object-cover" />}<span>{isUser ? '我 (User)' : char?.name} 执笔</span>{!isUser && seg.meta?.mood && <span className="bg-slate-100 px-1.5 rounded text-[9px] text-slate-600 normal-case">{seg.meta.mood}</span>}
                             </div>
                             <div className="whitespace-pre-wrap">{seg.content}</div>
                         </div>
                     );
                     if (role === 'commenter') return (
                         <div key={seg.id} className={`flex gap-3 max-w-[85%] font-sans ml-auto flex-row-reverse animate-slide-up group relative`}>
-                            <div className="w-8 h-8 rounded-full overflow-hidden shrink-0 border-2 border-white shadow-sm mt-1"><img src={isUser ? userProfile.avatar : char?.avatar} className="w-full h-full object-cover" /></div>
+                            <div className="w-8 h-8 rounded-full overflow-hidden shrink-0 border-2 border-white shadow-sm mt-1"><TokenImg value={isUser ? userProfile.avatar : char?.avatar} className="w-full h-full object-cover" /></div>
                             <div className={`p-3 rounded-xl text-sm shadow-sm relative bg-[#fff9c4] text-slate-700 transform rotate-1 border border-yellow-200/50`}>{hoverMenu}{seg.content}</div>
                         </div>
                     );
@@ -663,7 +667,7 @@ ${chapterText.substring(0, 200000)}
                         const isCollab = activeBook.collaboratorIds.includes(c.id);
                         return (
                             <button key={c.id} onClick={() => setForwardTargets(prev => { const n = new Set(prev); n.has(c.id) ? n.delete(c.id) : n.add(c.id); return n; })} className={`w-full flex items-center gap-3 p-3 rounded-xl border shadow-sm active:scale-[0.98] transition-all text-left ${checked ? 'bg-indigo-50/70 border-indigo-200' : 'bg-white border-slate-100 hover:border-slate-200'}`}>
-                                <img src={c.avatar} className="w-9 h-9 rounded-full object-cover" />
+                                <TokenImg value={c.avatar} className="w-9 h-9 rounded-full object-cover" />
                                 <div className="flex-1 min-w-0">
                                     <div className="font-bold text-sm text-slate-700 flex items-center gap-2">{c.name}{isCollab && <span className="text-[9px] bg-amber-50 text-amber-600 border border-amber-100 px-1.5 py-0.5 rounded-full font-bold">共创者</span>}</div>
                                 </div>
@@ -685,7 +689,7 @@ ${chapterText.substring(0, 200000)}
                                 return (
                                     <div key={seg.id} className={`${activeTheme.paper} p-5 rounded-sm leading-loose text-justify text-[15px] ${activeTheme.text} ${isUser ? 'border-l-4 border-slate-300' : ''}`}>
                                         <div className="text-[9px] font-sans font-bold uppercase tracking-wider text-slate-400 mb-2 flex items-center gap-1.5">
-                                            {!isUser && char && <img src={char.avatar} className="w-3 h-3 rounded-full object-cover" />}
+                                            {!isUser && char && <TokenImg value={char.avatar} className="w-3 h-3 rounded-full object-cover" />}
                                             <span>{isUser ? '我' : char?.name} 执笔</span>
                                         </div>
                                         <div className="whitespace-pre-wrap font-serif">{seg.content}</div>

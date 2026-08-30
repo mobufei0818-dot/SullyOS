@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { applyAssistantPostProcessing, PostProcessCtx, XhsCaches } from './applyAssistantPostProcessing';
 import * as agenticTools from './agenticTools';
+import { DB } from './db';
 
 /**
  * 「连不上」不能说成「没有」。
@@ -169,6 +170,9 @@ describe('小红书：连不上时别当无事发生', () => {
     });
 
     it('XHS_MY_PROFILE unreachable → 交代「打不开」，并明说什么都没看到', async () => {
+        // 正常路径优先读本地角色主页；只有本地索引也读不了时，
+        // 才会回退到真实账号主页并进入 unreachable 分支。
+        vi.spyOn(DB, 'getXhsOwnedPosts').mockRejectedValueOnce(new Error('本地角色主页读取失败'));
         vi.spyOn(agenticTools, 'runXhsMyProfile').mockResolvedValue({
             ok: false, reason: 'unreachable',
         } as any);

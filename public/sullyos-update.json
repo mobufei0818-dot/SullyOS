@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "versionCode": 30408,
+  "versionName": "3.4.8",
+  "apkUrl": "https://github.com/qegj567-cloud/SullyOS/releases/download/android-v3.4.8/SullyOS-Android-v3.4.8.apk",
+  "sha256": "6af6d563dead8d48d88249dcaa9672f2d21d156f60744bff84d1e0bd14317b53",
+  "sizeBytes": 37109938,
+  "publishedAt": "2026-08-29T20:27:28Z",
+  "releaseNotes": [
+    "对齐最新 master 9f720928（含 PR #612）",
+    "升级二进制 Blob 存储、图片去重清理、批量优化与备份恢复",
+    "新增角色协同工作台、协同文件交付与上下文能力",
+    "增强主动消息任务恢复、跨午夜一次性消息与诊断轨迹",
+    "延续固定签名、UnifiedPush / ntfy、Android PDF 导入、Umami 与应用内更新"
+  ]
+}

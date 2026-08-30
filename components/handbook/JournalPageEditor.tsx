@@ -18,6 +18,7 @@ import {
     PencilSimple, Trash, Eye, EyeSlash, ArrowsClockwise,
     FloppyDisk, X,
 } from '@phosphor-icons/react';
+import TokenImg from '../os/TokenImg';
 
 interface Props {
     page: HandbookPage;
@@ -85,8 +86,8 @@ const JournalPageEditor: React.FC<Props> = ({
                 {/* 标题 */}
                 <div className="px-5 pt-2 pb-3 flex items-center gap-3">
                     {char?.avatar && (
-                        <img
-                            src={char.avatar}
+                        <TokenImg
+                            value={char.avatar}
                             alt={char.name}
                             className="rounded-full object-cover shrink-0"
                             style={{ width: 38, height: 38, boxShadow: '0 0 0 2.5px #fff, 0 1px 3px rgba(0,0,0,0.15)' }}

@@ -1,8 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { DB } from '../../utils/db';
-import { Capacitor } from '@capacitor/core';
-import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
-import { Share } from '@capacitor/share';
+import { shareOrDownloadFile } from '../../utils/shareExport';
 
 // 聊天「白框」自定义 CSS 编辑器（Appearance 全局默认 与 单角色定制 共用）。
 // 选择器钩子覆盖顶栏、输入栏、整屏背景与普通消息布局；完整清单见下方 AI_PROMPT。
@@ -33,10 +31,15 @@ const AI_PROMPT = `你是一个 CSS 设计师。我在用一个叫 SullyOS 的�
 - .sully-chat-turn-avatar-slot 每组首条的头像槽（默认 display:none，内部已有正确的双方头像）
 - .sully-chat-turn-avatar      上述头像槽里的头像容器；图片是 .sully-chat-message-avatar-img
 - .sully-bubble-ai / .sully-bubble-user 角色 / 用户气泡
+- .sully-schedule-change      角色修改未来日程后浮出的整张回执
+- .sully-schedule-change-head / -mark / -kicker  回执标题行 / 勾选标记 / 标题文字
+- .sully-schedule-change-list / -row             修改列表 / 单条修改
+- .sully-schedule-change-time / -before / -arrow / -after  时段 / 原计划 / 箭头 / 新计划
+- .sully-schedule-change-shine                    掠过回执的一次性高光
 
 【必须遵守的规范】
 1. 覆盖默认样式必须加 !important（尤其 .sully-chat-buffs button 带内联样式，不加 !important 盖不掉）。
-2. 只允许使用上面的 .sully-chat-* 选择器及其后代/伪元素，禁止写 body、*、div、html 这类全局选择器（会污染其它界面）。
+2. 只允许使用上面的 .sully-chat-* / .sully-bubble-* / .sully-schedule-change* 选择器及其后代/伪元素，禁止写 body、*、div、html 这类全局选择器（会污染其它界面）。
 3. 这是移动端窄屏（宽约 390px），尺寸请克制、用相对单位或小数值。
 4. 顶栏顶部已自动留出状态栏安全区。装饰若要贴最顶部，用 top: calc(var(--safe-top) + 数值)。
 5. 不要 display:none 掉 .sully-chat-back（否则用户无法返回），除非我明确要求。
@@ -331,27 +334,12 @@ const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void
         const dateKey = `${date.getFullYear()}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`;
         const fileName = `sullyos-whitebox-${dateKey}.txt`;
         try {
-            if (Capacitor.isNativePlatform()) {
-                await Filesystem.writeFile({
-                    path: fileName,
-                    data: value,
-                    directory: Directory.Cache,
-                    encoding: Encoding.UTF8,
-                });
-                const uri = await Filesystem.getUri({ directory: Directory.Cache, path: fileName });
-                await Share.share({ title: 'SullyOS 白框样式', files: [uri.uri] });
-                return;
-            }
-
-            const blob = new Blob([value], { type: 'text/plain;charset=utf-8' });
-            const url = URL.createObjectURL(blob);
-            const anchor = document.createElement('a');
-            anchor.href = url;
-            anchor.download = fileName;
-            document.body.appendChild(anchor);
-            anchor.click();
-            anchor.remove();
-            URL.revokeObjectURL(url);
+            await shareOrDownloadFile({
+                content: value,
+                fileName,
+                mimeType: 'text/plain;charset=utf-8',
+                shareTitle: 'SullyOS 白框样式',
+            });
         } catch (error: any) {
             if (error?.name !== 'AbortError') window.alert('TXT 导出失败，请重试。');
         }
@@ -453,6 +441,9 @@ const ChromeCssEditor: React.FC<{ value: string; onChange: (css: string) => void
                 />
                 <div className="mt-1.5 text-[10px] leading-relaxed text-slate-400">
                     可用选择器：<code className="rounded bg-slate-100 px-1 text-slate-500">.sully-chat-header / -avatar / -name / -buffs / -token / -trigger / -back / -status / -inputbar / -panel / -root</code>
+                </div>
+                <div className="mt-1 text-[10px] leading-relaxed text-slate-400">
+                    日程修改动效：<code className="rounded bg-slate-100 px-1 text-slate-500">.sully-schedule-change / -head / -mark / -kicker / -list / -row / -time / -before / -arrow / -after / -shine</code>
                 </div>
             </div>
         </div>

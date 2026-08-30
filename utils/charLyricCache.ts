@@ -107,7 +107,7 @@ export const getCharLyricSnippet = async (
     seed: string,
     lineCount: number = 6,
 ): Promise<string[]> => {
-    if (!songId || !cfg?.workerUrl) return [];
+    if (!songId || !cfg) return [];
     const full = await getFullLyric(cfg, songId);
     if (!full || full.length === 0) return [];
     return pickWindow(full, seed, lineCount);

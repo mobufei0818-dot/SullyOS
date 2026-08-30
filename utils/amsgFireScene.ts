@@ -94,11 +94,16 @@ export const resolveFireSceneSong = (
 /**
  * 渲染 fire 时刻的「此刻在做什么」。没有日程、日程是空表、或者这份日程已经不是今天的了，
  * 一律返回空串（槽位被抹平，模板跟没这回事一样）。
+ *
+ * includeClock 跟着角色的「时间感知」开关走（worker 从 tool_pack 读，同今日节日那条）。
+ * 关掉的角色在前台连「现在几点」都读不到，这里要是照旧写「当前时段：23:00 你正在睡觉」，
+ * 钟就从日程这条缝漏了出去。日程本身照给——它有自己的总开关。
  */
 export const renderFireSceneBlock = (
   scene: AmsgFireScene | null,
   nowMs: number,
   tz: AmsgTzRef,
+  options?: { includeClock?: boolean },
 ): string => {
   if (!scene?.schedule?.slots?.length) return '';
 
@@ -107,7 +112,18 @@ export const renderFireSceneBlock = (
   // 跨天的包整段不用：这是 scene.dateKey 那天的安排，第二天再照着念就是在说昨天的事。
   // 宁缺勿错，跟「实时世界拉不到就整段消失」同一条线。
   if (getLocalDateKey(wallNow) !== scene.dateKey) return '';
-  const scheduleText = buildScheduleInjection(scene.schedule, scene.evolvedNarrative, wallNow).trim();
+  const scheduleText = buildScheduleInjection(
+    scene.schedule,
+    scene.evolvedNarrative,
+    wallNow,
+    {
+      includeClock: options?.includeClock !== false,
+      // 到点主动开口的角色最容易撞上「表上写着睡觉、我却正在给对方发消息」，
+      // 所以这条路也要教。标签由 worker classifier 摘成 directive 随 push 回来、
+      // 客户端落库；落库按 push 的 sentAt 判时段，隔夜的整批丢弃（见 scheduleChange）。
+      includeChangeInstruction: true,
+    },
+  ).trim();
 
   const lines: string[] = [];
   if (scheduleText) lines.push(scheduleText);

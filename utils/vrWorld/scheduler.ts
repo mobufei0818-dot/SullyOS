@@ -21,9 +21,23 @@ export interface VRSchedule {
 
 type ScheduleMap = Record<string, VRSchedule>;
 type LastFireMap = Record<string, number>;
+type FailStreakMap = Record<string, number>;
+
+/** 一轮活动的结局。`skipped` = 压根没调模型（没书没歌、房间被占、角色没接入），不算账。 */
+export type VRSessionOutcome = 'ok' | 'failed' | 'skipped';
 
 const STORAGE_KEY = 'vr_schedules';
 const LAST_FIRE_KEY = 'vr_last_fire';
+const FAIL_STREAK_KEY = 'vr_fail_streak';
+
+/**
+ * 连着失败这么多次，就掐掉这个角色的自主登入。
+ *
+ * 彼方整个跑在后台：令牌被停用、余额耗尽这类「再试也不会好」的故障，用户在界面上
+ * 一点都看不见，只会在几小时后翻调用记录时发现全是红的。攒够这个数就停调度、把角色
+ * 落回未接入，让它自己收手，而不是通宵一轮轮撞下去。
+ */
+export const VR_FAIL_LIMIT = 3;
 
 function load<T>(key: string): T {
     try {
@@ -44,6 +58,15 @@ const loadSchedules = () => load<ScheduleMap>(STORAGE_KEY);
 const saveSchedules = (s: ScheduleMap) => save(STORAGE_KEY, s);
 const loadLastFire = () => load<LastFireMap>(LAST_FIRE_KEY);
 const saveLastFire = (m: LastFireMap) => save(LAST_FIRE_KEY, m);
+const loadFailStreak = () => load<FailStreakMap>(FAIL_STREAK_KEY);
+const saveFailStreak = (m: FailStreakMap) => save(FAIL_STREAK_KEY, m);
+
+function removeFailStreak(charId: string) {
+    const m = loadFailStreak();
+    if (m[charId] === undefined) return;
+    delete m[charId];
+    saveFailStreak(m);
+}
 
 function getLastFire(charId: string): number {
     return loadLastFire()[charId] || 0;
@@ -59,7 +82,7 @@ function removeLastFire(charId: string) {
     saveLastFire(m);
 }
 
-let triggerCallback: ((charId: string, room?: string, letterId?: string) => void | Promise<void>) | null = null;
+let triggerCallback: ((charId: string, room?: string, letterId?: string, manual?: boolean) => void | Promise<void>) | null = null;
 let visibilityListener: (() => void) | null = null;
 let focusListener: (() => void) | null = null;
 let mainThreadTimer: ReturnType<typeof setInterval> | null = null;
@@ -107,6 +130,17 @@ function schedulePreciseTimer() {
     }, delay);
 }
 
+/** 撤掉一个角色的自主登入，连带清掉它的首火时刻和失败计数。 */
+function stopSchedule(charId: string) {
+    const schedules = loadSchedules();
+    delete schedules[charId];
+    saveSchedules(schedules);
+    removeLastFire(charId);
+    removeFailStreak(charId);
+    if (Object.keys(schedules).length === 0) detachListeners();
+    else schedulePreciseTimer();
+}
+
 function handleVisibility() {
     if (document.visibilityState !== 'visible') return;
     checkOverdue();
@@ -143,7 +177,7 @@ function detachListeners() {
 
 export const VRScheduler = {
     /** 注册触发回调（应用启动时调一次）。 */
-    onTrigger(callback: (charId: string, room?: string, letterId?: string) => void | Promise<void>) {
+    onTrigger(callback: (charId: string, room?: string, letterId?: string, manual?: boolean) => void | Promise<void>) {
         triggerCallback = callback;
         attachListeners();
         checkOverdue();
@@ -157,19 +191,45 @@ export const VRScheduler = {
         schedules[charId] = { charId, intervalMs };
         saveSchedules(schedules);
         setLastFire(charId, Date.now());
+        // 重新启用 = 用户已经去处理过（换了 API / 充了值），旧的失败账一笔勾销，
+        // 否则熔断过一次的角色刚开回来就会被上一轮的余额一脚踢停。
+        removeFailStreak(charId);
         attachListeners();
         console.log(`[VRScheduler] Started: ${charId}, every ${clamped}min`);
     },
 
     /** 停止某角色。 */
     stop(charId: string) {
-        const schedules = loadSchedules();
-        delete schedules[charId];
-        saveSchedules(schedules);
-        removeLastFire(charId);
-        if (Object.keys(schedules).length === 0) detachListeners();
-        else schedulePreciseTimer();
+        stopSchedule(charId);
         console.log(`[VRScheduler] Stopped: ${charId}`);
+    },
+
+    /**
+     * 回报一轮活动的结局，用来判断要不要熔断。
+     *
+     * `failed` 累计到 {@link VR_FAIL_LIMIT} 就把调度掐掉并返回 `tripped: true`；
+     * 中间只要成功一次，计数就归零。调用方拿到 `tripped` 后负责把角色落回未接入、
+     * 并告诉用户——调度器只管自己这张表，不碰角色数据。
+     */
+    report(charId: string, outcome: VRSessionOutcome): { tripped: boolean; streak: number } {
+        if (outcome === 'skipped') return { tripped: false, streak: loadFailStreak()[charId] || 0 };
+        if (outcome === 'ok') {
+            removeFailStreak(charId);
+            return { tripped: false, streak: 0 };
+        }
+        const m = loadFailStreak();
+        const streak = (m[charId] || 0) + 1;
+        m[charId] = streak;
+        saveFailStreak(m);
+        if (streak < VR_FAIL_LIMIT) return { tripped: false, streak };
+        stopSchedule(charId);
+        console.warn(`[VRScheduler] 连续 ${streak} 次失败，已停掉自主登入: ${charId}`);
+        return { tripped: true, streak };
+    },
+
+    /** 当前累计的连续失败次数（面板展示用）。 */
+    getFailStreak(charId: string): number {
+        return loadFailStreak()[charId] || 0;
     },
 
     /** 重载后恢复所有计划。 */
@@ -215,6 +275,7 @@ export const VRScheduler = {
             if (!activeIds.has(id)) {
                 delete schedules[id];
                 removeLastFire(id);
+                removeFailStreak(id);
                 changed = true;
             }
         }
@@ -237,6 +298,6 @@ export const VRScheduler = {
     triggerNow(charId: string, room?: string, letterId?: string) {
         setLastFire(charId, Date.now());
         schedulePreciseTimer();
-        if (triggerCallback) void triggerCallback(charId, room, letterId);
+        if (triggerCallback) void triggerCallback(charId, room, letterId, true);
     },
 };

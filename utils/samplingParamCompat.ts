@@ -58,6 +58,20 @@ export function stripSamplingParams(body: Record<string, any>): boolean {
 }
 
 /**
+ * Claude 的 temperature 合法范围是 0..1。官方 OpenAI 兼容层会自动封顶，但不少
+ * 第三方 /chat/completions 中转直接转发到 Messages API，1.1 之类的剧情预设会因此 400。
+ */
+export function clampClaudeTemperature(body: Record<string, any>): boolean {
+    if (!body || typeof body !== 'object') return false;
+    const model = typeof body.model === 'string' ? body.model.toLowerCase() : '';
+    if (!/claude|anthropic/.test(model)) return false;
+    const temperature = Number(body.temperature);
+    if (!Number.isFinite(temperature) || temperature <= 1) return false;
+    body.temperature = 1;
+    return true;
+}
+
+/**
  * 400 报文是否在抱怨采样参数（temperature / top_p / top_k 被废弃 / 不支持）。
  * 用来决定要不要摘掉采样参数重试一次。
  */

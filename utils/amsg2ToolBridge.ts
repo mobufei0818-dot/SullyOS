@@ -313,7 +313,6 @@ async function handleSchedule(args: Record<string, any>, deps: Amsg2ToolDeps): P
     // send_at 是角色那边的墙钟，落盘存排程接口折好的绝对时刻。存原串的话，本地读它的地方
     // （面板卡片、待触发判定、下面这句回话）一律 new Date() 按设备时区解析，异国角色差一个时差。
     firstSendTime: result.firstSendAt,
-    anchorLastUserMsgAt: result.anchorMs,
     source: 'character',
     status: 'scheduled',
     createdAt: Date.now(),

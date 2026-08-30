@@ -14,9 +14,8 @@ const API_ENDPOINT = 'https://v1.apizero.cn/api/video-parse';
 const LS_KEY = 'sully_video_parse_key_v1';
 const REQUEST_TIMEOUT_MS = 20000;
 
-// 内置默认 Key（仓库所有者的 apizero 会员 key，全体用户共享其每日配额）。
-// 注意：仓库公开，这里写什么就等于公开什么——key 泄露/被刷爆时来这里换或清空，
-// 清空后回落匿名调用（5 次/天/IP）。二改用户可在 localStorage 填自己的 key 覆盖。
+// 项目方共享 Key：按产品选择随公开前端一同分发，所有用户共用其额度。
+// 用户仍可在 localStorage 写入自己的 Key 覆盖；清空自定义值后回落到此共享 Key。
 const DEFAULT_VIDEO_PARSE_KEY = 'sk_live_4f53ade361c6c8cbead4395e858c1052e4ea1fc5e49a1a16';
 
 /** 读取生效的 apizero API Key：localStorage 用户自填 > 内置默认 > 匿名（空串）。 */
@@ -156,5 +155,6 @@ export async function parseVideoShareUrl(url: string): Promise<ExtractedWebpage>
     truncated: false,
     fetchedAt: Date.now(),
     video,
+    provider: 'apizero-video',
   };
 }

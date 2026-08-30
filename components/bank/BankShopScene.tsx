@@ -4,6 +4,7 @@ import { BankShopState, CharacterProfile, UserProfile, APIConfig, ShopStaff } fr
 import { SHOP_RECIPES } from './BankGameConstants';
 import BankAssetIcon from './BankAssetIcon';
 import TokenImg from '../os/TokenImg';
+import { isBlobRef } from '../../utils/blobRef';
 import { ContextBuilder } from '../../utils/context';
 import { useOS } from '../../context/OSContext';
 import { DB } from '../../utils/db';
@@ -236,7 +237,7 @@ Language: Chinese.`;
                         <div className="absolute -top-6 left-1/2 -translate-x-1/2 z-20 flex items-center gap-1">
                             <PawPrint className="w-4 h-4 text-pink-500" weight="fill" />
                             {ownerChar && (
-                                <img src={ownerChar.avatar} className="w-4 h-4 rounded-full border border-white shadow-sm" title={`${ownerChar.name}的宠物`} />
+                                <TokenImg value={ownerChar.avatar} className="w-4 h-4 rounded-full border border-white shadow-sm" title={`${ownerChar.name}的宠物`} />
                             )}
                         </div>
                     )}
@@ -251,7 +252,7 @@ Language: Chinese.`;
 
                     {/* Sprite */}
                     <div className={`text-5xl filter drop-shadow-lg transform group-hover:scale-110 transition-transform select-none relative z-10 origin-bottom ${isOwnerVisiting ? 'animate-pulse' : ''}`}>
-                        {s.avatar.startsWith('http') || s.avatar.startsWith('data') ? <img src={s.avatar} className="w-14 h-14 object-contain rounded-lg" /> : s.avatar}
+                        {s.avatar.startsWith('http') || s.avatar.startsWith('data') || isBlobRef(s.avatar) ? <TokenImg value={s.avatar} className="w-14 h-14 object-contain rounded-lg" /> : s.avatar}
                     </div>
 
                     {/* Name Tag */}

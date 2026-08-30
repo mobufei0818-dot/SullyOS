@@ -318,6 +318,65 @@ describe('renderAndPersist XHS mimicked-card fallback', () => {
         expect(text).not.toContain('\u6807\u9898:');
         expect(text).not.toContain('\u4e92\u52a8:');
     }, 20000);
+
+    it('recovers consecutive cards when the next marker is glued to the previous description', async () => {
+        const charId = `c-xhs-mimic-glued-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.instantRender = true;
+        ctx.lastXhsNotesRef = {
+            current: [
+                {
+                    noteId: 'note-doll',
+                    title: '只需发照片定制人偶可撕拉盲盒',
+                    desc: '完整盲盒简介',
+                    likes: 11,
+                    collects: 0,
+                    commentCount: 0,
+                    shareCount: 0,
+                    author: 'StoyTuned小铺',
+                    authorId: 'author-doll',
+                    coverUrl: 'https://example.test/doll.jpg',
+                },
+                {
+                    noteId: 'note-couple-app',
+                    title: '情侣必备的治愈系app',
+                    desc: '完整应用简介',
+                    likes: 991,
+                    collects: 0,
+                    commentCount: 0,
+                    shareCount: 0,
+                    author: '小猫女士',
+                    authorId: 'author-cat',
+                    coverUrl: 'https://example.test/couple.jpg',
+                },
+            ],
+        };
+        const raw = [
+            '[你分享了小红书笔记]',
+            '标题: 只需发照片定制人偶可撕拉盲盒',
+            '作者: StoyTuned小铺',
+            '互动: 11赞 0收藏 0评论 0分享',
+            '简介: 无[你分享了小红书笔记]',
+            '标题: 情侣必备的治愈系app',
+            '作者: 小猫女士',
+            '互动: 991赞 0收藏 0评论 0分享',
+            '简介: 无',
+        ].join('\n');
+
+        await applyAssistantPostProcessing(raw, ctx);
+
+        const msgs = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        const cards = msgs.filter(m => m.type === 'xhs_card');
+        const leakedText = msgs.filter(m => m.type === 'text').map(m => m.content).join('\n');
+        expect(cards).toHaveLength(2);
+        expect(cards.map(card => card.metadata?.xhsNote?.noteId)).toEqual(['note-doll', 'note-couple-app']);
+        expect(cards.map(card => card.metadata?.xhsNote?.coverUrl)).toEqual([
+            'https://example.test/doll.jpg',
+            'https://example.test/couple.jpg',
+        ]);
+        expect(leakedText).not.toContain('分享了小红书笔记');
+        expect(leakedText).not.toContain('991赞');
+    }, 20000);
 });
 
 // push 路径上 LIFE / NEWS_CARD 的副作用改走 worker classifier 的 directive 通道
@@ -393,6 +452,64 @@ describe('SEND_EMOJI 名字对不上', () => {
         expect(bubbles[0].type).toBe('emoji');
         expect(bubbles[0].content).toBe('blob:emoji-lol');
     }, 20000);
+
+    it('模型误写“分类名: 表情名”时恢复为当前可见分类里的真实表情', async () => {
+        const charId = `c-emoji-category-prefix-${Date.now()}`;
+        const ctx = makeCtx(charId, [], [{
+            name: '亲亲额头',
+            url: 'blob:emoji-kiss-forehead',
+            categoryId: 'cat-dull-cat',
+        }]);
+        ctx.categories = [{ id: 'cat-dull-cat', name: '呆猫' }];
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('[[SEND_EMOJI: 呆猫: 亲亲额头]]', ctx);
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(bubbles).toHaveLength(1);
+        expect(bubbles[0].type).toBe('emoji');
+        expect(bubbles[0].content).toBe('blob:emoji-kiss-forehead');
+    }, 20000);
+
+    it('纯名称精确匹配优先，不误伤本来就包含冒号的表情名', async () => {
+        const charId = `c-emoji-colon-name-${Date.now()}`;
+        const ctx = makeCtx(charId, [], [
+            { name: '呆猫: 亲亲额头', url: 'blob:emoji-exact-colon', categoryId: 'cat-other' },
+            { name: '亲亲额头', url: 'blob:emoji-prefixed-fallback', categoryId: 'cat-dull-cat' },
+        ]);
+        ctx.categories = [
+            { id: 'cat-other', name: '其他猫' },
+            { id: 'cat-dull-cat', name: '呆猫' },
+        ];
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('[[SEND_EMOJI: 呆猫: 亲亲额头]]', ctx);
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(bubbles).toHaveLength(1);
+        expect(bubbles[0].type).toBe('emoji');
+        expect(bubbles[0].content).toBe('blob:emoji-exact-colon');
+    }, 20000);
+
+    it('分类前缀存在歧义时不猜 URL，仍保留降级文本', async () => {
+        const charId = `c-emoji-category-ambiguous-${Date.now()}`;
+        const ctx = makeCtx(charId, [], [
+            { name: '挥手', url: 'blob:emoji-wave-a', categoryId: 'cat-a' },
+            { name: '挥手', url: 'blob:emoji-wave-b', categoryId: 'cat-b' },
+        ]);
+        ctx.categories = [
+            { id: 'cat-a', name: '小猫' },
+            { id: 'cat-b', name: '小猫' },
+        ];
+        ctx.instantRender = true;
+
+        await applyAssistantPostProcessing('[[SEND_EMOJI: 小猫: 挥手]]', ctx);
+
+        const bubbles = (await DB.getRecentMessagesByCharId(charId, 50)).filter(m => m.role === 'assistant');
+        expect(bubbles).toHaveLength(1);
+        expect(bubbles[0].type).toBe('text');
+        expect(bubbles[0].content).toBe('[表情：小猫: 挥手]');
+    }, 20000);
 });
 
 // 模型偶尔会照抄历史/UI 里的人类可读单括号摘要，而不是 prompt 要求的双括号机器指令。
@@ -441,3 +558,97 @@ describe('动作指令单括号掉格式兜底', () => {
         expect(bubbles.filter(m => m.type === 'text')).toHaveLength(0);
     }, 20000);
 });
+
+// 主动消息把「角色说出口」和「客户端落库」拉开了距离：一条 push 可以在收件箱里躺一夜。
+// 日程改动必须按说出口那一刻判，所以 ctx 上有个 spokenAt，由 activeMsgRuntime 传
+// push 的 sentAt。这条钉的是**接线**（ctx 字段真的被日程那一步读到了），
+// 判定规则本身在 scheduleChange.test.ts 里钉。
+describe('ctx.spokenAt — 日程改动按说出口那一刻判', () => {
+    const dateKeyOf = (d: Date) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    const seedSchedule = async (charId: string, when: Date) => {
+        const key = dateKeyOf(when);
+        await DB.saveDailySchedule({
+            id: `${charId}_${key}`,
+            charId,
+            date: key,
+            generatedAt: new Date(when.getFullYear(), when.getMonth(), when.getDate(), 8).getTime(),
+            slots: [
+                { startTime: '08:00', activity: '起床' },
+                { startTime: '22:00', activity: '睡觉' },
+            ],
+        } as any);
+        return key;
+    };
+
+    const tag = '[[ACTION:CHANGE_SCHEDULE | 22:00 | 陪你聊天]]';
+
+    it('传了昨天的 spokenAt → 今天的表不动（隔夜 push 补收）', async () => {
+        const charId = 'c-spoken-at-stale';
+        const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const todayKey = await seedSchedule(charId, new Date());
+        await seedSchedule(charId, yesterday);
+
+        const ctx = makeCtx(charId, []);
+        await applyAssistantPostProcessing(`睡不着，陪你聊会儿。\n${tag}`, {
+            ...ctx,
+            spokenAt: yesterday.getTime(),
+        });
+
+        const today = await DB.getDailySchedule(charId, todayKey);
+        expect(today?.slots[1].activity).toBe('睡觉');
+    });
+
+    it('不传 spokenAt（本地聊天）→ 按现在判，照常落库', async () => {
+        const charId = 'c-spoken-at-live';
+        const now = new Date();
+        const todayKey = await seedSchedule(charId, now);
+
+        const ctx = makeCtx(charId, []);
+        await applyAssistantPostProcessing(`那今晚不睡了。\n${tag}`, ctx);
+
+        const today = await DB.getDailySchedule(charId, todayKey);
+        // 22:00 之前跑：那条是未来，可改；22:00 之后跑：那条是当前时段，也可改。
+        expect(today?.slots[1].activity).toBe('陪你聊天');
+    });
+
+    // 隔夜补收整批不落，是日历日门槛按设计工作，不是失败。走告知通道的话，用户会收到
+    // 一条红色的「没能改上」，而送达其实成功了；主动消息那侧还会把它记进「送达失败」，
+    // 指标从此混着一堆正常结果。
+    it('隔夜那批不落地时不走告知通道（那不是失败）', async () => {
+        const charId = 'c-spoken-at-crossday-silent';
+        const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        await seedSchedule(charId, new Date());
+        await seedSchedule(charId, yesterday);
+
+        const ctx = makeCtx(charId, []);
+        const notifyScheduleChangeFailed = vi.fn();
+        await applyAssistantPostProcessing(`睡不着，陪你聊会儿。\n${tag}`, {
+            ...ctx,
+            spokenAt: yesterday.getTime(),
+            hooks: { ...ctx.hooks, notifyScheduleChangeFailed },
+        });
+
+        expect(notifyScheduleChangeFailed).not.toHaveBeenCalled();
+        expect(ctx.hooks.addToast).not.toHaveBeenCalled();
+    });
+
+    // 反向守卫：真没落地（今天的表里没有对得上的时段）照旧要说，而且要把具体原因
+    // 带出去——那个 note 是界面上那句话的来源，吞掉的话三种原因会塌成同一句。
+    it('今天的表里没有对得上的时段时，带着原因走告知通道', async () => {
+        const charId = 'c-spoken-at-noslot';
+        await seedSchedule(charId, new Date());
+
+        const ctx = makeCtx(charId, []);
+        const notifyScheduleChangeFailed = vi.fn();
+        await applyAssistantPostProcessing(
+            '换个时间。\n[[ACTION:CHANGE_SCHEDULE | 03:15 | 陪你聊天]]',
+            { ...ctx, hooks: { ...ctx.hooks, notifyScheduleChangeFailed } },
+        );
+
+        expect(notifyScheduleChangeFailed).toHaveBeenCalledTimes(1);
+        expect(notifyScheduleChangeFailed.mock.calls[0][0]).toContain('没有找到对得上的时段');
+    });
+});
+

@@ -3,6 +3,7 @@ import { CharacterProfile, UserProfile, DailySchedule } from '../types';
 import { normalizeUserImpression } from './impression';
 import { isScheduleFeatureOn } from './scheduleFeature';
 import { buildScheduleInjection as buildScheduleInjectionText } from './scheduleInjection';
+import { TIME_FRAMING_CONVERSATIONAL } from './timeFramingNote';
 import { resolveCharTimeZone, nowInTimeZone, tzAwarenessNote, interactionGapNote } from './timezone';
 import {
     formatWorldbookSection,
@@ -119,6 +120,8 @@ export const ContextBuilder = {
             lastInteractionTs?: number;
             /** 抑制整段时间感知（当前时间/时差/距上次联系）。见面纯架空（dateTimeAwarenessEnabled=false）时用。 */
             skipTimeAwareness?: boolean;
+            /** 正有人在跟角色实时对话（私聊 / 见面）。见 buildTimeAwarenessBlock 同名字段。 */
+            conversational?: boolean;
             /** Recent messages used to activate keyword-based worldbook entries. */
             worldbookMessages?: WorldbookScanMessage[];
         },
@@ -345,7 +348,16 @@ export const ContextBuilder = {
      */
     buildTimeAwarenessBlock: (
         char: CharacterProfile,
-        timeOptions?: { lastInteractionTs?: number; skipTimeAwareness?: boolean },
+        timeOptions?: {
+            lastInteractionTs?: number;
+            skipTimeAwareness?: boolean;
+            /**
+             * 这次注入是不是「正有人在跟角色说话」（私聊、见面这类实时对话）。
+             * 只有这时才补那句语境框定，见下方注释。默认 false：日程 / 歌单 / 攻略 /
+             * 手册 / 小剧场这些生成器同样走 buildCoreContext，但那边并没有人在对话。
+             */
+            conversational?: boolean;
+        },
     ): string => {
         // skipTimeAwareness：见面纯架空时由调用方传入，彻底抑制时间注入（修「线下时间感知」关掉后仍漏时间）。
         if (char.timeAwarenessEnabled === false || timeOptions?.skipTimeAwareness) return '';
@@ -362,6 +374,12 @@ export const ContextBuilder = {
         const timeStr = `${h.toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`;
         let context = `### 当前时间 (Now)\n`;
         context += `现在是 ${dateStr} ${dayNames[now.getDay()]} ${timeOfDay} ${timeStr}。请据此自然地拥有真实的时间观念（早晚作息、工作日/周末、距离上次互动多久等），不要凭空假设时间。\n`;
+        // 报时后面那句语境框定（这句话本身和「为什么只在对话时给」都在
+        // utils/timeFramingNote.ts）。即时对话走的是云端那条路，时间由 worker 到点补，
+        // 那边引的是同一份常量——同一句话不抄两遍，免得两条路上的角色分寸不一样。
+        if (timeOptions?.conversational) {
+            context += `${TIME_FRAMING_CONVERSATIONAL}\n`;
+        }
         const tzNote = tzAwarenessNote(charTz);
         if (tzNote) context += `${tzNote.trim()}\n`;
         // 距离上次联系多久（统一口径）：传了 lastInteractionTs 才注入。
@@ -382,7 +400,7 @@ export const ContextBuilder = {
         options?: {
             includeDetailedMemories?: boolean;
             memoryPalaceContext?: string;
-            timeOptions?: { lastInteractionTs?: number; skipTimeAwareness?: boolean };
+            timeOptions?: { lastInteractionTs?: number; skipTimeAwareness?: boolean; conversational?: boolean };
         },
     ): string => {
         let context = ContextBuilder.buildTimeAwarenessBlock(char, options?.timeOptions);

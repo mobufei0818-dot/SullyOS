@@ -109,6 +109,14 @@ export interface DigestResult {
     distilled: DigestEntry[];      // 回看经历的二次领悟→门牌候选（category=目标门牌）
     /** 本次消化实际更新的门牌房间（含回填/兜底），供 UI 摘要展示 */
     plateUpdated?: string[];
+    /**
+     * 门牌整理在云端跑着、结果还没落地。
+     *
+     * 手动消化时用户是**在场**的：他刚点了「消化」，盯着「正在整理门牌…」一路看到结果
+     * 摘要。整理搬上云之后这一步就是「交出去就返回」，门牌得过几分钟才动——不说这一句
+     * 的话，他看到的是整理阶段一闪而过、门牌纹丝不动，跟没跑过一模一样。
+     */
+    plateCloudPending?: boolean;
 }
 
 // ─── 轮数计数 & 自动触发 ─────────────────────────────
@@ -773,6 +781,7 @@ async function saveDigestReport(
     result: DigestResult,
     plateSubmissions: Partial<Record<PlateRoom, string[]>>,
     plateUpdated: PlateRoom[],
+    plateCloudPending = false,
 ): Promise<void> {
     const preview = (s: string) => s.replace(/\s+/g, ' ').trim().slice(0, 100);
     const userLabel = userName || '用户';
@@ -822,6 +831,7 @@ async function saveDigestReport(
             outcomes,
             plateSubmissions: submissions,
             plateUpdated,
+            plateCloudPending,
         };
         await DigestReportDB.save(report);
     } catch (e: any) {
@@ -915,22 +925,32 @@ export async function runCognitiveDigestion(
     // 本次消化提炼的概括（plateSubmissions）作为高优先级原料一并送入。
     // （历史回填不在这里跑——只走记忆宫殿的手动按钮，每按一次清一小段）
     let plateUpdated: PlateRoom[] = [];
+    // 整理交给云端跑了、结果还在路上。要跟「一块都没动」分开记：不分的话消化日志会写
+    // 「本次提交的候选未合并进门牌」，而它其实正在用户自己的 Worker 上跑，几分钟后就落地。
+    let platesCloudPending = false;
     try {
         onProgress?.('正在整理门牌…');
         const { consolidateAllPlates } = await import('./roomPlates');
         // sinceTs = 上次消化时间：门牌原料以"这段时间的新增"优先，老节点只留少量高分锚点
-        const consolidated = (await consolidateAllPlates(charId, charName, userName, llmConfig, plateSubmissions, getLastDigestTs(charId))).updated;
-        for (const r of consolidated) if (!plateUpdated.includes(r)) plateUpdated.push(r);
+        const consolidated = await consolidateAllPlates(charId, charName, userName, llmConfig, plateSubmissions, getLastDigestTs(charId));
+        platesCloudPending = consolidated.cloudPending === true;
+        for (const r of consolidated.updated) if (!plateUpdated.includes(r)) plateUpdated.push(r);
         if (plateUpdated.length > 0) {
             console.log(`🚪 [Digest] 门牌整理完成：${plateUpdated.join(', ')}`);
+        }
+        if (platesCloudPending) {
+            console.log('🚪 [Digest] 门牌整理已交云端，结果稍后落地');
         }
     } catch (e: any) {
         console.warn(`🚪 [Digest] 门牌整理失败（不影响消化结果）: ${e?.message || e}`);
     }
     result.plateUpdated = plateUpdated;
+    // 手动消化的调用方要拿它跟用户交代一句（见 MemoryPalaceApp 的结果摘要）：
+    // 整理是交给云端跑的，这会儿门牌还没动，不说清楚就跟没跑过一个样。
+    result.plateCloudPending = platesCloudPending;
 
     // 消化日志：这次到底消化了什么，可在记忆宫殿 App 回看
-    await saveDigestReport(charId, trigger, userName, material, result, plateSubmissions, plateUpdated);
+    await saveDigestReport(charId, trigger, userName, material, result, plateSubmissions, plateUpdated, platesCloudPending);
 
     // 标记时间（计数器已在进场时归零）
     markDigested(charId);

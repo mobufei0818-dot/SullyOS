@@ -15,7 +15,7 @@
  *  7. [[INNER_STATE:...]] 兜底剥
  *  8. 双语 <翻译><原文>...<译文>... 拆为单独 bubble
  *  9. ChatParser.splitResponse — 拆 [[SEND_EMOJI:]]
- * 10. --- 分块 + ChatParser.chunkText (换行 / CJK 空格)
+ * 10. --- 分块 + ChatParser.chunkText (只按显式换行)
  * 11. per-chunk 引用解析 ([[QUOTE:]]/[QUOTE:]/[回复 "..."]) → replyTo
  * 12. hasDisplayContent + per-chunk sanitize
  * 13. 拟人打字延迟 (setTimeout)
@@ -25,13 +25,15 @@
  * Phase 2 会让 worker 端把识别出的副作用 (RECALL/SEARCH/...) 结构化传 directives, 这里只重放。
  */
 
-import { CharacterProfile, UserProfile, Message, Emoji, RealtimeConfig } from '../types';
+import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, RealtimeConfig, GroupProfile } from '../types';
 import { DB } from './db';
 import { ChatParser, type FrozenMusicSong } from './chatParser';
 import { resolveCharTimeZone } from './timezone';
 import { NotionManager, FeishuManager, XhsNote } from './realtimeContext';
 import { enqueuePendingDiary, removePendingDiary } from './pendingDiary';
 import { parseXhsCount, XhsMcpClient } from './xhsMcpClient';
+import { extractPublishedNoteId, ownedPostToNote } from './xhsFreeRoamOwnership';
+import { selectOwnedPostsForReference } from './xhsOwnedPostReference';
 import { safeFetchJson } from './safeApi';
 import { extractHtmlBlocks } from './htmlPrompt';
 import {
@@ -49,8 +51,30 @@ import {
 } from './agenticTools';
 import { getLocalDateKey } from './localDate';
 import { normalizeAssistantActionFormatting } from './assistantActionFormat';
+import { markAmsgStateDirty } from './amsgStateSync';
+import { announceScheduleChanges, applyAssistantScheduleChanges } from './scheduleChange';
+import { isBlobRef } from './blobRef';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
+
+/**
+ * 引用回复的内容快照 —— 写进 `replyTo.content`，界面上就是引用气泡里那一小行。
+ *
+ * 被引用的那条是图片 / 表情时给占位符，不能截原值：图片存的是 `blobref:<id>` 令牌，
+ * 截前 10 个字刚好是 `blobref:b_`。messages 表是 Blob 孤儿清理的引用面（utils/blobGc.ts
+ * 把每条消息 JSON.stringify 后交给 SDK 扫），SDK 从这半截前缀提取出来的 id 是它生成的
+ * 每一个 id 的公共前缀，于是判定「引用面像是被截断过，不安全」→ 整库豁免，一个 Blob 都不删，
+ * 而且不报任何错（唯一能察觉的信号是 runGc 返回值里的 keptBoundary）。
+ */
+export function buildReplySnapshotContent(msg: { type?: string; content: string }): string {
+    const content = msg.content || '';
+    const trimmed = content.trim();
+    // 值形态判断跟 chatPrompts 的 isMediaValue 同义：data: / http(s) / blobref 令牌都是"一张图"
+    const looksLikeMedia = /^(data:|https?:\/\/)/i.test(trimmed) || isBlobRef(trimmed);
+    if (msg.type === 'emoji') return '[表情包]';
+    if (msg.type === 'image' || looksLikeMedia) return '[图片]';
+    return content.length > 10 ? content.slice(0, 10) + '...' : content;
+}
 
 /** 第一遍粗洗 — 剥 <think> / 时间戳 / 历史里漏出的 [聊天]/[通话]/[约会] / 表情包反向 tag */
 const normalizeAiContent = (raw: string): string => {
@@ -66,6 +90,48 @@ const normalizeAiContent = (raw: string): string => {
     return cleaned;
 };
 
+/**
+ * 模型偶尔会把按分类展示的清单 `呆猫: [亲亲额头]` 抄成
+ * `[[SEND_EMOJI: 呆猫: 亲亲额头]]`。先保留既有的纯名称精确匹配；只有失败后，
+ * 才把前缀当作“当前角色可见分类名”解析，并且仅在候选唯一时接受。
+ * 这样不会误伤本来就含冒号的表情名，也不会在同名分类/同名表情间猜 URL。
+ */
+const resolveEmojiForSend = (
+    rawName: string,
+    emojis: Emoji[],
+    categories: EmojiCategory[] = [],
+): Emoji | undefined => {
+    const name = rawName.trim();
+    const exact = emojis.find(emoji => emoji.name === name);
+    if (exact) return exact;
+
+    const separator = name.match(/^(.+?)\s*[:：]\s*(.+)$/u);
+    if (!separator) return undefined;
+    const categoryName = separator[1].trim();
+    const emojiName = separator[2].trim();
+    if (!categoryName || !emojiName) return undefined;
+
+    const categoryIds = new Set(categories.map(category => category.id));
+    const candidates: Emoji[] = [];
+    for (const category of categories) {
+        if (category.name !== categoryName) continue;
+        candidates.push(...emojis.filter(emoji => (
+            emoji.categoryId === category.id && emoji.name === emojiName
+        )));
+    }
+    // buildEmojiContext 给无分类表情使用“通用”，给找不到分类定义的残留使用“其他”。
+    if (categoryName === '通用') {
+        candidates.push(...emojis.filter(emoji => !emoji.categoryId && emoji.name === emojiName));
+    } else if (categoryName === '其他') {
+        candidates.push(...emojis.filter(emoji => (
+            !!emoji.categoryId && !categoryIds.has(emoji.categoryId) && emoji.name === emojiName
+        )));
+    }
+
+    const unique = candidates.filter((candidate, index) => candidates.indexOf(candidate) === index);
+    return unique.length === 1 ? unique[0] : undefined;
+};
+
 interface MimickedXhsShareBlock {
     title: string;
     author: string;
@@ -79,7 +145,15 @@ const MIMICKED_XHS_SHARE_RE = /(^|\r?\n)[ \t]*\[[^\]\r\n]{0,32}分享了小红�
 
 const extractMimickedXhsShares = (content: string): { cleanedContent: string; shares: MimickedXhsShareBlock[] } => {
     const shares: MimickedXhsShareBlock[] = [];
-    const cleanedContent = content.replace(
+    // Some models glue the next history-shaped card directly after the previous
+    // description (`简介: 无[你分享了小红书笔记]`). Put the marker back on its own
+    // line before scanning so every card is recovered instead of leaking the
+    // second card as five ordinary chat bubbles.
+    const normalizedBlocks = content.replace(
+        /([^\r\n])(\[[^\]\r\n]{0,32}分享了小红书笔记\])/gu,
+        '$1\n$2',
+    );
+    const cleanedContent = normalizedBlocks.replace(
         MIMICKED_XHS_SHARE_RE,
         (_match, leadingBreak: string, title: string, author: string, interactionText: string, desc: string) => {
             shares.push({
@@ -91,7 +165,7 @@ const extractMimickedXhsShares = (content: string): { cleanedContent: string; sh
             return leadingBreak || '';
         },
     ).replace(/\n{3,}/g, '\n\n').trim();
-    return { cleanedContent, shares };
+    return { cleanedContent: shares.length > 0 ? cleanedContent : content, shares };
 };
 
 const normalizeXhsCardKey = (value: string): string => String(value || '')
@@ -106,7 +180,13 @@ const parseMimickedXhsCount = (interactionText: string, label: string): number =
 };
 // XHS side-effect helpers (POKE-style: 不抽到 agenticTools, 留给 Phase 2 Round 2 的 directive 重放)
 
-async function xhsPublish(conf: { mcpUrl: string }, title: string, content: string, tags: string[]): Promise<{ success: boolean; noteId?: string; message: string }> {
+async function xhsPublish(
+    conf: { mcpUrl: string },
+    owner: Pick<CharacterProfile, 'id' | 'name'>,
+    title: string,
+    content: string,
+    tags: string[],
+): Promise<{ success: boolean; noteId?: string; message: string }> {
     let images: string[] = [];
     try {
         const stockImgs = await DB.getXhsStockImages();
@@ -124,7 +204,26 @@ async function xhsPublish(conf: { mcpUrl: string }, title: string, content: stri
     } catch { /* ignore stock failures */ }
 
     const r = await XhsMcpClient.publishNote(conf.mcpUrl, { title, content, tags, images: images.length > 0 ? images : undefined });
-    return { success: r.success, noteId: r.data?.noteId, message: r.error || (r.success ? '发布成功' : '发布失败') };
+    const noteId = r.success ? extractPublishedNoteId(r) : '';
+    if (r.success && noteId) {
+        const now = Date.now();
+        try {
+            await DB.saveXhsOwnedPost({
+                id: `${owner.id}:${noteId}`,
+                characterId: owner.id,
+                noteId,
+                title: title || '无标题',
+                body: content,
+                tags,
+                publishedAt: now,
+                updatedAt: now,
+            });
+        } catch (error) {
+            // 远端已经发布成功，不能因为本地索引写入失败把它误报成“发帖失败”。
+            console.warn('[XHS] 发帖成功，但保存角色主页索引失败:', error);
+        }
+    }
+    return { success: r.success, noteId: noteId || undefined, message: r.error || (r.success ? '发布成功' : '发布失败') };
 }
 
 async function xhsComment(conf: { mcpUrl: string }, noteId: string, content: string, xsecToken?: string): Promise<{ success: boolean; message: string }> {
@@ -162,6 +261,7 @@ export type PostProcessDirective =
     | { type: 'transfer_accept' }
     | { type: 'transfer_return' }
     | { type: 'add_event'; title: string; date: string }
+    | { type: 'change_schedule'; time: string; activity: string }
     | { type: 'schedule_message'; time: string; text: string }
     // song 是主动消息 2.0 的定时路径后补的「角色说的是哪首歌」（见 chatParser 的
     // FrozenMusicSong）；标签里只有歌单名带不动它，所以单独走 directive 字段。
@@ -212,6 +312,9 @@ function reconstructDirectiveTags(directives: PostProcessDirective[] | undefined
                 break;
             case 'add_event':
                 parts.push(`[[ACTION:ADD_EVENT|${d.title}|${d.date}]]`);
+                break;
+            case 'change_schedule':
+                parts.push(`[[ACTION:CHANGE_SCHEDULE|${d.time}|${d.activity}]]`);
                 break;
             case 'schedule_message':
                 parts.push(`[schedule_message | ${d.time} | fixed | ${d.text}]`);
@@ -317,13 +420,35 @@ export interface PostProcessHooks {
     updateTokenUsage?: (data: any, msgCount: number, pass: string) => void;
     /** 给 ChatParser.parseAndExecuteActions 用的音乐钩子 */
     musicHooks?: PostProcessMusicHooks;
+    /**
+     * 日程改动没能落地时的告知出口。不传就走 addToast（本地聊天：用户正看着屏幕，
+     * 一条 toast 就够）。
+     *
+     * 主动消息路径必须传：那条路上的 addToast 是 console.log（推送随时到达，用户多半
+     * 不在看这个角色，狂弹 toast 反而更糟），于是「角色说今晚不睡了、日程卡还写着睡觉」
+     * 这件事对用户是完全无声的。那边把它接到 active-msg-process-failed 上——已有的
+     * 可见通道，自带每角色 60 秒节流。
+     */
+    notifyScheduleChangeFailed?: (note: string) => void;
 }
 
 export interface PostProcessCtx {
     char: CharacterProfile;
     userProfile: UserProfile;
     emojis: Emoji[];
+    /** 已按当前角色可见性过滤的分类；用于容错解析“分类名: 表情名”。 */
+    categories?: EmojiCategory[];
     realtimeConfig?: RealtimeConfig;
+    /** 日程被角色改写后刷新主动消息 fire_pack；旧调用方可不传。 */
+    groups?: GroupProfile[];
+    /**
+     * 这段话**说出口**的时刻（ms）。只有日程改动用得上：它要按角色说这句话的那一刻
+     * 判「哪条时段还能改」，而不是按处理它的这一刻。本地聊天两者差几秒、不用传；
+     * 主动消息路径必须传 push 的 sentAt——用户隔夜才打开 App 时，昨晚那句
+     * 「22:00 改成陪你聊天」不该落到今天的 22:00 上（scheduleChange 那边还有一道
+     * 日历日门槛兜底，隔天的整批丢弃）。
+     */
+    spokenAt?: number;
     /** 上下文消息窗 — 用来匹配 quote 目标 */
     contextMsgs: Message[];
     /** 发给 API 的完整 messages 数组 — 2nd-pass LLM 调用要带上 */
@@ -403,6 +528,8 @@ export async function applyAssistantPostProcessing(
         userProfile,
         emojis,
         realtimeConfig,
+        groups,
+        spokenAt,
         contextMsgs,
         fullMessages,
         initialData,
@@ -429,6 +556,7 @@ export async function applyAssistantPostProcessing(
     const {
         setMessages,
         addToast,
+        notifyScheduleChangeFailed,
         setRecallStatus = () => {},
         setSearchStatus = () => {},
         setDiaryStatus = () => {},
@@ -501,9 +629,59 @@ export async function applyAssistantPostProcessing(
     // 局部 data 副本 — 后续 2nd-pass 会覆盖, 模仿旧版的 let data 行为
     let data: any = initialData;
 
+    let scheduleFailureNotified = false;
+    // 这句话**说出口**的时刻。本地聊天没传就是「现在」；主动消息传 push 的 sentAt。
+    const utteranceAt = typeof spokenAt === 'number' && Number.isFinite(spokenAt)
+        ? new Date(spokenAt)
+        : new Date();
+    /**
+     * `at` 是这段文字说出口的时刻，由调用处按来源给：首轮正文用 utteranceAt，二轮
+     * LLM 产出的那段用「现在」——它是刚刚生成的，跟原始那句话隔着几次工具往返，
+     * 拿旧钟去判会把新写的日程改动当成隔夜的整批丢掉。
+     */
+    const consumeScheduleChanges = async (content: string, at: Date): Promise<string> => {
+        const result = await applyAssistantScheduleChanges(content, char, at);
+        if (result.changes.length > 0 && result.schedule) {
+            // 本地聊天直接复用 caller 的 groups；主动消息路径只在真的改了日程时读一次，
+            // 不给每一条普通 push 平添 IndexedDB 查询和新的失败点。
+            const syncGroups = groups ?? await DB.getGroups().catch(() => undefined);
+            // realtimeConfig 缺席也照打脏：快照里它本来就是可选的，而「没开过实时设置」
+            // 就是默认状态（localStorage 里压根没这个键）。少打这一次脏，云端 fire_pack
+            // 会一直留着旧日程，下一次主动消息还在念角色刚说过不做的那件事。
+            if (syncGroups) markAmsgStateDirty({ char, userProfile, groups: syncGroups, realtimeConfig });
+            announceScheduleChanges(char.id, result.schedule, result.changes);
+        }
+        if (!scheduleFailureNotified
+            && result.changes.length === 0
+            && (result.malformedCount > 0 || result.rejectedCount > 0)) {
+            scheduleFailureNotified = true;
+            if (result.rejectedReason === 'cross-day') {
+                // 隔夜补收：角色昨晚说的话，今天这张表本来就不该跟着动。这是日历日门槛
+                // 按设计工作，不是失败——弹提示会让用户以为出了错，接到送达失败那条通道
+                // 上还会把「主动消息送达失败」的指标撑起来（送达其实成功了）。留一行日志
+                // 就够，界面上什么都不用说：用户看到的消息和今天的日程表本来就不矛盾。
+                console.info('[schedule-change] 这批改动是之前说的，今天的表不动', {
+                    charId: char.id,
+                    count: result.rejectedCount,
+                });
+            } else {
+                // 剩下两种才是真没落地。两种原因分开讲：一种是标签认出来了但今天的表里
+                // 没有对得上的时段，一种是标签本身就没写对，用户能做的事不一样。
+                const failureNote = result.rejectedCount > 0
+                    ? '日程修改没有找到对得上的时段，已安全跳过'
+                    : '日程修改的格式没认出来，已安全跳过';
+                if (notifyScheduleChangeFailed) notifyScheduleChangeFailed(failureNote);
+                else addToast(failureNote, 'info');
+            }
+        }
+        return result.cleanedText;
+    };
+
     // ─── Step 1: 初次粗洗 ───
     let aiContent = replayedTagPrefix ? `${replayedTagPrefix}${rawAiContent}` : rawAiContent;
     aiContent = normalizeAiContent(aiContent);
+    // 先于 lead-in / 二轮渲染消费：否则控制标签会作为普通气泡短暂闪给用户看。
+    aiContent = await consumeScheduleChanges(aiContent, utteranceAt);
     // 在任何 lead-in/二轮渲染之前先剥掉仿卡片文本，防止它被 chunkText 拆成灰色普通气泡。
     const mimickedXhsShares = extractMimickedXhsShares(aiContent);
     aiContent = mimickedXhsShares.cleanedContent;
@@ -564,7 +742,7 @@ export async function applyAssistantPostProcessing(
         // 降级文案跟横幅那边（sanitizeIntoSegments 的 [表情：x]）对齐，锁屏看到什么点进去就是什么。
         const sendEmojiBubble = async (name: string): Promise<void> => {
             await typingPause(Math.random() * 500 + 300);
-            const foundEmoji = emojis.find(e => e.name === name);
+            const foundEmoji = resolveEmojiForSend(name, emojis, ctx.categories);
             if (foundEmoji) {
                 await persistMessage({ charId: char.id, role: 'assistant', type: 'emoji', content: foundEmoji.url, metadata: takeMeta(mcdInheritMeta) } as any);
             } else {
@@ -601,8 +779,7 @@ export async function applyAssistantPostProcessing(
             // 兜底：精确匹配失败但角色明确想引用 → 取最近一条用户文字消息，避免空引用
             if (!targetMsg) targetMsg = users.filter((m: Message) => m.type === 'text' || !m.type).slice(-1)[0] || users.slice(-1)[0];
             if (!targetMsg) return undefined;
-            const truncated = targetMsg.content.length > 10 ? targetMsg.content.slice(0, 10) + '...' : targetMsg.content;
-            return { id: targetMsg.id, content: truncated, name: userProfile.name };
+            return { id: targetMsg.id, content: buildReplySnapshotContent(targetMsg), name: userProfile.name };
         };
 
         // Quote/Reply 目标 (双语路径用)
@@ -1483,7 +1660,7 @@ export async function applyAssistantPostProcessing(
         setXhsStatus(`正在发布小红书: ${postTitle}...`);
 
         try {
-            const result = await xhsPublish(xhsConf, postTitle, postContent, postTags);
+            const result = await xhsPublish(xhsConf, char, postTitle, postContent, postTags);
             if (result.success) {
                 console.log('📕 [XHS] 发布成功:', result.noteId);
                 const tagsStr = postTags.length > 0 ? ` #${postTags.join(' #')}` : '';
@@ -1651,7 +1828,41 @@ export async function applyAssistantPostProcessing(
         setXhsStatus('正在查看小红书主页...');
 
         try {
-            const xmpr = await runXhsMyProfile({}, agenticCtx);
+            let xmpr: Awaited<ReturnType<typeof runXhsMyProfile>>;
+            try {
+                const ownedPosts = await DB.getXhsOwnedPosts(char.id);
+                const latestUserMessage = [...fullMessages].reverse().find(message => message?.role === 'user');
+                const latestUserText = typeof latestUserMessage?.content === 'string'
+                    ? latestUserMessage.content
+                    : Array.isArray(latestUserMessage?.content)
+                        ? latestUserMessage.content.map((part: any) => part?.text || '').join('\n')
+                        : '';
+                const selectedPosts = selectOwnedPostsForReference(ownedPosts, latestUserText, 8);
+                const localNotes = selectedPosts.map(post => ownedPostToNote(post, char.name) as XhsNote);
+                for (const note of localNotes) {
+                    if (note.xsecToken) xsecTokenCacheRef.set(note.noteId, note.xsecToken);
+                    if (note.title) ctx.xhsCaches.noteTitleCache.set(note.noteId, note.title);
+                }
+                if (localNotes.length > 0) lastXhsNotesRef.current = localNotes;
+                const feedsStr = selectedPosts.length > 0
+                    ? selectedPosts.map((post, index) => {
+                        const published = new Date(post.publishedAt).toLocaleString();
+                        return `${index + 1}. [noteId=${post.noteId}]「${post.title || '无标题'}」· 发布于 ${published} (${post.likes || 0}赞 ${post.commentCount || 0}评论)\n   ${post.body || '（无正文）'}`;
+                    }).join('\n\n')
+                    : '（这个角色的主页还没有已归属的笔记）';
+                xmpr = {
+                    ok: true,
+                    nickname: char.name,
+                    userId: '',
+                    profileStr: `角色独立主页：共 ${ownedPosts.length} 条笔记。真实账号可能与其他角色共用。`,
+                    feedsStr,
+                    gotProfile: true,
+                    notes: localNotes,
+                };
+            } catch (localProfileError) {
+                console.warn('[XHS] 角色主页读取失败，回退到真实账号主页:', localProfileError);
+                xmpr = await runXhsMyProfile({}, agenticCtx);
+            }
 
             if (xmpr.ok) {
                 const { nickname, userId, profileStr, feedsStr, gotProfile } = xmpr;
@@ -1664,7 +1875,7 @@ export async function applyAssistantPostProcessing(
                 const xhsMessages = [
                     ...fullMessages,
                     { role: 'assistant', content: cleanedForXhs },
-                    { role: 'user', content: `[系统: 你打开了自己的小红书]\n\n你的小红书账号昵称: ${nickname || '未知'}${userId ? ` (userId: ${userId})` : ''}${profileSection}\n\n${gotProfile ? '你的笔记' : `搜索「${nickname}」找到的相关笔记`}:\n${feedsStr}\n\n[系统: ${gotProfile ? '以上是你的主页数据。' : '注意，搜索结果可能包含别人的帖子，你需要辨别哪些是你自己发的（看作者名字）。'}现在请你：\n1. 自然地聊聊你看到了什么，"我看了看我的小红书..."、"我之前发的那个帖子..."\n2. 如果想发新笔记，可以用 [[XHS_POST: 标题 | 内容 | #标签1 #标签2]]\n3. 如果想看某条笔记的详细内容，可以用 [[XHS_DETAIL: noteId]]\n4. 严禁再输出[[XHS_MY_PROFILE]]标记]` }
+                    { role: 'user', content: `[系统: 你打开了自己的小红书]\n\n你的小红书账号昵称: ${nickname || '未知'}${userId ? ` (userId: ${userId})` : ''}${profileSection}\n\n${gotProfile ? '你的笔记' : `搜索「${nickname}」找到的相关笔记`}:\n${feedsStr}\n\n[系统: ${gotProfile ? '以上是按角色归属保存的主页数据，序号已根据用户刚才的说法按相关性和时间排序。' : '注意，搜索结果可能包含别人的帖子，你需要辨别哪些是你自己发的（看作者名字）。'}现在请你：\n1. 如果用户说“刚才那个帖子”“之前那篇”或要求查看自己帖子的评论区，选择最符合时间/标题的候选并输出 [[XHS_DETAIL: noteId]]；不要只口头说去看。\n2. 如果多个候选同样符合、无法判断是哪条，就自然地向用户确认，不能猜。\n3. 普通查看主页时，可以自然地聊聊看到的内容。\n4. 如果想发新笔记，可以用 [[XHS_POST: 标题 | 内容 | #标签1 #标签2]]。\n5. 严禁再输出[[XHS_MY_PROFILE]]标记。]` }
                 ];
 
                 data = await safeFetchJson(`${baseUrl}/chat/completions`, {
@@ -1915,7 +2126,7 @@ export async function applyAssistantPostProcessing(
         console.log(`📕 [XHS] AI要发小红书(profile后):`, postTitle);
         setXhsStatus(`正在发布小红书: ${postTitle}...`);
         try {
-            const result = await xhsPublish(xhsConf, postTitle, postContent, postTags);
+            const result = await xhsPublish(xhsConf, char, postTitle, postContent, postTags);
             if (result.success) {
                 console.log('📕 [XHS] 发布成功(profile后):', result.noteId);
                 const tagsStr = postTags.length > 0 ? ` #${postTags.join(' #')}` : '';
@@ -1936,6 +2147,13 @@ export async function applyAssistantPostProcessing(
         setXhsStatus('');
     }
     aiContent = aiContent.replace(/\[\[XHS_POST:.*?\]\]/gs, '').trim();
+
+    // 二轮 LLM 可能新产生日程标签；在统一动作解析前再消费一次。首次那条已经从 aiContent
+    // 剥掉且写入幂等（同活动不重复），因此普通单轮回复不会重放副作用。
+    //
+    // 这一段是刚刚生成的，所以按「现在」判时段，不跟着首轮那句的 spokenAt 走：两者之间
+    // 隔着 RECALL / SEARCH / XHS 几趟往返，隔夜补收的 spokenAt 会把新写的改动整批作废。
+    aiContent = await consumeScheduleChanges(aiContent, new Date());
 
     // ─── Step 3: ChatParser.parseAndExecuteActions ───
     // mcdInheritMeta 一起传下去：戳一戳 / 转账卡 / 音乐卡 / 新闻卡 / 日程系统提示 / 生活记录卡

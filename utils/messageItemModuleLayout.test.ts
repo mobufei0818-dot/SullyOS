@@ -67,13 +67,24 @@ describe('MessageItem module layout', () => {
         const markup = renderMessage(htmlCard(), align, avatarMode);
         expect(markup).not.toContain('alt="avatar"');
         expect(markup).toContain('sully-html-wrap');
-        expect(markup).toContain(align === 'center' ? 'mx-auto sully-html-wrap' : 'ml-12 sully-html-wrap');
+        expect(markup).toContain(align === 'center' ? 'sully-chat-message-ai justify-center' : 'sully-chat-message-ai justify-start');
+        expect(markup).toContain(align === 'center' ? 'w-fit max-w-full mx-auto sully-html-wrap' : 'max-w-[72%] ml-12 sully-html-wrap');
+        expect(markup).toContain('w-[280px] max-w-full');
+        expect(markup).toContain('block w-full min-h-[120px]');
+        expect(markup).toContain('sully-html-source-bar');
+        expect(markup).toContain('sully-html-source-toggle');
+        expect(markup).toContain('aria-expanded="false"');
+        expect(markup).toContain('aria-label="展开 HTML 源码操作"');
+        expect(markup).toContain('aria-label="复制完整 HTML 源码"');
+        expect(markup).toContain('完整源码');
+        expect(markup).toContain('复制源码');
     });
 
     it.each(moduleModes)('一起听卡片在 %s / %s 模式跟随模块位置且没有消息外侧头像', (align, avatarMode) => {
         const markup = renderMessage(musicCard(), align, avatarMode);
         expect(markup).not.toContain('alt="avatar"');
-        expect(markup).toContain(align === 'center' ? 'mx-auto sully-html-wrap' : 'ml-12 sully-html-wrap');
+        expect(markup).toContain(align === 'center' ? 'sully-chat-message-ai justify-center' : 'sully-chat-message-ai justify-start');
+        expect(markup).toContain(align === 'center' ? 'w-fit max-w-full mx-auto sully-html-wrap' : 'max-w-[72%] ml-12 sully-html-wrap');
         // 卡片内部的“一起听”双头像仍保留；只移除消息外壳头像。
         expect(markup).toContain('https://example.com/user.png');
         expect(markup).toContain('https://example.com/char.png');

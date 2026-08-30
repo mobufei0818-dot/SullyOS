@@ -299,14 +299,6 @@ LLM 日志里的聊天历史动辄几十条，整段塞进 localStorage 很快�
 
 ## 十一、TODO：还没接入 devDebug 的日志支线
 
-### 社区迁移检测重测
-
-开发调试面板底部的「迁移重测」是社区迁移检测的测试动作：清除
-`sullyos_loyal_recruitment_2026-07-20-v4` 及兼容读取的旧版 `v1` / `v2` / `v3` 状态并刷新页面，方便连续导入多套数据验证。招募不再主动弹窗；刷新后从
-「设置 → 页面最底部 → 社区迁移说明」重新进入。
-正式构建默认看不到调试面板，用户无法从正常 UI 触发复检。它不是行为开关，不进入
-`DevDebugFlags`，也不计入浮球红点。
-
 `makeDebugLogger` 已经把 P1 等价的错误支线接进来了（safeApi 重试、InstantPush HTTP failure / fetch threw / saveOutboundSession、ActiveMsg post-processing / saveMessage / requeue lost / flushInboxToChat、amsg multipart expired）。下面这些还没接，价值递减或工程量大，**单点踩坑时再换成 `log.warn(...)` 即可**（每条改 1 行）：
 
 ### P2 — 价值递减的前端支线

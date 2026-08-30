@@ -107,6 +107,7 @@ describe('parseVideoShareUrl', () => {
         expect(wp.siteName).toBe('哔哩哔哩');
         expect(wp.image).toBe('http://i1.hdslb.com/bfs/archive/cover.jpg');
         expect(wp.content).toBe('');
+        expect(wp.provider).toBe('apizero-video');
         expect(wp.video).toMatchObject({
             platform: 'bilibili',
             platformLabel: '哔哩哔哩',
@@ -158,6 +159,6 @@ describe('parseVideoShareUrl', () => {
         expect(calledUrl).toContain('key=my-test-key');
         expect(calledUrl).toContain('flat=1');
         setVideoParseKey('');
-        expect(getVideoParseKey()).toMatch(/^sk_live_/); // 清空后回落内置默认 key
+        expect(getVideoParseKey()).toMatch(/^sk_live_/); // 清空后回落项目方共享 key
     });
 });

@@ -92,15 +92,26 @@ export const createFireSessionState = (): FireSessionState => ({
 export const MAX_DUPLICATE_TOOL_CALLS = 2;
 
 /**
- * 一次 fire 最多几轮 LLM。onBeforeFire 把这个数显式回传给上游（amsg-server 自己的
- * 默认值也是 5，但它没导出常量，各写各的迟早对不上），worker 这边据此判断「这是最后
- * 一轮了」。
+ * 普通内置工具最多几轮 LLM。搜索 / 记忆 / 排程通常 1~3 轮就能结束，继续保留原来的
+ * 5 轮预算，避免一次普通主动消息因为模型打转而烧太多请求。
  *
  * 为什么要自己判：上游在最后一轮遇到 tool-request 会直接抛 AGENTIC_LOOP_EXCEEDED，
  * 这次攒下的旁白全丢、任务不出清、下一分钟整条从头重跑再烧一遍 LLM。到最后一轮就不再
  * 放行工具请求、用手上的内容收尾，用户至少收得到角色已经写出来的那部分。
  */
-export const MAX_TOOL_ITERATIONS = 5;
+export const DEFAULT_TOOL_ITERATIONS = 5;
+
+/**
+ * 通用 MCP 的硬上限。游戏 / 论坛类 MCP 常见「读规则 → 查状态 → 执行动作 → 再查状态」；
+ * 5 轮会稳定地卡在真正动作之前。这里给到 12，但不是固定跑 12 次：模型一旦返回正文就
+ * 当场结束，连续重复调用也会由 MAX_DUPLICATE_TOOL_CALLS 提前收束，所以实际轮数仍是
+ * 1~12 自适应。
+ */
+export const MCP_MAX_TOOL_ITERATIONS = 12;
+
+/** 当前 fire 的工具预算：接了 MCP 才使用长预算，普通内置工具维持原成本。 */
+export const resolveToolIterationBudget = (hasMcp: boolean): number =>
+  hasMcp ? MCP_MAX_TOOL_ITERATIONS : DEFAULT_TOOL_ITERATIONS;
 
 /** 判本轮旁白里有没有 [[XHS_SHARE: n]]（与 classifier 的模式同口径，非全局免得带 lastIndex）。 */
 const XHS_SHARE_TAG_RE = /\[\[XHS_SHARE:\s*\d+\]\]/;
@@ -202,25 +213,99 @@ export type RoundDecision =
   | { decision: 'tool-request'; toolCalls: ToolCall[] }
   | { decision: 'finish'; pushPayloads: Array<Record<string, unknown>> }
   /** reason 直接进 last_skip，面板照实告诉用户那次为什么没响。 */
-  | { decision: 'skip-push'; reason: 'empty-generation' | 'side-effects-only' };
+  | {
+      decision: 'skip-push';
+      reason: 'empty-generation' | 'side-effects-only';
+      /**
+       * 这一轮被整条丢掉、但仍要送到客户端的日程改动（没有就没有这个字段）。
+       * 别的副作用丢了就丢了，日程不行——理由见下面 skip-push 那处的注释。
+       */
+      scheduleChanges?: Array<{ startTime: string; activity: string }>;
+    };
 
 /** 本轮的通用 MCP 识别输入（没配 MCP 的角色不传，行为与改动前完全一致）。 */
 export interface McpRoundInput {
   resolve: Map<string, McpResolvedToolCore<McpFireServer>>;
-  /** 本轮 LLM 响应里已按 mcp__ 前缀过滤好的 native tool_calls；文本模式/无调用时缺省。 */
+  /** 本轮 LLM 响应里已识别为 MCP 的 native tool_calls（名字已是 mcp__ 声明名）；文本模式/无调用时缺省。 */
   nativeToolCalls?: ToolCall[];
 }
 
 /**
- * 本轮的「给自己排下一条」识别输入。
+ * 本轮的任务管理工具识别输入（schedule / cancel / renew 共用一个池，
+ * 由 index.ts 的 classifyNativeToolCalls 认领好传进来）。
  *
- * 和 MCP 一样两层：native tool_calls 优先（由 index.ts 按工具名过滤好传进来），
- * 没有 native 时从正文抠 schedule_active_message({...})。两层都命中同一轮时只认 native
- * ——同一个意图两处都写的话，跑两遍就是排出两条一模一样的任务。
+ * 和 MCP 一样两层：native tool_calls 优先，没有 native 的排程调用时从正文抠
+ * schedule_active_message({...})。同一轮两处都写了排程时只认 native——同一个意图
+ * 跑两遍就是排出两条一模一样的任务（取消 / 改期不教正文协议，没有这层问题）。
  */
 export interface ScheduleRoundInput {
   nativeToolCalls?: ToolCall[];
 }
+
+/** classifyNativeToolCalls 的结果：认领的进两个池，认不出的名字留给调用方记日志。 */
+export interface NativeCallClassification {
+  /** 排程 / 取消 / 改期（声明清单命中），名字已改写成声明名。 */
+  manage: ToolCall[];
+  /** 通用 MCP（mcpResolve 命中），名字已改写成 `mcp__暴露名`。 */
+  mcp: ToolCall[];
+  /** 两份清单都对不上的原始名字（模型幻觉的工具），调用方丢弃并记日志。 */
+  dropped: Array<string | null>;
+}
+
+/**
+ * 把模型回报的名字解析成声明清单里的那一个。模型常把声明名的「姓」搞丢或换家：
+ * 声明的是 `mcp__foo`，回报成 `foo`、`default_api:foo`、`functions.foo` 之类。
+ * 原名严格命中优先（老规矩不变）；对不上再去掉命名空间取最后一段重试。
+ * 每个候选按「mcp__ 前缀名 → 管理工具名 → MCP 裸名」的顺序找，清单键本身唯一，
+ * 「唯一命中才认」由 Map/Set 语义天然保证。
+ */
+const resolveNativeFireToolName = (
+  raw: string,
+  manageToolNames: ReadonlySet<string>,
+  mcpResolve: Map<string, McpResolvedToolCore> | null,
+): { kind: 'manage' | 'mcp'; name: string } | null => {
+  const candidates = [raw];
+  const lastSegment = raw.split(/[:./]/).pop();
+  if (lastSegment && lastSegment !== raw) candidates.push(lastSegment);
+  for (const c of candidates) {
+    if (!c) continue;
+    if (c.startsWith(MCP_FIRE_NAME_PREFIX) && mcpResolve?.has(c.slice(MCP_FIRE_NAME_PREFIX.length))) {
+      return { kind: 'mcp', name: c };
+    }
+    if (manageToolNames.has(c)) return { kind: 'manage', name: c };
+    // 裸名回退：模型把 mcp__ 前缀弄丢时，报的就是暴露名本身。
+    if (mcpResolve?.has(c)) return { kind: 'mcp', name: `${MCP_FIRE_NAME_PREFIX}${c}` };
+  }
+  return null;
+};
+
+/**
+ * 认领本轮 LLM 响应里的 native tool_calls：管理工具（schedule / cancel / renew）
+ * 与 MCP 各进各的池，两份清单都对不上的丢进 dropped。认领时名字改写回声明名——
+ * 下游 executeToolCalls 按声明名分流、还要 slice mcp__ 前缀，裸名直接透传会撞上
+ * 没有映射的名字。
+ */
+export const classifyNativeToolCalls = (
+  rawToolCalls: unknown,
+  manageToolNames: ReadonlySet<string>,
+  mcpResolve: Map<string, McpResolvedToolCore> | null,
+): NativeCallClassification => {
+  const out: NativeCallClassification = { manage: [], mcp: [], dropped: [] };
+  const calls = (Array.isArray(rawToolCalls) ? rawToolCalls : []) as ToolCall[];
+  for (const tc of calls) {
+    const raw = tc?.function?.name;
+    const resolved = typeof raw === 'string' && raw
+      ? resolveNativeFireToolName(raw, manageToolNames, mcpResolve)
+      : null;
+    if (!resolved) {
+      out.dropped.push(typeof raw === 'string' && raw ? raw : null);
+      continue;
+    }
+    const call = resolved.name === raw ? tc : { ...tc, function: { ...tc.function, name: resolved.name } };
+    (resolved.kind === 'mcp' ? out.mcp : out.manage).push(call);
+  }
+  return out;
+};
 
 /**
  * 处理一轮 LLM 输出（入参已 stripReasoningTags）：
@@ -245,8 +330,10 @@ export function processLLMRound(
   schedule?: ScheduleRoundInput | null,
   /** 本轮序号（上游 sessionCtx.iteration，0-based）。到最后一轮就不再放行工具请求。 */
   iteration?: number,
+  /** 与 onBeforeFire 回给上游的 maxToolIterations 必须是同一个值。 */
+  maxToolIterations: number = DEFAULT_TOOL_ITERATIONS,
 ): RoundDecision {
-  const isFinalRound = typeof iteration === 'number' && iteration >= MAX_TOOL_ITERATIONS - 1;
+  const isFinalRound = typeof iteration === 'number' && iteration >= maxToolIterations - 1;
   // 通用 MCP 两层识别（与前台同构）：native tool_calls 优先；没有 native 时
   // 用前台「兼容模式」同一个解析器从正文抠 tool_name({...})。两种来源都可能
   // 与数据标签同轮出现，最终合并成同一个 tool-request，executeToolCalls 按
@@ -257,19 +344,25 @@ export function processLLMRound(
   const textCalls = mcp?.resolve.size
     ? extractTextFakedMcpCalls(llmOutputText, mcp.resolve, { alsoMatchPrefix: MCP_FIRE_NAME_PREFIX })
     : [];
-  // 排程工具同样两层。native 在场时不再扫正文：同一意图两处都写的话，跑两遍就是
-  // 排出两条一模一样的任务（而 MCP 那边重复调用只是白查一次）。
+  // 排程工具同样两层，语法提取与入列拆开管：正文里的排程语法**始终**抠出来剥掉
+  // （跟 MCP 同一条红线：调用语法不能进旁白/推送），要不要当调用入列另说——
+  // native 排程在场时不入列，同一意图两处都写的话，跑两遍就是排出两条一模一样的
+  // 任务（而 MCP 那边重复调用只是白查一次）。池里现在可能混着 cancel / renew
+  // （见 classifyNativeToolCalls），「不入列」只看有没有真正的 native 排程调用：
+  // 本轮只 native 取消了一条时，正文里的排程语法照常入列，两个是不同意图。
   const nativeScheduleCalls = schedule?.nativeToolCalls ?? [];
-  const scheduleTextCalls = nativeScheduleCalls.length > 0 || !schedule
-    ? []
-    : extractFireScheduleTextCalls(llmOutputText);
-  const scheduleCalls: ToolCall[] = nativeScheduleCalls.length > 0
-    ? nativeScheduleCalls
-    : scheduleTextCalls.map((c) => ({
-        id: `sched_${state.mcpCallSeq++}`,
-        type: 'function',
-        function: { name: AMSG_FIRE_SCHEDULE_TOOL, arguments: JSON.stringify(c.args) },
-      }));
+  const hasNativeSchedule = nativeScheduleCalls.some(
+    (tc) => tc?.function?.name === AMSG_FIRE_SCHEDULE_TOOL,
+  );
+  const scheduleTextCalls = schedule ? extractFireScheduleTextCalls(llmOutputText) : [];
+  const scheduleCalls: ToolCall[] = [
+    ...nativeScheduleCalls,
+    ...(hasNativeSchedule ? [] : scheduleTextCalls).map((c) => ({
+      id: `sched_${state.mcpCallSeq++}`,
+      type: 'function' as const,
+      function: { name: AMSG_FIRE_SCHEDULE_TOOL, arguments: JSON.stringify(c.args) },
+    })),
+  ];
 
   const strippedText = scheduleTextCalls.length
     ? stripTextFakedMcpCalls(llmOutputText, scheduleTextCalls)
@@ -363,7 +456,19 @@ export function processLLMRound(
     // 只有副作用标签、没有正文时同样放弃：角色一个字没说却在小红书点了赞、写了日记，
     // 用户看到的是「ta 什么都没说但做了事」，本身就穿帮。后台产生的副作用该等客户端
     // 上线时主动拉，不塞进一条没内容的推送里（amsg-sw README 里也是这个结论）。
-    return { decision: 'skip-push', reason: finishMeta ? 'side-effects-only' : 'empty-generation' };
+    //
+    // 日程改动是这条规矩里唯一的例外，单拎出来交给调用方走 emitResult。它不是做给用户
+    // 看的动作，是角色在纠正自己的表：一起丢掉的话，下一次 fire 读到的还是那条旧安排，
+    // 角色会反复想改又反复改不掉，用户那边则永远看到表和角色说的话对不上。emitResult
+    // 落的是服务端收件箱，不占聊天正文，也不用为它硬发一条空推送。
+    const scheduleChanges = directives
+      .filter((d): d is Extract<Directive, { type: 'change_schedule' }> => d.type === 'change_schedule')
+      .map((d) => ({ startTime: d.time, activity: d.activity }));
+    return {
+      decision: 'skip-push',
+      reason: finishMeta ? 'side-effects-only' : 'empty-generation',
+      ...(scheduleChanges.length > 0 ? { scheduleChanges } : {}),
+    };
   }
 
   const lastIdx = segments.length - 1;

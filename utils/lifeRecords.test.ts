@@ -404,3 +404,23 @@ describe('buildLifeRecordInjection — fire_pack 写绝对日期', () => {
         }
     });
 });
+
+// 记账合计以前是 txs.reduce((s, t) => s + t.amount, 0) 直接拼进文本的，几笔小数一加
+// 就会变成 49.85999999999999，角色照着念出来很出戏。
+describe('注入文本里的金额只到分位', () => {
+    it('多笔小数相加不会把 49.85999999999999 念给角色听', async () => {
+        const char = mkChar();
+        for (const t of await DB.getAllTransactions()) await DB.deleteTransaction(t.id);
+        const stamp = Date.now();
+        for (const [i, amount] of [7.9, 12.9, 11.36, 11.9, 5.8].entries()) {
+            await DB.saveTransaction({
+                id: `tx-test-float-${i}-${Math.random().toString(36).slice(2, 8)}`,
+                amount, category: 'general', note: `浮点测试${i}`,
+                timestamp: stamp + i, dateStr: lifeToday(),
+            } as any);
+        }
+        const text = await buildLifeRecordInjection(char, '小明', { forFirePack: false });
+        expect(text).toContain('合计 49.86');
+        expect(text).not.toMatch(/\d+\.\d{3,}/);
+    });
+});

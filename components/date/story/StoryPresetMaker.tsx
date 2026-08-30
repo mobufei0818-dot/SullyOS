@@ -75,6 +75,14 @@ const STORY_ROLE_LABELS: Record<StoryTheaterPresetPrompt['role'], string> = {
     assistant: '正文',
 };
 
+const STORY_GENERATION_FIELDS = [
+    ['temperature', '温度', 'Temperature', 0, 2, 0.05, '越低越稳定，越高越自由。Claude 只接受 0–1；预设高于 1 时，Claude 请求会自动按 1 发送。'],
+    ['topP', '候选范围', 'Top P', 0, 1, 0.01, '另一种随机度控制。通常保持预设值即可，不建议和温度一起大幅调整。'],
+    ['frequencyPenalty', '重复惩罚', 'Frequency penalty', -2, 2, 0.05, '正值会减少重复措辞，负值会允许更多复现。部分 Claude 中转会忽略这项。'],
+    ['presencePenalty', '话题惩罚', 'Presence penalty', -2, 2, 0.05, '正值更愿意引入新内容，负值更愿意围绕已有内容继续。部分 Claude 中转会忽略这项。'],
+    ['maxTokens', '最大输出', 'Max tokens', 256, 32000, 256, '只限制本轮最多能生成多少，不代表每次一定写满；篇幅仍主要由上面的“篇幅”选项决定。'],
+] as const;
+
 const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy, onDelete }) => {
     const [draft, setDraft] = useState<StoryTheaterPreset>(() => ({
         ...preset,
@@ -146,19 +154,21 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
         finally { setSaving(false); }
     };
 
+    const renderGenerationFields = () => <>
+        <div className='mt-5 divide-y divide-slate-200 border-y border-slate-200'>
+            {STORY_GENERATION_FIELDS.map(([key, label, technicalLabel, min, max, step, help]) => <label key={key} className='block py-4'>
+                <span className='flex items-center gap-4'><span className='min-w-0 flex-1'><strong className='block text-xs text-slate-700'>{label}</strong><span className='mt-0.5 block text-[8px] uppercase tracking-wide text-slate-400'>{technicalLabel}</span></span><input disabled={readOnly} type='number' min={min} max={max} step={step} value={draft.document.generation[key]} onChange={event => patchDocument({ generation: { ...draft.document.generation, [key]: Number(event.target.value) } })} className='w-24 shrink-0 rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-right text-sm font-semibold outline-none disabled:opacity-50' /></span>
+                <span className='mt-2 block text-[9px] leading-4 text-slate-400'>{help}</span>
+            </label>)}
+        </div>
+        {draft.document.generation.temperature > 1 && <p className='mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-[10px] leading-5 text-amber-800'>当前温度高于 1：OpenAI 类模型会保留这个值；使用 Claude 时会自动按 1.0 发送，避免第三方中转直接返回 400。</p>}
+    </>;
+
     const renderGeneration = () => <section>
         <button onClick={() => setActiveGroupKey(null)} className='mb-5 text-[10px] font-bold text-violet-600'>← 返回大分类</button>
         <div className='text-[9px] uppercase tracking-[.22em] font-bold text-violet-500'>Professional</div><h2 className='mt-1 text-2xl font-serif font-semibold'>续写参数</h2>
-        <p className='mt-2 text-[10px] leading-5 text-slate-500'>只有明确知道采样参数含义时再调整。一般保持预设值即可。</p>
-        <div className='mt-6 grid grid-cols-2 gap-3'>
-            {([
-                ['temperature', 'Temperature', 0, 2, 0.05],
-                ['topP', 'Top P', 0, 1, 0.01],
-                ['frequencyPenalty', 'Frequency penalty', -2, 2, 0.05],
-                ['presencePenalty', 'Presence penalty', -2, 2, 0.05],
-                ['maxTokens', 'Max tokens', 256, 32000, 256],
-            ] as const).map(([key, label, min, max, step]) => <label key={key} className={key === 'maxTokens' ? 'col-span-2' : ''}><span className='text-[10px] text-slate-500'>{label}</span><input disabled={readOnly} type='number' min={min} max={max} step={step} value={draft.document.generation[key]} onChange={event => patchDocument({ generation: { ...draft.document.generation, [key]: Number(event.target.value) } })} className='mt-1 w-full px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-xs disabled:opacity-50' /></label>)}
-        </div>
+        <p className='mt-2 text-[10px] leading-5 text-slate-500'>这些值会跟着预设保存。一般保持原值；接口报参数错误时再按提示调整。</p>
+        {renderGenerationFields()}
         <label className='block mt-4'><span className='text-[10px] text-slate-500'>正文起笔</span><textarea disabled={readOnly} value={draft.document.assistantPrefill || ''} onChange={event => patchDocument({ assistantPrefill: event.target.value })} className='mt-1 w-full min-h-24 p-3 rounded-xl bg-white border border-slate-200 font-mono text-[11px] disabled:opacity-50' /></label>
     </section>;
 
@@ -191,7 +201,7 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
                 <button onClick={onBack} className='w-9 h-9 rounded-full grid place-items-center'><ArrowLeft size={20} /></button>
                 <div className='min-w-0 flex-1'><div className='text-[9px] uppercase tracking-[.24em] font-bold text-violet-500'>Preset maker</div><div className='font-semibold truncate'>预设制作器</div></div>
                 {readOnly && <span className='hidden sm:inline-flex text-[9px] px-2 py-1 rounded-full bg-amber-100 text-amber-700 font-bold'>内置只读</span>}
-                <button onClick={() => downloadStoryPreset(draft)} className='w-9 h-9 shrink-0 rounded-full bg-white border border-slate-200 grid place-items-center' title='导出糯米机原生预设'><DownloadSimple size={16} /></button>
+                <button onClick={() => { void downloadStoryPreset(draft); }} className='w-9 h-9 shrink-0 rounded-full bg-white border border-slate-200 grid place-items-center' title='导出糯米机原生预设'><DownloadSimple size={16} /></button>
                 <button onClick={save} className='h-9 px-3 rounded-full bg-slate-900 text-white text-xs font-bold flex items-center gap-1.5'>{readOnly ? <Copy size={14} /> : <FloppyDisk size={14} />}{readOnly ? '复制调整' : saving ? '保存中' : '保存'}</button>
             </div>
             <div className='mx-5 mb-4 grid grid-cols-2 p-1 rounded-xl bg-slate-200'>
@@ -208,6 +218,7 @@ const StoryPresetMaker: React.FC<Props> = ({ preset, onBack, onSave, onOpenCopy,
                         const active = choice.ids.find(id => draft.document.prompts.find(prompt => prompt.id === id)?.enabled);
                         return <section key={choice.label} className='py-6'><h2 className='text-sm font-bold'>{choice.label}</h2><p className='mt-1 text-[10px] text-slate-400'>{choice.hint}</p><div className='mt-3 flex flex-wrap gap-2'>{choice.options.map(option => { const selectedOption = option.id ? active === option.id : !active; return <button key={option.id || 'default'} disabled={readOnly} onClick={() => selectSimpleChoice(choice, option.id)} className={`px-3 py-2 rounded-full border text-[11px] font-semibold disabled:opacity-60 ${selectedOption ? 'bg-slate-900 border-slate-900 text-white' : 'bg-white border-slate-200 text-slate-600'}`}>{option.label}</button>; })}</div></section>;
                     })}</div>
+                    <section className='py-6 border-t border-slate-200'><h2 className='text-sm font-bold'>续写参数</h2><p className='mt-1 text-[10px] leading-5 text-slate-400'>跟着这份预设保存；看不懂时保持原值即可。</p>{renderGenerationFields()}</section>
                     {!readOnly && <section className='pt-5 border-t border-slate-200'><label><span className='text-[10px] font-bold text-slate-500'>预设名称</span><input value={draft.document.name} onChange={event => patchDocument({ name: event.target.value })} className='mt-2 w-full px-3 py-3 rounded-xl bg-white border border-slate-200 text-sm' /></label></section>}
                 </> : activeGroupKey === '__generation__' ? renderGeneration() : activeGroup ? renderGroupDetails() : <>
                     <section className='pb-5 border-b border-slate-200'><div className='text-[9px] uppercase tracking-[.22em] font-bold text-violet-500'>Professional</div><h1 className='mt-1 text-3xl font-serif font-semibold'>先选大区，再看细节</h1><p className='mt-3 text-[11px] leading-6 text-slate-500'>手机上一次只展开一个区。上下箭头移动整区；进入大区后才会显示内部条目。</p></section>

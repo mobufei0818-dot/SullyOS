@@ -55,4 +55,3 @@ export async function deleteStoryVectorMemory(
     }
     return { remoteDeleted: await deleteRemoteVector(remoteVectorConfig, nodeId) };
 }
-

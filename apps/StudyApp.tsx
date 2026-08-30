@@ -9,8 +9,9 @@ import { safeResponseJson, extractJson } from '../utils/safeApi';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { Notepad, Check, X, CheckCircle, XCircle, Hand } from '@phosphor-icons/react';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import TokenImg from '../components/os/TokenImg';
 import { trackEvent } from '../utils/analytics';
-import { extractPdfText } from '../utils/pdfText';
+import { extractPdfText, isPdfFile } from '../utils/pdfText';
 
 type KatexLike = {
     renderToString: (latex: string, options: any) => string;
@@ -494,7 +495,9 @@ const StudyApp: React.FC = () => {
     const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        if (file.type !== 'application/pdf') {
+        // Android 的部分 DocumentsProvider 会给 PDF 空 MIME 或
+        // application/octet-stream；扩展名正确时仍应允许进入解析器。
+        if (!isPdfFile(file)) {
             addToast('请上传 PDF 文件', 'error');
             return;
         }
@@ -1450,7 +1453,7 @@ Answer in character. Be helpful and clear. If they're confused about a concept, 
                     {viewQuiz.aiReview && (
                         <div className="mb-6">
                             <div className="flex items-center gap-2 mb-3">
-                                {selectedChar && <img src={selectedChar.avatar} className="w-8 h-8 rounded-full object-cover border-2 border-emerald-500/30" />}
+                                {selectedChar && <TokenImg value={selectedChar.avatar} className="w-8 h-8 rounded-full object-cover border-2 border-emerald-500/30" />}
                                 <span className="text-emerald-400 text-sm font-bold">{selectedChar?.name || '助教'} 的锐评</span>
                             </div>
                             <div className="bg-white/5 rounded-2xl p-5 border border-white/10">
@@ -1503,7 +1506,7 @@ Answer in character. Be helpful and clear. If they're confused about a concept, 
                         <span className="text-sm text-slate-500 font-bold">{quizLoading}</span>
                         {selectedChar && (
                             <div className="flex items-center gap-2 mt-2">
-                                <img src={selectedChar.avatar} className="w-8 h-8 rounded-full object-cover" />
+                                <TokenImg value={selectedChar.avatar} className="w-8 h-8 rounded-full object-cover" />
                                 <span className="text-xs text-slate-400">{selectedChar.name} 正在出题...</span>
                             </div>
                         )}
@@ -1613,7 +1616,7 @@ Answer in character. Be helpful and clear. If they're confused about a concept, 
                             {filterCharactersByGroup(characters, characterGroups, tutorGroupId).map(c => (
                                 <div key={c.id} onClick={() => setSelectedChar(c)} className={`flex flex-col items-center gap-2 cursor-pointer transition-opacity ${selectedChar?.id === c.id ? 'opacity-100' : 'opacity-50'}`}>
                                     <div className={`w-14 h-14 rounded-full p-[2px] ${selectedChar?.id === c.id ? 'border-2 border-emerald-500' : 'border border-slate-200'}`}>
-                                        <img src={c.avatar} className="w-full h-full rounded-full object-cover" />
+                                        <TokenImg value={c.avatar} className="w-full h-full rounded-full object-cover" />
                                     </div>
                                     <span className="text-[10px] font-bold text-slate-600">{c.name}</span>
                                 </div>
@@ -1827,8 +1830,8 @@ Answer in character. Be helpful and clear. If they're confused about a concept, 
             {/* Character Sprite - Toggable */}
             {showAssistant && (
                 <div className="absolute bottom-20 right-[-20px] w-[160px] h-[220px] z-20 pointer-events-none flex items-end justify-center transition-all duration-500 animate-slide-in-right" style={{ transform: isTyping ? 'scale(1.05)' : 'scale(1)', opacity: isTyping || classroomState === 'teaching' ? 1 : 0.8 }}>
-                     <img 
-                        src={currentSprite} 
+                     <TokenImg
+                        value={currentSprite}
                         className="max-h-full max-w-full object-contain drop-shadow-[0_5px_15px_rgba(0,0,0,0.5)]"
                     />
                 </div>

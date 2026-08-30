@@ -52,6 +52,75 @@ describe('凌晨 0-5 点算前一夜的延续', () => {
         expect(out).toContain('稿子卡在第三段');
     });
 
+    it('ChatApp 主请求可注入完整日程，并用一个简单标签教角色调整计划', () => {
+        const out = buildScheduleInjection(schedule, undefined, at(14), {
+            includeFullDay: true,
+            includeChangeInstruction: true,
+        });
+        expect(out).toContain('你今天的完整日程：');
+        expect(out).toContain('- 07:00 晨跑');
+        expect(out).toContain('- 13:00 写稿');
+        expect(out).toContain('- 22:00 看剧');
+        expect(out).toContain('[[ACTION:CHANGE_SCHEDULE | 22:00 | 去超市]]');
+        expect(out).toContain('正在进行的这一条和它之后的都能改，已经过去的不能');
+    });
+});
+
+// 一天最后一条日程开始之后就没有「下一条」了，而那条通常是睡觉。以前这个能力说明
+// 挂在「有下一条」上，于是最需要「我今晚不睡了」这个出口的时候恰恰不教。
+describe('夜里最后一条日程之后仍然教改日程', () => {
+    it('已经落在最后一条上时，示例时段退回当前这一条', () => {
+        const out = buildScheduleInjection(schedule, undefined, at(23, 30), {
+            includeFullDay: true,
+            includeChangeInstruction: true,
+        });
+        expect(out).toContain('当前时段：22:00 你正在看剧');
+        expect(out).toContain('[[ACTION:CHANGE_SCHEDULE | 22:00 | 去超市]]');
+    });
+
+    it('说明里点破「表跟实际对不上就改」，别让角色把日程当成必须履行的命令', () => {
+        const out = buildScheduleInjection(schedule, undefined, at(23, 30), {
+            includeChangeInstruction: true,
+        });
+        expect(out).toContain('不是必须履行的命令');
+        expect(out).toContain('改成你实际在做的事');
+    });
+});
+
+// 「时间感知」关掉的角色不该从日程块里读到精确钟点——那正是这个开关要挡的东西。
+// 日程本身照给：它有自己的总开关。对齐天气块 includeTime 的处理。
+describe('includeClock=false 时日程不报钟点', () => {
+    const noClock = { includeFullDay: true, includeChangeInstruction: true, includeClock: false };
+
+    it('当前时段与之后安排都只剩活动本身', () => {
+        const out = buildScheduleInjection(schedule, undefined, at(14), noClock);
+        expect(out).toContain('当前时段：你正在写稿');
+        expect(out).toContain('之后安排：看剧');
+        expect(out).not.toContain('13:00');
+        expect(out).not.toContain('22:00');
+    });
+
+    it('完整日程表保留顺序但不带时刻', () => {
+        const out = buildScheduleInjection(schedule, undefined, at(14), noClock);
+        expect(out).toContain('- 晨跑');
+        expect(out).toContain('- 写稿');
+        expect(out).not.toContain('07:00');
+    });
+
+    it('不教改日程——那条指令拿时段当定位符，角色看不到时刻就写不出来', () => {
+        const out = buildScheduleInjection(schedule, undefined, at(14), noClock);
+        expect(out).not.toContain('CHANGE_SCHEDULE');
+    });
+
+    it('凌晨那句同样不带钟点', () => {
+        const out = buildScheduleInjection(schedule, undefined, at(3), noClock);
+        expect(out).toContain('夜深了');
+        expect(out).toContain('晨跑');
+        expect(out).not.toContain('07:00');
+    });
+});
+
+describe('意识流档位', () => {
     it('一天三档的通用取法本身没变（小剧场、桌面小屋还按它取色）', () => {
         expect(getFlowNarrativeKey(1)).toBe('morning');
         expect(getFlowNarrativeKey(9)).toBe('morning');

@@ -47,4 +47,31 @@ describe('safeFetchJson API log fallback', () => {
             meta,
         }));
     });
+
+    it('never retries a billable chat completion after a network failure', async () => {
+        const fetchMock = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('Failed to fetch'));
+
+        await expect(safeFetchJson(
+            'https://api.test/v1/chat/completions',
+            { method: 'POST', body: JSON.stringify({ model: 'paid-model', messages: [] }) },
+            2,
+        )).rejects.toThrow('Failed to fetch');
+
+        expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it('never retries a billable chat completion after a retryable HTTP status', async () => {
+        const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+            JSON.stringify({ error: { message: 'upstream unavailable' } }),
+            { status: 503, headers: { 'content-type': 'application/json' } },
+        ));
+
+        await expect(safeFetchJson(
+            'https://api.test/v1/chat/completions',
+            { method: 'POST', body: JSON.stringify({ model: 'paid-model', messages: [] }) },
+            2,
+        )).rejects.toThrow('API Error 503');
+
+        expect(fetchMock).toHaveBeenCalledOnce();
+    });
 });

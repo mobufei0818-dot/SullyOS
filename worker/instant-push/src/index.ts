@@ -646,7 +646,7 @@ export type PushDecision =
  *
  * amsg-instant 0.8+ hook 返回 pushPayloads 数组, lib 不做 split, hook
  * 自己负责把内容切成 N 个独立 push. 我们用 sanitizeIntoSegments 把 LLM 输出
- * 切成 segments (按换行 + CJK 空格切, 跟客户端 chatParser.chunkText 一致),
+ * 切成 segments (只按显式换行切, 跟客户端 chatParser.chunkText 一致),
  * 每个 segment 一条 push, banner 显示 sanitized 版本, message 保留 raw 让客户端
  * Step 9/5/8 渲染.
  *

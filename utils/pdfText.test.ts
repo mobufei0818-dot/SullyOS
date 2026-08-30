@@ -43,6 +43,24 @@ describe('PDF 文本提取', () => {
         ])).toBe('同一段的第一行继续这一段。\n\n新的自然段。');
     });
 
+    it('页眉或页码更靠左时，仍以正文常用左边界判断软折行', () => {
+        expect(pdfItemsToText([
+            { str: '夏以星×你 sweet talk', hasEOL: true, transform: [10, 0, 0, 10, 8, 790], height: 10 },
+            { str: '但今天你心里想着事情，懒得同他计较，只是抬', hasEOL: true, transform: [12, 0, 0, 12, 42, 720], height: 12 },
+            { str: '手拍了拍肩膀上的魅魔大狗狗，', hasEOL: true, transform: [12, 0, 0, 12, 42.2, 706], height: 12 },
+            { str: '示意他安分点。', hasEOL: true, transform: [12, 0, 0, 12, 42, 692], height: 12 },
+        ])).toBe('夏以星×你 sweet talk\n\n但今天你心里想着事情，懒得同他计较，只是抬手拍了拍肩膀上的魅魔大狗狗，示意他安分点。');
+    });
+
+    it('正文左边界不受杂项干扰时，仍保留真正的首行缩进', () => {
+        expect(pdfItemsToText([
+            { str: '上一段的第一行', hasEOL: true, transform: [12, 0, 0, 12, 42, 720], height: 12 },
+            { str: '上一段的续行。', hasEOL: true, transform: [12, 0, 0, 12, 42, 706], height: 12 },
+            { str: '新段落缩进开头，', hasEOL: true, transform: [12, 0, 0, 12, 66, 680], height: 12 },
+            { str: '然后回到正文左边界。', hasEOL: true, transform: [12, 0, 0, 12, 42, 666], height: 12 },
+        ])).toBe('上一段的第一行上一段的续行。\n\n新段落缩进开头，然后回到正文左边界。');
+    });
+
     it('逐页提取全文、报告进度并释放页面资源', async () => {
         const cleanup = vi.fn();
         const progress = vi.fn();

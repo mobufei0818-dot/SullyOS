@@ -261,27 +261,50 @@ export function scriptNameFromWorkerUrl(workerUrl: string): string | null {
 }
 
 /**
- * 把 Cloudflare 的报错翻译成能照着做的话。
- * 权限类的最常见——用户建 token 时少勾一项，光看「Unauthorized」根本不知道少了哪个。
+ * 把 Cloudflare 的报错翻译成能照着做的话，末尾一律缀上原文。
+ *
+ * 翻译是给用户看的，原文是给排障用的，两个都要有：
+ *
+ * - 权限类最常见——用户建 token 时少勾一项，光看「Unauthorized」根本不知道少了哪个，
+ *   所以要翻译；
+ * - 可 401/403 的不只 Cloudflare。中转层（路径不让走、没带 Authorization）和路上的
+ *   WAF 也回这两个码，一样会被翻成「权限不够」，于是 token 明明没问题的人被指使着
+ *   反复去改 token。原文里有没有 CF 的 code、是不是 proxy 那句话，一眼就分得开。
+ *
+ * 原文取 CF 的 `errors[].message`；中转层的错误体是 `{ error }`，不是同一个形状，
+ * 单独捞一手。两边都没有（非 JSON 响应）就只剩 HTTP 状态码，那也得说出来。
+ *
+ * `request` 是出事的那个请求（方法 + 路径）。部署要连着调七八个接口，光有一句报错
+ * 认不出卡在建库还是传代码，界面上的步骤名又在失败时就清掉了。
  */
-export function explainCfError(status: number, body: unknown): string {
-  const errors = (body as { errors?: Array<{ code?: number; message?: string }> } | null)?.errors;
-  const first = Array.isArray(errors) && errors.length ? errors[0] : null;
-  const code = first?.code;
-  const raw = first?.message || '';
+export function explainCfError(status: number, body: unknown, request?: string): string {
+  const payload = body as {
+    errors?: Array<{ code?: number; message?: string }>;
+    error?: string;
+  } | null;
+  const errors = Array.isArray(payload?.errors) ? payload.errors : [];
+  const code = errors[0]?.code;
+  const raw =
+    errors.map((e) => e?.message).filter(Boolean).join('；')
+    || (typeof payload?.error === 'string' ? payload.error : '');
 
   const PERMISSION_HINT =
     'Token 权限不够。建 token 时这三项都要勾上：Account → Workers Scripts:Edit、'
     + 'Account → D1:Edit、Account → Account Settings:Read。';
 
-  if (code === 6003 || code === 6111) return 'Token 格式不对，多半是复制时多带了空格或换行。';
-  if (code === 9109 || code === 10000 || status === 401 || status === 403) return PERMISSION_HINT;
-  if (code === 10016) return `Worker 名字不合法：${raw}`;
-  if (code === 10027) return 'Worker 代码超过 Cloudflare 的体积上限，装不上去。';
-  if (code === 10037) return '这个账号的 Worker 数量已经到上限了，先去面板删掉不用的。';
-  if (code === 10054 || code === 10055) return `密钥数量或长度超限：${raw}`;
-  if (code === 7003) return '请求路径不对（多半是代理那边的问题，不是你的 token）。';
-  return raw ? `Cloudflare 返回：${raw}（code ${code ?? '?'}）` : `Cloudflare 返回 HTTP ${status}`;
+  const explain = (): string => {
+    if (code === 6003 || code === 6111) return 'Token 格式不对，多半是复制时多带了空格或换行。';
+    if (code === 9109 || code === 10000 || status === 401 || status === 403) return PERMISSION_HINT;
+    if (code === 10016) return 'Worker 名字不合法。';
+    if (code === 10027) return 'Worker 代码超过 Cloudflare 的体积上限，装不上去。';
+    if (code === 10037) return '这个账号的 Worker 数量已经到上限了，先去面板删掉不用的。';
+    if (code === 10054 || code === 10055) return '密钥数量或长度超限。';
+    if (code === 7003) return '请求路径不对（多半是代理那边的问题，不是你的 token）。';
+    return '这个错没见过，照原文查吧。';
+  };
+
+  const detail = `原文：${raw || '（空）'}｜code ${code ?? '无'}｜HTTP ${status}`;
+  return `${explain()}\n${detail}${request ? `｜${request}` : ''}`;
 }
 
 /**
@@ -348,7 +371,7 @@ async function cfApi<T = unknown>(
     ok: success,
     status: res.status,
     body: body as T,
-    error: success ? undefined : explainCfError(res.status, body),
+    error: success ? undefined : explainCfError(res.status, body, `${init.method || 'GET'} ${apiPath}`),
   };
 }
 
@@ -530,7 +553,7 @@ async function ensureDatabase(
  * 拿账号的 workers.dev 子域；没有就用 desiredSubdomain 注册一个。
  * 全新的 Cloudflare 账号是没有子域的，而它决定了最终的 Worker 地址，绕不过去。
  */
-async function ensureSubdomain(
+export async function ensureSubdomain(
   token: string,
   accountId: string,
   desired?: string,
@@ -539,6 +562,17 @@ async function ensureSubdomain(
     token,
     `/accounts/${accountId}/workers/subdomain`,
   );
+  // 401/403 是「没让我读」，不是「这个账号没有子域名」。不单独拎出来的话，下面会把它
+  // 当成新账号，请用户起一个名字——而读都读不动，注册那一步同样过不去，用户于是对着
+  // 「换一个名字再试」换个不停。只挑这两个状态码：账号真没有子域名时 CF 回什么没实测过，
+  // 把所有失败都当权限的话，会把全新账号堵死在这里，那比现在更糟。
+  if (!current.ok && (current.status === 401 || current.status === 403)) {
+    return {
+      ok: false,
+      code: 'CF_ERROR',
+      error: `读不到这个账号的 workers.dev 子域名。\n${current.error}`,
+    };
+  }
   const existing = current.body?.result?.subdomain;
   if (current.ok && existing) return { ok: true, subdomain: existing };
 

@@ -5,9 +5,6 @@ import { AppID, CharacterProfile, CharacterExportData, UserImpression, MemoryFra
 import { SlidersHorizontal, SpeakerHigh, Books, BookOpen } from '@phosphor-icons/react';
 import Modal from '../components/os/Modal';
 import { processImage } from '../utils/file';
-import { Capacitor } from '@capacitor/core';
-import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
-import { Share } from '@capacitor/share';
 import { DB } from '../utils/db';
 import { ContextBuilder } from '../utils/context';
 import { formatMessageWithTime, formatMessageForPrompt } from '../utils/messageFormat';
@@ -16,15 +13,19 @@ import ImpressionPanel from '../components/character/ImpressionPanel';
 import RoomPlatePanel from '../components/character/RoomPlatePanel';
 import MemoryArchivist from '../components/character/MemoryArchivist';
 import ChibiStudio, { ChibiShelfPanel } from '../components/character/ChibiStudio';
+import TokenImg from '../components/os/TokenImg';
+import { resolveBlobRefsDeep, migrateDataUrlToRef } from '../utils/blobRef';
 import { characterLaunch } from '../utils/characterLaunch';
 import { safeFetchJson, extractContent } from '../utils/safeApi';
 import { fetchMiniMaxVoices, MiniMaxVoiceItem } from '../utils/minimaxVoice';
 import { resolveMiniMaxApiKey } from '../utils/minimaxApiKey';
+import { normalizeElevenLabsVoiceId, synthesizeSpeechElevenLabsDetailed } from '../utils/elevenLabsTts';
 import { normalizeUserImpression } from '../utils/impression';
 import { injectMemoryPalace } from '../utils/memoryPalace/pipeline';
 import { COMMON_TIMEZONES } from '../utils/timezone';
 import { toMountedWorldbook } from '../utils/worldbook';
 import { stripSensitiveCardFields } from '../utils/characterCard';
+import { shareOrDownloadFile } from '../utils/shareExport';
 import { confirmExportSafety } from '../utils/exportGuard';
 import { trackEvent } from '../utils/analytics';
 import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
@@ -65,7 +66,7 @@ const CharacterCard: React.FC<{
     >
         <div className="flex items-center gap-4">
             <div className="w-14 h-14 shrink-0 rounded-full overflow-hidden border border-violet-100 bg-violet-50">
-                <img src={char.avatar} className="w-full h-full object-cover" alt={char.name} />
+                <TokenImg value={char.avatar} className="w-full h-full object-cover" alt={char.name} />
             </div>
             <div className="flex-1 min-w-0 pr-6">
                 <h3 className="text-lg font-bold truncate text-slate-800">
@@ -174,6 +175,7 @@ const Character: React.FC = () => {
   // Impression State
   const [isGeneratingImpression, setIsGeneratingImpression] = useState(false);
   const [isLoadingVoices, setIsLoadingVoices] = useState(false);
+  const [isTestingElevenLabsVoice, setIsTestingElevenLabsVoice] = useState(false);
   const [voiceOptions, setVoiceOptions] = useState<Record<'system' | 'voice_cloning' | 'voice_generation', MiniMaxVoiceItem[]>>({
       system: [],
       voice_cloning: [],
@@ -207,6 +209,7 @@ const Character: React.FC = () => {
   const applyVoiceToCharacter = (voice: MiniMaxVoiceItem, source: 'system' | 'voice_cloning' | 'voice_generation') => {
       if (!formData) return;
       handleChange('voiceProfile', {
+          ...(formData.voiceProfile || {}),
           provider: 'minimax',
           voiceId: voice.voice_id,
           voiceName: voice.voice_name || '',
@@ -216,6 +219,47 @@ const Character: React.FC = () => {
       });
       addToast(`已应用音色：${voice.voice_name || voice.voice_id}`, 'success');
       trackEvent('应用音色到角色', { source });
+  };
+
+  const handleTestElevenLabsVoice = async () => {
+      if (!formData || isTestingElevenLabsVoice) return;
+      const voiceId = normalizeElevenLabsVoiceId(formData.voiceProfile?.elevenLabsVoiceId);
+      if (!voiceId) {
+          addToast('请先填写 ElevenLabs Voice ID', 'info');
+          return;
+      }
+      if (!apiConfig.elevenLabsApiKey?.trim()) {
+          addToast('请先在设置 → 其他 API 保存 ElevenLabs Key', 'info');
+          return;
+      }
+      setIsTestingElevenLabsVoice(true);
+      let previewUrl = '';
+      const releasePreviewUrl = () => {
+          if (previewUrl.startsWith('blob:')) URL.revokeObjectURL(previewUrl);
+          previewUrl = '';
+      };
+      try {
+          const previewChar: CharacterProfile = {
+              ...formData,
+              voiceProfile: { ...(formData.voiceProfile || {}), elevenLabsVoiceId: voiceId },
+          };
+          const { url } = await synthesizeSpeechElevenLabsDetailed(
+              `你好，我是${formData.name || '你的角色'}。现在能听见我的声音吗？`,
+              previewChar,
+              apiConfig,
+          );
+          previewUrl = url;
+          const audio = new Audio(url);
+          audio.onended = releasePreviewUrl;
+          audio.onerror = releasePreviewUrl;
+          await audio.play();
+          addToast('ElevenLabs 试听已开始', 'success');
+      } catch (error: any) {
+          releasePreviewUrl();
+          addToast(error?.message || 'ElevenLabs 试听失败', 'error');
+      } finally {
+          setIsTestingElevenLabsVoice(false);
+      }
   };
 
   // Load archive prompts from localStorage (shared with ChatApp)
@@ -425,7 +469,9 @@ const Character: React.FC = () => {
           try {
               setIsCompressing(true);
               const processedBase64 = await processImage(file);
-              handleChange('avatar', processedBase64);
+              // 头像存令牌，二进制单独躺在 blob_assets 里（省掉 base64 那 ~33% 的膨胀）。
+              // 同一张图之前存过就复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
+              handleChange('avatar', await migrateDataUrlToRef(processedBase64));
               // 清空 URL draft, 否则用户之后再触发 URL input 的 onBlur 会用脏旧 URL
               // 把刚上传的 data URL 头像盖掉. 不走 effect 监听 avatar 的方案 —— 那会
               // 在用户正在打 URL 时吃掉 draft.
@@ -615,8 +661,21 @@ const Character: React.FC = () => {
   };
 
   const handleExportPreview = () => { if (!formData) return; const mems = formData.memories as any[]; if (!mems || mems.length === 0) { addToast('暂无记忆数据可导出', 'info'); return; } const sortedMemories = [...mems].sort((a, b) => a.date.localeCompare(b.date)); let text = `【角色档案】\nName: ${formData.name}\nExported: ${new Date().toLocaleString()}\n\n`; if (formData.refinedMemories) { text += `=== 核心记忆 ===\n`; Object.entries(formData.refinedMemories).sort().forEach(([k, v]) => { text += `[${k}]: ${v}\n`; }); text += `\n=== 详细日志 ===\n`; } let currentYear = '', currentMonth = ''; sortedMemories.forEach(mem => { const match = mem.date.match(/(\d{4})[-/年](\d{1,2})/); if (match) { const y = match[1], m = match[2]; if (y !== currentYear) { text += `\n[ ${y}年 ]\n`; currentYear = y; currentMonth = ''; } if (m !== currentMonth) { text += `\n-- ${parseInt(m)}月 --\n\n`; currentMonth = m; } } text += `${mem.date} ${mem.mood ? `(#${mem.mood})` : ''}\n${mem.summary}\n\n--------------------------\n\n`; }); setExportText(text); setShowExportModal(true); navigator.clipboard.writeText(text).then(() => addToast('内容已自动复制到剪贴板', 'info')).catch(() => {}); };
-  const handleNativeShare = async () => { if(!exportText) return; if (Capacitor.isNativePlatform()) { try { const fileName = `${formData?.name || 'character'}_memories.txt`; await Filesystem.writeFile({ path: fileName, data: exportText, directory: Directory.Cache, encoding: Encoding.UTF8 }); const uri = await Filesystem.getUri({ directory: Directory.Cache, path: fileName }); await Share.share({ title: '记忆档案', files: [uri.uri] }); } catch(e: any) { console.error("Native share failed", e); addToast('分享组件调起失败，请直接复制文本', 'error'); } } };
-  const handleWebFileDownload = () => { const fileName = `${formData?.name || 'character'}_memories.txt`; const blob = new Blob([exportText], { type: 'text/plain' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = fileName; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); addToast('已触发浏览器下载', 'success'); };
+  const handleExportMemoryFile = async () => {
+      if (!exportText) return;
+      try {
+          const result = await shareOrDownloadFile({
+              content: exportText,
+              fileName: `${formData?.name || 'character'}_memories.txt`,
+              mimeType: 'text/plain;charset=utf-8',
+              shareTitle: '记忆档案',
+          });
+          addToast(result === 'shared' ? '已打开记忆档案分享面板' : '记忆档案已导出', 'success');
+      } catch (error) {
+          console.error('Memory export failed', error);
+          addToast('文件导出失败，请直接复制文本', 'error');
+      }
+  };
   
   const handleImportMemories = async () => { 
       if (!importText.trim() || !apiConfig.apiKey) { addToast('请检查输入内容或 API 设置', 'error'); return; } 
@@ -1001,69 +1060,32 @@ ${isInitialGeneration ? `
       // 导出前明文密钥体检 + 二次确认：正常为「安全，可分享」；若意外检出密钥则中止并提示上报。
       if (!(await confirmExportSafety(exportData))) return;
 
+      // 角色身上的图（Q 版形象 sprites、见面皮肤 dateSkinSets）存的是令牌，令牌只有本机认得，
+      // 原样导出对方只会拿到一串死字符串、图全空。所以先在一份深拷贝上把令牌换回内嵌的 data URL
+      // （resolveBlobRefsDeep 是原地改的，绝不能拿 formData 去喂，那等于把用户自己的角色图改没了）。
+      const portableData: CharacterExportData =
+          typeof structuredClone === 'function'
+              ? structuredClone(exportData)
+              : JSON.parse(JSON.stringify(exportData));
+      try {
+          await resolveBlobRefsDeep(portableData);
+      } catch {
+          addToast('导出失败：角色身上的图读取不出来', 'error');
+          return;
+      }
+
       trackEvent('导出角色卡');
 
-      const json = JSON.stringify(exportData, null, 2);
+      const json = JSON.stringify(portableData, null, 2);
       const fileName = `${formData.name || 'Character'}_Card.json`;
       
-      if (Capacitor.isNativePlatform()) {
-          try {
-              await Filesystem.writeFile({
-                  path: fileName,
-                  data: json,
-                  directory: Directory.Cache,
-                  encoding: Encoding.UTF8,
-              });
-              const uriResult = await Filesystem.getUri({
-                  directory: Directory.Cache,
-                  path: fileName,
-              });
-              await Share.share({
-                  title: '导出角色卡',
-                  files: [uriResult.uri],
-              });
-              addToast('已调起分享', 'success');
-              return;
-          } catch (e: any) {
-              console.error("Native Export Error", e);
-              addToast('原生分享失败，尝试浏览器分享/下载', 'info');
-          }
-      }
-
-      try {
-          // Align with Settings export fallback logic for wrapped webviews:
-          // try Web Share first, then fallback to download.
-          const file = new File([json], fileName, { type: 'application/json' });
-          const canShareFile = typeof navigator !== 'undefined'
-              && typeof navigator.share === 'function'
-              && (typeof navigator.canShare !== 'function' || navigator.canShare({ files: [file] }));
-
-          if (canShareFile) {
-              await navigator.share({
-                  title: '导出角色卡',
-                  files: [file],
-              });
-              addToast('已调起分享', 'success');
-              return;
-          }
-      } catch (e: any) {
-          // User cancellation and unsupported cases should continue to download fallback.
-          if (e?.name !== 'AbortError') {
-              console.error('Web Share Export Error', e);
-          }
-      }
-
-          const blob = new Blob([json], { type: 'application/json' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = fileName;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-          
-          addToast('角色卡已生成并下载', 'success');
+      const result = await shareOrDownloadFile({
+          content: json,
+          fileName,
+          mimeType: 'application/json;charset=utf-8',
+          shareTitle: '导出角色卡',
+      });
+      addToast(result === 'shared' ? '已打开角色卡分享面板' : '角色卡已生成并导出', 'success');
   };
 
   const handleImportCard = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1297,7 +1319,7 @@ ${isInitialGeneration ? `
                        <div className="space-y-6 animate-fade-in">
                            <div className="flex items-center gap-5">
                                <div className="relative group cursor-pointer w-24 h-24 shrink-0" onClick={() => fileInputRef.current?.click()}>
-                                   <div className="w-full h-full rounded-[2rem] shadow-md bg-white border-4 border-white overflow-hidden relative"><img src={formData.avatar} className={`w-full h-full object-cover ${isCompressing ? 'opacity-50 blur-sm' : ''}`} alt="A" /></div>
+                                   <div className="w-full h-full rounded-[2rem] shadow-md bg-white border-4 border-white overflow-hidden relative"><TokenImg value={formData.avatar} className={`w-full h-full object-cover ${isCompressing ? 'opacity-50 blur-sm' : ''}`} alt="A" /></div>
                                    <input type="file" ref={fileInputRef} className="hidden" accept="image/*" onChange={handleFileChange} />
                                </div>
                                <div className="flex-1 space-y-3">
@@ -1511,7 +1533,7 @@ ${isInitialGeneration ? `
 
                            <div className="bg-white rounded-3xl p-4 shadow-sm border border-slate-100 space-y-3">
                                <div className="flex items-center justify-between">
-                                   <label className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest flex items-center gap-1"><SpeakerHigh size={12} /> MiniMax 音色设定</label>
+                                   <label className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest flex items-center gap-1"><SpeakerHigh size={12} /> 角色语音音色</label>
                                    <div className="flex gap-1.5">
                                        <button
                                            onClick={() => { setActiveCharacterId(formData.id); openApp(AppID.VoiceDesigner); }}
@@ -1530,10 +1552,44 @@ ${isInitialGeneration ? `
                                </div>
                                <p className="text-[11px] text-slate-500">已有 voice_id 可直接填，不依赖查询。聊天角色配置后，后续接 TTS 可直接读取。</p>
 
+                               <div className="rounded-2xl border border-violet-200/60 bg-violet-50/40 p-2.5 space-y-2">
+                                   <div className="flex items-center justify-between gap-2">
+                                       <span className="text-[10px] font-bold text-violet-600 uppercase tracking-widest">MiniMax 合成参数</span>
+                                       <span className="text-[9px] text-slate-400">老角色默认经典</span>
+                                   </div>
+                                   <div className="grid grid-cols-2 gap-1 rounded-xl bg-white/80 p-1">
+                                       {([
+                                           ['legacy', '经典参数'],
+                                           ['natural-v2', '新版自然参数'],
+                                       ] as const).map(([version, label]) => {
+                                           const activeVersion = formData.voiceProfile?.minimaxParamVersion === 'natural-v2' ? 'natural-v2' : 'legacy';
+                                           return (
+                                               <button
+                                                   key={version}
+                                                   type="button"
+                                                   onClick={() => handleChange('voiceProfile', {
+                                                       ...(formData.voiceProfile || {}),
+                                                       minimaxParamVersion: version,
+                                                   })}
+                                                   className={`rounded-lg px-2 py-1.5 text-[10px] font-bold transition-colors ${activeVersion === version ? 'bg-violet-500 text-white shadow-sm' : 'text-slate-400'}`}
+                                               >
+                                                   {label}
+                                               </button>
+                                           );
+                                       })}
+                                   </div>
+                                   <p className="text-[10px] text-slate-400 leading-relaxed">
+                                       {formData.voiceProfile?.minimaxParamVersion === 'natural-v2'
+                                           ? '对齐捏声音试听与聊天、见面、电话参数，保留模型原生韵律，不再自动给每个标点插停顿。'
+                                           : '保留现有自动停顿、参数限幅和动态情感优先规则，历史效果不会改变。'}
+                                   </p>
+                               </div>
+
                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                                    <input
                                        value={formData.voiceProfile?.voiceId || ''}
                                        onChange={(e) => handleChange('voiceProfile', {
+                                           ...(formData.voiceProfile || {}),
                                            provider: 'minimax',
                                            voiceId: e.target.value,
                                            voiceName: formData.voiceProfile?.voiceName || '',
@@ -1547,6 +1603,7 @@ ${isInitialGeneration ? `
                                    <input
                                        value={formData.voiceProfile?.model || 'speech-2.8-hd'}
                                        onChange={(e) => handleChange('voiceProfile', {
+                                           ...(formData.voiceProfile || {}),
                                            provider: 'minimax',
                                            voiceId: formData.voiceProfile?.voiceId || '',
                                            voiceName: formData.voiceProfile?.voiceName || '',
@@ -1574,7 +1631,32 @@ ${isInitialGeneration ? `
                                    <p className="text-[10px] text-slate-400">从 fish.audio 选好音色后，把那一页的链接（含 ?modelId=…）或 32 位 id 直接贴进来都行，会自动识别。设置里语音选「鱼声 Fish」后该角色就用它合成；与上面的 MiniMax voice_id 各存各的。</p>
                                </div>
 
-                               {/* 语速：MiniMax 与鱼声共用 voiceProfile.speed */}
+                               {/* ElevenLabs 音色：角色独立保存，设置页只负责 Key / 模型。 */}
+                               <div className="rounded-2xl border border-violet-200/60 bg-violet-50/40 p-2.5 space-y-1.5">
+                                   <div className="flex items-center justify-between gap-2">
+                                       <div className="text-[10px] font-bold text-violet-600 uppercase tracking-widest">ElevenLabs 音色</div>
+                                       <button
+                                           type="button"
+                                           onClick={() => void handleTestElevenLabsVoice()}
+                                           disabled={isTestingElevenLabsVoice}
+                                           className="text-[10px] rounded-lg border border-violet-200 bg-white px-2 py-1 font-bold text-violet-600 disabled:opacity-50"
+                                       >
+                                           {isTestingElevenLabsVoice ? '试听中…' : '试听'}
+                                       </button>
+                                   </div>
+                                   <input
+                                       value={formData.voiceProfile?.elevenLabsVoiceId || ''}
+                                       onChange={(e) => handleChange('voiceProfile', {
+                                           ...(formData.voiceProfile || {}),
+                                           elevenLabsVoiceId: e.target.value,
+                                       })}
+                                       className="w-full bg-white rounded-2xl px-3 py-2 text-xs border border-slate-200"
+                                       placeholder="粘贴 Voice ID 或 ElevenLabs 音色页面链接"
+                                   />
+                                   <p className="text-[10px] text-slate-400">从 ElevenLabs Voices / Voice Library 复制 Voice ID；也可直接粘贴含 voiceId 的页面链接。设置里语音选 ElevenLabs 后使用，与 MiniMax、鱼声音色分别保存。</p>
+                               </div>
+
+                               {/* 语速：三家 TTS 共用 voiceProfile.speed */}
                                <div className="space-y-1 pt-1">
                                    <div className="flex items-center justify-between">
                                        <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">语速</label>
@@ -1592,7 +1674,7 @@ ${isInitialGeneration ? `
                                        })}
                                        className="w-full accent-primary"
                                    />
-                                   <p className="text-[10px] text-slate-400">越小越慢、越像娓娓道来。1.0 正常；觉得"赶"就拉到 0.85–0.95。MiniMax 与鱼声共用这个语速（鱼声没单独配时默认略慢 0.9）。</p>
+                                   <p className="text-[10px] text-slate-400">越小越慢、越像娓娓道来。1.0 正常；觉得“赶”就拉到 0.85–0.95。MiniMax、鱼声与 ElevenLabs 共用该角色的语速。</p>
                                </div>
 
                                {(voiceOptions.system.length + voiceOptions.voice_cloning.length + voiceOptions.voice_generation.length) > 0 && (
@@ -1838,7 +1920,7 @@ ${isInitialGeneration ? `
            </div>
        </Modal>
 
-       <Modal isOpen={showExportModal} title="导出文本" onClose={() => setShowExportModal(false)} footer={<div className="flex gap-2 w-full"><button onClick={() => { navigator.clipboard.writeText(exportText); addToast('已复制', 'success'); }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl">复制全文</button>{Capacitor.isNativePlatform() ? (<button onClick={handleNativeShare} className="flex-1 py-3 bg-slate-800 text-white font-bold rounded-2xl shadow-lg flex items-center justify-center gap-2"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 1 0 3.935 2.186 2.25 2.25 0 0 0-3.935-2.186Zm0-12.814a2.25 2.25 0 1 0 3.933-2.185 2.25 2.25 0 0 0-3.933 2.185Z" /></svg>文件分享</button>) : (<button onClick={handleWebFileDownload} className="flex-1 py-3 bg-primary text-white font-bold rounded-2xl shadow-lg flex items-center justify-center gap-2"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" /></svg>下载文本</button>)}</div>}>
+       <Modal isOpen={showExportModal} title="导出文本" onClose={() => setShowExportModal(false)} footer={<div className="flex gap-2 w-full"><button onClick={() => { navigator.clipboard.writeText(exportText); addToast('已复制', 'success'); }} className="flex-1 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl">复制全文</button><button onClick={handleExportMemoryFile} className="flex-1 py-3 bg-slate-800 text-white font-bold rounded-2xl shadow-lg flex items-center justify-center gap-2"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M7.217 10.907a2.25 2.25 0 1 0 0 2.186m0-2.186c.18.324.283.696.283 1.093s-.103.77-.283 1.093m0-2.186 9.566-5.314m-9.566 7.5 9.566 5.314m0 0a2.25 2.25 0 1 0 3.935 2.186 2.25 2.25 0 0 0-3.935-2.186Zm0-12.814a2.25 2.25 0 1 0 3.933-2.185 2.25 2.25 0 0 0-3.933 2.185Z" /></svg>导出文件</button></div>}>
            <div className="bg-slate-50 rounded-2xl p-3 border border-slate-100 space-y-2"><div className="text-[10px] text-slate-400">已自动复制到剪贴板。如果分享失败，请直接手动复制。</div><textarea value={exportText} readOnly className="w-full h-40 bg-transparent border-none text-[10px] font-mono text-slate-600 resize-none focus:ring-0 leading-relaxed select-all" onClick={(e) => e.currentTarget.select()}/></div>
        </Modal>
 

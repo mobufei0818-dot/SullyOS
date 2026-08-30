@@ -18,8 +18,10 @@ import { WRITING_PRESETS, type WritingPreset } from '../../utils/vrWorld/presets
 import { resolveTheaterApi, generateScript, polishScript, collectActorNotes, charActorCount, runDirector, type TheaterCtx } from '../../utils/vrWorld/theater';
 import { rollNpcChibi, randomNpcName } from '../../utils/vrWorld/npcRoll';
 import { getChibi } from '../../utils/vrWorld/chibi';
+import TokenImg from '../../components/os/TokenImg';
 import { CreatorIframe } from '../../components/Like520Event';
 import type { VRScript, VRStagedPlay, VRCastAssign, VRActorNote, VRStageMode, VRPlayRole, Emoji, EmojiCategory, CharacterProfile } from '../../types';
+import { shareOrDownloadFile } from '../../utils/shareExport';
 
 const tid = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 const SERIF = `'Noto Serif SC',serif`;
@@ -327,7 +329,7 @@ const StageView: React.FC<{ script: VRScript; ctx: TheaterCtx; apiConfig: any; a
                                     <div style={{ fontSize: 11.5, fontWeight: 800, color: TH.text }}>{r.name} <span style={{ fontSize: 9, fontWeight: 400, color: TH.sub }}>{r.persona}</span></div>
                                     {a?.isNpc ? (
                                         <div className="flex items-center gap-2" style={{ marginTop: 6 }}>
-                                            {a.npcChibi ? <img src={a.npcChibi} style={{ height: 34, objectFit: 'contain' }} alt="" /> : <div style={{ height: 30, width: 30, borderRadius: 999, background: TH.bg3, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: TH.gold }}>{a.actorName.slice(0, 1)}</div>}
+                                            {a.npcChibi ? <TokenImg value={a.npcChibi} style={{ height: 34, objectFit: 'contain' }} alt="" /> : <div style={{ height: 30, width: 30, borderRadius: 999, background: TH.bg3, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: TH.gold }}>{a.actorName.slice(0, 1)}</div>}
                                             <span style={{ fontSize: 11.5, color: TH.text }}>{a.actorName} <span style={{ fontSize: 8.5, color: TH.gold }}>NPC</span></span>
                                             <div className="ml-auto flex items-center gap-1">
                                                 <TButton size="sm" disabled={!!rolling} onClick={() => rollNpc(r, true)} title="换一个">{rolling === r.name ? '🎲…' : '🎲'}</TButton>
@@ -407,7 +409,7 @@ const ActorNoteCard: React.FC<{ note: VRActorNote; cast: VRCastAssign[]; charact
     return (
         <button onClick={() => setOpen(o => !o)} className="w-full text-left" style={{ ...cardStyle, border: `1px solid ${note.cooperative ? TH.line : 'rgba(185,56,74,.6)'}` }}>
             <div className="flex items-center gap-2">
-                {img ? <img src={img} style={{ height: 30, width: 30, objectFit: 'contain' }} alt="" /> : <div style={{ height: 28, width: 28, borderRadius: 999, background: TH.bg3, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: TH.gold }}>{note.actorName.slice(0, 1)}</div>}
+                {img ? <TokenImg value={img} style={{ height: 30, width: 30, objectFit: 'contain' }} alt="" /> : <div style={{ height: 28, width: 28, borderRadius: 999, background: TH.bg3, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: TH.gold }}>{note.actorName.slice(0, 1)}</div>}
                 <span style={{ fontSize: 11.5, fontWeight: 800, color: TH.text }}>{note.actorName}</span>
                 <span style={{ fontSize: 8.5, color: TH.sub }}>饰 {note.roleName}</span>
                 <span className="ml-auto" style={{ fontSize: 9.5, fontWeight: 800, color: attColor, border: `1px solid ${attColor}`, borderRadius: 999, padding: '1px 8px' }}>{att}</span>
@@ -533,7 +535,7 @@ const PlaybackView: React.FC<{ play: VRStagedPlay; characters: CharacterProfile[
                         return (
                             <div key={name} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', transform: `translateY(${depth}px)`, animation: active ? 'thHopA .62s ease-in-out infinite' : `thHop 1.9s ${idx * .28}s ease-in-out infinite`, opacity: active || !speaker ? 1 : 0.5, transition: 'opacity .2s', zIndex: active ? 5 : 1 }}>
                                 {c.img ? (
-                                    <img src={c.img} alt="" style={{ height: baseH, transform: `scaleX(${c.flip ? -1 : 1}) translateY(${c.offsetY}px)`, objectFit: 'contain', filter: active ? 'drop-shadow(0 0 12px rgba(255,214,130,.75))' : 'drop-shadow(0 6px 6px rgba(0,0,0,.5))' }} />
+                                    <TokenImg value={c.img} alt="" style={{ height: baseH, transform: `scaleX(${c.flip ? -1 : 1}) translateY(${c.offsetY}px)`, objectFit: 'contain', filter: active ? 'drop-shadow(0 0 12px rgba(255,214,130,.75))' : 'drop-shadow(0 6px 6px rgba(0,0,0,.5))' }} />
                                 ) : (
                                     <div style={{ height: 64, width: 64, borderRadius: 999, background: TH.gold, color: '#2a1810', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, fontWeight: 800 }}>{displayName(name).slice(0, 1)}</div>
                                 )}
@@ -709,7 +711,12 @@ const PolishModal: React.FC<{ open: boolean; onClose: () => void; apiConfig: any
 // ============ 上传 txt ============
 const UploadButton: React.FC<{ onParsed: (p: { title: string; logline: string; roles: VRPlayRole[]; body: string }) => void }> = ({ onParsed }) => {
     const inputRef = React.useRef<HTMLInputElement>(null);
-    const dlTemplate = () => { const blob = new Blob([SCRIPT_TEMPLATE], { type: 'text/plain;charset=utf-8' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = '剧本模板.txt'; a.click(); URL.revokeObjectURL(a.href); };
+    const dlTemplate = () => shareOrDownloadFile({
+        content: SCRIPT_TEMPLATE,
+        fileName: '剧本模板.txt',
+        mimeType: 'text/plain;charset=utf-8',
+        shareTitle: '彼方剧院剧本模板',
+    });
     return (
         <>
             <TButton size="sm" icon={<UploadSimple size={13} weight="bold" />} onClick={() => inputRef.current?.click()}>传 txt</TButton>

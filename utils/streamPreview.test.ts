@@ -78,9 +78,9 @@ describe('computeStreamPreviewBubbles', () => {
         expect(computeStreamPreviewBubbles(text)).toEqual([]);
     });
 
-    it('CJK 之间的空格按最终管线同样切成多个气泡', () => {
+    it('CJK 之间的空格按最终管线保留在同一个气泡', () => {
         const bubbles = computeStreamPreviewBubbles('你来了 坐吧\n');
-        expect(bubbles).toEqual(['你来了', '坐吧']);
+        expect(bubbles).toEqual(['你来了 坐吧']);
     });
 
     it('空文本 / 纯空行返回空数组', () => {

@@ -19,6 +19,19 @@ const sseResponse = (events: string[]) => new Response(sseBody(events), {
     headers: { 'Content-Type': 'text/event-stream' },
 });
 
+const lingeringSseResponse = (events: string[], onCancel: () => void) => new Response(
+    new ReadableStream<Uint8Array>({
+        start(controller) {
+            const enc = new TextEncoder();
+            for (const event of events) controller.enqueue(enc.encode(event));
+            // Deliberately never close: some compatible Claude proxies leave the
+            // socket alive even after their terminal SSE event.
+        },
+        cancel() { onCancel(); },
+    }),
+    { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+);
+
 afterEach(() => vi.restoreAllMocks());
 
 describe('safeFetchJson streaming', () => {
@@ -42,6 +55,45 @@ describe('safeFetchJson streaming', () => {
         expect(data.choices[0].message.content).toBe('你好呀\n在干嘛');
         expect(data.choices[0].finish_reason).toBe('stop');
         expect(data.usage.total_tokens).toBe(42);
+    });
+
+    it('收到 [DONE] 后立即收口，不等待代理主动关闭连接', async () => {
+        const cancelled = vi.fn();
+        vi.stubGlobal('fetch', vi.fn(async () => lingeringSseResponse([
+            'data: {"choices":[{"delta":{"content":"已经生成完"}}]}\n\n',
+            'data: [DONE]\n\n',
+        ], cancelled)));
+
+        const data = await safeFetchJson(
+            'https://api.test/v1/chat/completions',
+            { method: 'POST', body: '{"stream":true}' },
+            0,
+            0,
+            undefined,
+            {},
+        );
+        expect(data.choices[0].message.content).toBe('已经生成完');
+        expect(cancelled).toHaveBeenCalledOnce();
+    });
+
+    it('缺少 [DONE] 时也可由 finish_reason 收口长连接', async () => {
+        const cancelled = vi.fn();
+        vi.stubGlobal('fetch', vi.fn(async () => lingeringSseResponse([
+            'data: {"choices":[{"delta":{"content":"最后正文"}}]}\n\n',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+        ], cancelled)));
+
+        const data = await safeFetchJson(
+            'https://api.test/v1/chat/completions',
+            { method: 'POST', body: '{"stream":true}' },
+            0,
+            0,
+            undefined,
+            {},
+        );
+        expect(data.choices[0].message.content).toBe('最后正文');
+        expect(data.choices[0].finish_reason).toBe('stop');
+        expect(cancelled).toHaveBeenCalledOnce();
     });
 
     it('tool_calls 分片按 index 合并，不因流式丢失', async () => {

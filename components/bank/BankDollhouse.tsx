@@ -8,6 +8,7 @@ import {
 } from './BankGameConstants';
 import BankAssetIcon, { isBankAssetUrl } from './BankAssetIcon';
 import TokenImg from '../os/TokenImg';
+import { isBlobRef } from '../../utils/blobRef';
 import { useOS } from '../../context/OSContext';
 import { DB } from '../../utils/db';
 import { processImage } from '../../utils/file';
@@ -906,7 +907,8 @@ const BankDollhouse: React.FC<Props> = ({
                     {!locked && roomStaff.map(staff => {
                         const pos = actorPositions[staff.id] || clampActorPos(staff.x || 50, staff.y || 72);
                         const staffScale = staff.scale ?? 1;
-                        const isStaffUrl = staff.avatar.startsWith('http') || staff.avatar.startsWith('data');
+                        // 店员头像可能是 emoji 字符，也可能是图（外链 / data: / blobref 令牌）
+                        const isStaffUrl = staff.avatar.startsWith('http') || staff.avatar.startsWith('data') || isBlobRef(staff.avatar);
                         return (
                             <div
                                 key={staff.id}
@@ -925,7 +927,7 @@ const BankDollhouse: React.FC<Props> = ({
                             >
                                 <div className="drop-shadow-md origin-bottom" style={{ transform: `scale(${staffScale})` }}>
                                     {isStaffUrl
-                                        ? <img src={staff.avatar} className="w-10 h-10 object-contain" draggable={false} />
+                                        ? <TokenImg value={staff.avatar} className="w-10 h-10 object-contain" draggable={false} />
                                         : <span className="text-3xl">{staff.avatar}</span>
                                     }
                                 </div>

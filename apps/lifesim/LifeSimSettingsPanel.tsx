@@ -4,6 +4,7 @@ import { CheckSquare, FloppyDisk, Gear, Square, X } from '@phosphor-icons/react'
 import { useOS } from '../../context/OSContext';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../../components/character/CharacterGroupFilter';
 import { trackEvent } from '../../utils/analytics';
+import TokenImg from '../../components/os/TokenImg';
 
 type LifeSimApiDraft = Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'>;
 
@@ -163,7 +164,7 @@ const LifeSimSettingsPanel: React.FC<{
                                         minWidth: 0,
                                     }}
                                 >
-                                    <img src={char.avatar} alt={char.name} style={{ width: 32, height: 32, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }} />
+                                    <TokenImg value={char.avatar} alt={char.name} style={{ width: 32, height: 32, borderRadius: 8, objectFit: 'cover', flexShrink: 0 }} />
                                     <div style={{ flex: 1, minWidth: 0 }}>
                                         <div style={{ fontSize: 11, fontWeight: 700, color: '#504a61' }}>{char.name}</div>
                                         <div style={{ fontSize: 9, color: '#8b8499', lineHeight: 1.5, overflowWrap: 'anywhere' }}>

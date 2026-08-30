@@ -83,15 +83,16 @@ export async function handleGithub(req: Request): Promise<Response> {
     if (accept) fwd['Accept'] = accept;
     const apiVer = req.headers.get('X-GitHub-Api-Version');
     if (apiVer) fwd['X-GitHub-Api-Version'] = apiVer;
+    const contentLength = req.headers.get('Content-Length');
+    if (contentLength) fwd['Content-Length'] = contentLength;
     // GitHub rejects requests without a UA.
     fwd['User-Agent'] = 'sully-backup-proxy';
 
     try {
-        let body: ArrayBuffer | null = null;
-        if (ghMethod !== 'GET' && ghMethod !== 'DELETE') {
-            body = await req.arrayBuffer();
-            if (body.byteLength === 0) body = null;
-        }
+        // Pass the incoming stream straight through. Buffering an 80 MB part
+        // with request.arrayBuffer() pushed a 128 MB Worker isolate close to
+        // its memory limit and made concurrent uploads fail unpredictably.
+        const body = ghMethod !== 'GET' && ghMethod !== 'DELETE' ? req.body : null;
 
         const resp = await fetch(targetUrl, {
             method: ghMethod,
@@ -101,15 +102,16 @@ export async function handleGithub(req: Request): Promise<Response> {
         });
 
         const resHeaders = new Headers(CORS);
-        const rct = resp.headers.get('Content-Type');
-        if (rct) resHeaders.set('Content-Type', rct);
-        if (resp.status === 206) {
-            const rcl = resp.headers.get('Content-Length');
-            if (rcl) resHeaders.set('Content-Length', rcl);
+        const forwardedResponseHeaders = [
+            'Content-Type', 'Content-Length', 'Content-Range', 'Retry-After',
+            'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset',
+            'X-RateLimit-Used', 'X-GitHub-Request-Id', 'Link',
+        ];
+        for (const header of forwardedResponseHeaders) {
+            const value = resp.headers.get(header);
+            if (value) resHeaders.set(header, value);
         }
-        const rcr = resp.headers.get('Content-Range');
-        if (rcr) resHeaders.set('Content-Range', rcr);
-        resHeaders.set('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
+        resHeaders.set('Access-Control-Expose-Headers', forwardedResponseHeaders.join(', '));
 
         return new Response(resp.body, {
             status: resp.status,

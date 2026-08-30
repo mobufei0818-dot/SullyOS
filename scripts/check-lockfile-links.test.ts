@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-// @ts-expect-error 纯 JS 脚本，没有类型声明
+// @ts-expect-error JavaScript helper has no type declarations.
 import { findExternalLinks } from './check-lockfile-links.mjs';
 
 const repoRoot = path.resolve(__dirname, '..');

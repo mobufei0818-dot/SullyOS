@@ -42,8 +42,13 @@ describe('chunkText: <语音> 原子块保护', () => {
     ]);
   });
 
-  it('无语音标签时行为不回归 (仍按换行 + CJK 空格分气泡)', () => {
+  it('无语音标签时只按显式换行分气泡，行内 CJK 空格保留', () => {
     expect(ChatParser.chunkText('第一句\n第二句')).toEqual(['第一句', '第二句']);
-    expect(ChatParser.chunkText('你好 世界')).toEqual(['你好', '世界']);
+    expect(ChatParser.chunkText('你好 世界')).toEqual(['你好 世界']);
+  });
+
+  it('角色自定义的日中双语长句不会在中文空格处被拦腰拆开', () => {
+    const input = '「1日3個くらいなら死にはしないよ。卵より、キノコ以外の野菜がゼロなことの方を心配しろ（一天三个死不了人的。比起鸡蛋 你还是多担心一下除了菌菇以外蔬菜为零这件事吧）」';
+    expect(ChatParser.chunkText(input)).toEqual([input]);
   });
 });

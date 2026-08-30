@@ -25,12 +25,13 @@ export const XHS_SPIDER_V3_EXPERIMENT = Object.freeze({
 });
 
 
-// ==================== Backend Detection ====================
+// ==================== Wire Protocol Detection ====================
 
-type BackendMode = 'mcp' | 'bridge';
+type BackendProtocol = 'mcp' | 'bridge';
 type XhsPlatform = 'xhs' | 'rednote';
 
-const detectMode = (serverUrl: string): BackendMode => {
+// 这里只识别传输协议，不代表部署位置：本地 Skills 与云端 Lite 都走 bridge /api。
+const detectMode = (serverUrl: string): BackendProtocol => {
     if (serverUrl.includes('/api')) return 'bridge';
     return 'mcp'; // default: MCP (backwards compatible)
 };

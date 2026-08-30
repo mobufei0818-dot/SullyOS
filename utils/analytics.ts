@@ -302,6 +302,20 @@ export function bucketStorageBytes(bytes: number): string {
 }
 
 /**
+ * 存储水位档位：本机数据占掉了浏览器给的配额的多少。
+ * 光看字节数判断不了「会不会被系统清掉」——同样 800MB，桌面 Chrome 配额几十 GB
+ * 无所谓，iOS Safari 只给 1GB 出头就是随时挨清。跟「持久化许可」放在同一条里，
+ * 才框得出「快满了、又没拿到许可」这批最该被催备份的人。
+ */
+export function bucketStorageWatermark(usageBytes: number, quotaBytes: number): string {
+  const ratio = usageBytes / quotaBytes;
+  if (ratio < 0.25) return '<25%';
+  if (ratio < 0.5) return '25-50%';
+  if (ratio < 0.8) return '50-80%';
+  return '80%+';
+}
+
+/**
  * 上报数据规模档位，每次会话最多一次。
  *
  * 全部是区间，没有一项是精确值，也没有一项来自内容本身——
@@ -313,6 +327,8 @@ export function trackDataScaleOnce(params: {
   maxMemoryCount: number;
   maxMessageCount: number;
   storageBytes: number | null;
+  storageQuotaBytes: number | null;
+  persistedStorage: boolean | null;
   standalone: boolean;
 }): void {
   if (reportedScales.has('data-scale')) return;
@@ -324,6 +340,14 @@ export function trackDataScaleOnce(params: {
     单角色最大聊天条数: bucketMessageCount(params.maxMessageCount),
     // 浏览器不给配额信息时（Safari 部分版本、隐私模式）这一项直接缺席，不猜、不填 0。
     ...(params.storageBytes === null ? {} : { 本地存储占用: bucketStorageBytes(params.storageBytes) }),
+    // 占了配额的百分之多少。配额读不到、或者浏览器回了个 0（隐私模式下有这种），
+    // 这一项就缺席：拿 0 去除会算出 Infinity，直接变成一条假的「80%+」。
+    ...(params.storageBytes === null || !params.storageQuotaBytes
+      ? {}
+      : { 存储水位: bucketStorageWatermark(params.storageBytes, params.storageQuotaBytes) }),
+    // 有没有拿到「系统别清我」的许可。跟上面的占用放同一条，才能看出
+    // 「数据大且没许可」这批高危用户有多少；查不了的浏览器同样缺席，不猜。
+    ...(params.persistedStorage === null ? {} : { 持久化许可: params.persistedStorage ? '已获得' : '未获得' }),
     全屏运行: params.standalone ? '是' : '否',
   });
 }
@@ -445,16 +469,3 @@ export function noteMessageSent(): void {
   });
 }
 
-/**
- * 取本地存储占用字节数。浏览器不支持或拒绝回答时返回 null——
- * 这种情况就让这一项在事件里缺席，不要拿 0 顶上去污染分布。
- */
-export async function readStorageBytes(): Promise<number | null> {
-  if (typeof navigator === 'undefined') return null;
-  try {
-    const estimate = await navigator.storage?.estimate?.();
-    return typeof estimate?.usage === 'number' ? estimate.usage : null;
-  } catch {
-    return null;
-  }
-}

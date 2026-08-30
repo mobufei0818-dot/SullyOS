@@ -20,6 +20,7 @@ import type {
     PromptBlockStat,
 } from '../../utils/apiCallLog';
 import { trackEvent } from '../../utils/analytics';
+import { shareOrDownloadFile } from '../../utils/shareExport';
 
 interface ApiCallLogModalProps {
     isOpen: boolean;
@@ -169,6 +170,24 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                     <p>
                         想判断有没有被偷偷换模型，要几个信号<span className="font-semibold">一起看</span>：token 数是否突然对不上（比如平时 4 万这次 1.5 万）、速度是否突变、角色是否突然变笨/掉格式。只有一个信号异常时，先观望，多攒几轮再说。
                     </p>
+                    <div className="pt-2 border-t border-amber-200/60 space-y-2">
+                        <p className="font-bold text-sky-700">带「☁️ 云端」的那些是什么</p>
+                        <p>
+                            开了<span className="font-semibold">即时对话</span>之后，聊天不再由这个页面发出去，而是交给你自己那台 Worker 在云端发——发完就能关页面，回复照样回得来。这类调用一样记在这里，只是有几处看不到：
+                        </p>
+                        <p>
+                            <span className="font-semibold">「生成中」</span>：云端已经收下，回复还没回来。收到回复才会变成成功。
+                        </p>
+                        <p>
+                            <span className="font-semibold">没有耗时、没有实际后端</span>：请求在云端发出，本地既量不到时间，也看不到对面自报的模型名。
+                        </p>
+                        <p>
+                            <span className="font-semibold text-amber-600">「只算末轮」</span>：角色查了东西再接着说的那种，一轮里会调好几次模型，而云端只报得回最后一次的 token。这条记录上的数字<span className="font-semibold">比实际用量小</span>，别拿它去跟账单对齐。
+                        </p>
+                        <p>
+                            <span className="font-semibold">「已顶替」</span>：这条还没等到回复你就又发了一句，云端把两句合成一次回。这一轮不再单独等回复了。
+                        </p>
+                    </div>
                 </div>
             )}
 
@@ -230,13 +249,26 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                                         <span className="text-[11px] font-bold text-slate-400 shrink-0">{day}</span>
                                         <span className="text-[11px] font-mono text-slate-500 shrink-0">{time}</span>
                                     </div>
-                                    <span
-                                        className={`text-[10px] font-bold px-2 py-0.5 rounded-full shrink-0 ${
-                                            e.ok ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'
-                                        }`}
-                                    >
-                                        {e.ok ? '成功' : `失败${e.status ? ` ${e.status}` : ''}`}
-                                    </span>
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                        {/* 这条不是浏览器自己发的，是云端那台 Worker 发的。不标出来的话，
+                                            同一条记录里「没有耗时、没有实际后端、Token 偏小」全都没法解释 */}
+                                        {e.route && (
+                                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-100 text-sky-600">
+                                                ☁️ 云端
+                                            </span>
+                                        )}
+                                        <span
+                                            className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                                                e.superseded ? 'bg-slate-100 text-slate-500'
+                                                    : e.pending ? 'bg-amber-100 text-amber-600'
+                                                        : e.ok ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'
+                                            }`}
+                                        >
+                                            {e.superseded ? '已顶替'
+                                                : e.pending ? '生成中'
+                                                    : e.ok ? '成功' : `失败${e.status ? ` ${e.status}` : ''}`}
+                                        </span>
+                                    </div>
                                 </div>
                                 <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
                                     <Field label="API" value={e.presetName} accent />
@@ -273,6 +305,9 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                                                 <span className="text-slate-400">
                                                     {' '}（入 {(e.promptTokens ?? 0).toLocaleString('en-US')} · 出 {(e.completionTokens ?? 0).toLocaleString('en-US')}）
                                                 </span>
+                                                {/* 云端这一轮调了不止一次模型时，回传的用量只有最后那次。
+                                                    不注明的话这个数拿去对账永远对不上，还会以为是被多扣了 */}
+                                                {e.tokensPartial && <span className="text-amber-500"> · 只算末轮</span>}
                                             </span>
                                         </div>
                                     )}
@@ -283,7 +318,16 @@ const ApiCallLogModal: React.FC<ApiCallLogModalProps> = ({ isOpen, onClose }) =>
                                     </div>
                                 )}
                                 {expanded && e.promptBreakdown && (
-                                    <PromptBreakdownView blocks={e.promptBreakdown} promptTokens={e.promptTokens} />
+                                    <>
+                                        {/* 只有聊天那条路会被云端二次加料（当前时间、天气热搜这些当下才知道的东西）。
+                                            后台活儿（门牌整理）交上去的就是最终提示词，别让用户以为还有看不见的部分 */}
+                                        {e.route === 'cloud-instant-chat' && (
+                                            <p className="mt-2 text-[10px] text-slate-400 leading-relaxed">
+                                                这里统计的是本地拼好、交给云端的那份。云端真正发出前还会补上当前时间、天气热搜这些当下才知道的内容，所以实际输入会比下面略大一点。
+                                            </p>
+                                        )}
+                                        <PromptBreakdownView blocks={e.promptBreakdown} promptTokens={e.promptTokens} />
+                                    </>
                                 )}
                             </div>
                         );
@@ -337,19 +381,16 @@ async function copyCaptureText(value: string): Promise<void> {
     textarea.remove();
 }
 
-function downloadCaptureTxt(capture: ApiRequestCapture, content: string): void {
+async function downloadCaptureTxt(capture: ApiRequestCapture, content: string): Promise<void> {
     const d = new Date(capture.capturedAt);
     const pad = (value: number) => String(value).padStart(2, '0');
     const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
-    const blob = new Blob(['\uFEFF', content], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `SullyOS-LLM本次发送统计-${stamp}.txt`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+    await shareOrDownloadFile({
+        content: `\uFEFF${content}`,
+        fileName: `SullyOS-LLM本次发送统计-${stamp}.txt`,
+        mimeType: 'text/plain;charset=utf-8',
+        shareTitle: 'SullyOS LLM 本次发送统计',
+    });
 }
 
 const OneShotCapturePanel: React.FC<{
@@ -426,9 +467,9 @@ const OneShotCapturePanel: React.FC<{
             .sort((a, b) => b.chars - a.chars);
     }, [capture]);
 
-    const exportTxt = useCallback(() => {
+    const exportTxt = useCallback(async () => {
         if (!capture || !txtReport) return;
-        downloadCaptureTxt(capture, txtReport);
+        await downloadCaptureTxt(capture, txtReport);
         setCopyNotice('TXT 已导出');
         window.setTimeout(() => setCopyNotice(''), 1600);
     }, [capture, txtReport]);

@@ -29,6 +29,7 @@ import { safeResponseJson, extractJson } from './safeApi';
 import { ContextBuilder } from './context';
 import { LAYOUT_TEMPLATES, pickTemplate } from './handbookLayouts';
 import { getLocalDayRange } from './localDate';
+import { normalizeMessageContent } from './messageFormat';
 
 interface ApiConfig {
     baseUrl: string;
@@ -48,7 +49,8 @@ function dayOfWeekZh(date: string): string {
 }
 
 // ─── 工具: user 当日跟某角色对话片段 ─────────────────────
-async function todayChatLines(
+// （export 仅为了回归测试能直接验这段文本，见 handbookOrchestratorContent.test.ts）
+export async function todayChatLines(
     char: CharacterProfile,
     date: string,
     userName: string,
@@ -65,7 +67,14 @@ async function todayChatLines(
         if (m.role === 'system') continue;
         if (typeof m.content !== 'string' || !m.content.trim()) continue;
         const speaker = m.role === 'user' ? userName : char.name;
-        const text = m.content.length > 200 ? m.content.slice(0, 200) + '…' : m.content;
+        // 不能直接截 m.content：卡片类消息（score_card / html_card / 小红书…）的 content
+        // 是一整段 JSON，头像这种图片字段就排在开头几十字里；图片消息的 content
+        // 本身就是一张图。图片现在存的是 `blobref:<id>` 短令牌（~28 字），长度截断拦不住，
+        // 到网络出口（utils/apiBlobRefs.ts）会被还原成整张 base64。这里统一走
+        // normalizeMessageContent：卡片压成一行摘要，图片/表情一律换成占位符。
+        const normalized = normalizeMessageContent(m as any, char.name, userName);
+        if (!normalized.trim()) continue;
+        const text = normalized.length > 200 ? normalized.slice(0, 200) + '…' : normalized;
         lines.push(`${speaker}: ${text}`);
         if (m.role === 'user') userMsgCount++;
     }

@@ -61,6 +61,8 @@ export interface VRSessionDeps {
     forcedRoom?: VRRoomId;
     /** 用户在邮局指定要让该角色回复的来信 id（forcedRoom 应为 postoffice）。 */
     forcedLetterId?: string;
+    /** 用户亲手点的（「让 ta 现在去逛一次」这类），不受自动登入的最小间隔闸限制。 */
+    manual?: boolean;
 }
 
 export interface VRSessionResult {
@@ -72,6 +74,42 @@ export interface VRSessionResult {
 
 const genId = (p: string) => `${p}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 const running = new Set<string>();
+
+/**
+ * 自动登入的最小间隔闸 —— 一个角色两次真实的模型调用之间，至少要隔够设定间隔的一半。
+ *
+ * 为什么要有它：熔断只认「一直失败」，可要是调用一直成功、只是被谁催着一分钟跑两趟，
+ * 那是安安静静地烧钱，没有任何东西会喊停。这道闸跟成败无关，只看「上一次是什么时候」。
+ *
+ * 为什么记在内存里而不落存储：它兜的正是「调度状态本身出了问题」——上游的首火时刻写丢了、
+ * 或者哪条路绕过了到期判断，靠的都是存储；把闸也存进去，就会跟着一起失效。页面一刷新
+ * 计数就归零，而失控循环本来就活在单个页面实例里，内存态足够拦住。
+ *
+ * 用户手动点「让 ta 现在去逛一次」不受这道闸限制。
+ */
+const lastAutoCallAt = new Map<string, number>();
+/** 被闸拦下的次数（成功跑一轮就归零）。正常调度永远是 0，非 0 本身就是「上游在失控」的证据。 */
+const throttledCount = new Map<string, number>();
+/** 间隔再怎么短、设定值再怎么脏，两轮之间也不该少于这个数。 */
+const MIN_AUTO_GAP_FLOOR_MS = 5 * 60_000;
+
+/**
+ * 按角色的设定间隔算出「这一轮最早什么时候才允许再来」。
+ *
+ * 取设定间隔的一半，是想留出余量：调度本身会被后台节流推迟，掐得跟设定值一样紧
+ * 会把正常的补火也误伤掉。设定值缺失或是脏数据（NaN、0、负数）时退回默认间隔，
+ * 再由下限兜一道——不这么写的话 NaN 会让所有比较恒为 false，整道闸静悄悄失效。
+ */
+export function vrAutoGapMs(intervalMinutes?: number): number {
+    const raw = Number(intervalMinutes);
+    const minutes = Number.isFinite(raw) && raw > 0 ? raw : VR_DEFAULT_INTERVAL_MIN;
+    return Math.max((minutes * 60_000) / 2, MIN_AUTO_GAP_FLOOR_MS);
+}
+
+/** 各角色当前被最小间隔闸拦下的累计次数，给诊断导出用。 */
+export function getVRThrottleCounts(): Record<string, number> {
+    return Object.fromEntries(throttledCount);
+}
 
 /**
  * 串行化共享房间状态（留言墙等）的 read-modify-write。
@@ -92,19 +130,39 @@ function withSharedRoomLock<T>(fn: () => Promise<T>): Promise<T> {
     return result;
 }
 
-/** 选一本要读的书：优先续读未读完的，否则取最近更新的一本。 */
-function pickNovel(novels: VRWorldNovel[], char: CharacterProfile): VRWorldNovel | null {
-    if (novels.length === 0) return null;
+/**
+ * 选一本要读的书：
+ * - 默认从所有尚未读完的书里随机轮换，不再因为某本刚开始读就一直黏到结尾；
+ * - 用户圈了优先书单时，先在其中的未读完书目里轮换，读完后回到全书库；
+ * - 有多个候选时排除上一次选中的书，避免连续两轮重复。
+ *
+ * random 作为参数是为了让选书规则可以稳定测试；生产环境使用 Math.random。
+ */
+export function pickNovel(
+    novels: VRWorldNovel[],
+    char: CharacterProfile,
+    random: () => number = Math.random,
+): VRWorldNovel | null {
+    const readable = novels.filter(novel => novel.segments.length > 0);
+    if (readable.length === 0) return null;
     const bookmarks = char.vrState?.novelBookmarks;
-    const unfinished = novels.filter(n => getBookmark(bookmarks, n.id) < n.segments.length);
-    const pool = unfinished.length > 0 ? unfinished : novels;
-    pool.sort((a, b) => {
-        const aStarted = getBookmark(bookmarks, a.id) > 0 ? 1 : 0;
-        const bStarted = getBookmark(bookmarks, b.id) > 0 ? 1 : 0;
-        if (aStarted !== bStarted) return bStarted - aStarted;
-        return b.updatedAt - a.updatedAt;
-    });
-    return pool[0];
+    const unfinished = readable.filter(novel => getBookmark(bookmarks, novel.id) < novel.segments.length);
+    const available = unfinished.length > 0 ? unfinished : readable;
+    const preferred = new Set(char.vrState?.preferredNovelIds || []);
+    const preferredAvailable = preferred.size > 0
+        ? available.filter(novel => preferred.has(novel.id))
+        : [];
+    let pool = preferredAvailable.length > 0 ? preferredAvailable : available;
+
+    const lastNovelId = char.vrState?.lastNovelId;
+    if (lastNovelId && pool.length > 1) {
+        const withoutLast = pool.filter(novel => novel.id !== lastNovelId);
+        if (withoutLast.length > 0) pool = withoutLast;
+    }
+
+    const rolled = Number(random());
+    const normalized = Number.isFinite(rolled) ? Math.max(0, Math.min(0.999999999, rolled)) : 0;
+    return pool[Math.floor(normalized * pool.length)] || pool[0] || null;
 }
 
 /** 汇总角色可点的歌（歌单 + 最近在听，按 id 去重，最近优先，最多 20）。 */
@@ -139,9 +197,29 @@ export function rollRoom(char: CharacterProfile, novels: VRWorldNovel[], musicSt
 }
 
 export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult> {
-    const { char, characters, apiConfig, userProfile, groups, realtimeConfig, memoryPalaceConfig, updateCharacter, forcedRoom, forcedLetterId } = deps;
+    const { char, characters, apiConfig, userProfile, groups, realtimeConfig, memoryPalaceConfig, updateCharacter, forcedRoom, forcedLetterId, manual } = deps;
 
     if (running.has(char.id)) return { ok: false, reason: 'busy' };
+
+    // 最小间隔闸（见 lastAutoCallAt）。走到这里说明有东西在催，正常调度不会这么密。
+    if (!manual) {
+        const minGap = vrAutoGapMs(char.vrState?.intervalMinutes);
+        const since = Date.now() - (lastAutoCallAt.get(char.id) || 0);
+        if (since < minGap) {
+            const times = (throttledCount.get(char.id) || 0) + 1;
+            throttledCount.set(char.id, times);
+            // 被拦这件事本身就是线索，但真拦起来会几十秒一次，全记下来会把真实调用挤出日志。
+            // 只在第一次和之后每 20 次留一行，把累计次数写进去。
+            if (times === 1 || times % 20 === 0) {
+                void logVRApiCall({
+                    ts: Date.now(), charId: char.id, charName: char.name, ok: false, ms: 0,
+                    kind: 'throttled', charEnabled: !!char.vrState?.enabled,
+                    note: `距上次登入才 ${Math.round(since / 1000)} 秒，不到下限 ${Math.round(minGap / 60000)} 分钟，已拦下（累计 ${times} 次）`,
+                });
+            }
+            return { ok: false, reason: 'too-soon' };
+        }
+    }
 
     // API 优先级：角色自带覆盖 > 彼方独立 API > 聊天默认
     const vrGlobalApi = await getVRApi();
@@ -157,6 +235,9 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
     running.add(char.id);
     // 信号坠落处的写诗会话锁 token（抢到才有值）；finally 里兜底放锁
     let signalLockToken: string | null = null;
+    // 这一轮是不是折在「调模型」这一步上。调度器只对这种失败记账做熔断——
+    // 解析出错、落库出错都是本机自己的事，重试有意义，不该算到 API 头上。
+    let modelCallFailed = false;
     try {
         window.dispatchEvent(new CustomEvent('vr-session-start', {
             detail: { charId: char.id, charName: char.name, room: room.id },
@@ -225,7 +306,8 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
         }
 
         if (room.id === 'library') {
-            novel = pickNovel(novels, char)!;
+            novel = pickNovel(novels, char);
+            if (!novel) return { ok: false, room: 'library', reason: 'no-readable-novel' };
             const bm = getBookmark(char.vrState?.novelBookmarks, novel.id);
             win = getReadingWindow(novel, bm >= novel.segments.length ? 0 : bm);
             allAnn = await DB.getVRAnnotations(novel.id);
@@ -355,6 +437,7 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
         const payload = await buildChatRequestPayload({
             char, userProfile, groups, emojis, categories,
             historyMsgs, contextLimit, realtimeConfig, recallQueryHint,
+            recallEntryPoint: 'vr_world',
             // 彼方可配独立 API（可能不支持视觉，如 DeepSeek 对 image_url 直接 400），
             // 且纯文本情景里历史图片只是撑爆上下文的噪声 → 压平成文本占位
             stripImages: true,
@@ -364,6 +447,9 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
         // 调 LLM（记录一次调用，供"调用记录"对账）
         const baseUrl = vrApi.baseUrl.replace(/\/+$/, '');
         const callStart = Date.now();
+        // 闸的基准点是「真的发出去了」，而不是「被调度触发了」——没书没歌那些早退的轮次
+        // 一个 token 都没花，不该占掉下一次的额度。
+        if (!manual) { lastAutoCallAt.set(char.id, callStart); throttledCount.delete(char.id); }
         let data: any;
         try {
             data = await safeFetchJson(`${baseUrl}/chat/completions`, {
@@ -375,9 +461,10 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
                     temperature: 0.9, stream: false,
                 }),
             }, 2, 0, { appName: '彼方', charId: char.id, charName: char.name, purpose: '自由活动' });
-            logVRApiCall({ ts: callStart, charName: char.name, room: room.id, model: vrApi.model, baseUrl, ok: true, ms: Date.now() - callStart });
+            logVRApiCall({ ts: callStart, charId: char.id, charName: char.name, charEnabled: !!char.vrState?.enabled, room: room.id, model: vrApi.model, baseUrl, ok: true, ms: Date.now() - callStart });
         } catch (e: any) {
-            logVRApiCall({ ts: callStart, charName: char.name, room: room.id, model: vrApi.model, baseUrl, ok: false, ms: Date.now() - callStart, error: (e?.message || String(e)).slice(0, 160) });
+            modelCallFailed = true;
+            logVRApiCall({ ts: callStart, charId: char.id, charName: char.name, charEnabled: !!char.vrState?.enabled, room: room.id, model: vrApi.model, baseUrl, ok: false, ms: Date.now() - callStart, error: (e?.message || String(e)).slice(0, 160) });
             throw e;
         }
         let aiContent: string = data.choices?.[0]?.message?.content || '';
@@ -409,7 +496,13 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
             }
             const nextBookmark = win!.reachedEnd ? novel!.segments.length : win!.to;
             await updateCharacter(char.id, {
-                vrState: { ...prevState, novelBookmarks: { ...(prevState.novelBookmarks || {}), [novel!.id]: nextBookmark }, currentRoom: 'library', lastActiveAt: Date.now() },
+                vrState: {
+                    ...prevState,
+                    novelBookmarks: { ...(prevState.novelBookmarks || {}), [novel!.id]: nextBookmark },
+                    lastNovelId: novel!.id,
+                    currentRoom: 'library',
+                    lastActiveAt: Date.now(),
+                },
             });
             activity = parsed.activity || `读了《${novel!.title}》第 ${win!.from + 1}~${win!.to} 段${written ? `，留下了 ${written} 条批注` : '，安静读完没多说什么'}。`;
             cardLines = [`「彼方 · ${room.name}」`, nameLine(char.name, activity)];
@@ -657,7 +750,7 @@ export async function runVRSession(deps: VRSessionDeps): Promise<VRSessionResult
         return { ok: true, room: room.id, activity };
     } catch (err) {
         console.error('[VRWorld] session error:', err);
-        return { ok: false, room: room.id, reason: 'error' };
+        return { ok: false, room: room.id, reason: modelCallFailed ? 'api-error' : 'error' };
     } finally {
         running.delete(char.id);
         // 兜底放锁：任何提前 return / 异常路径漏放，这里补放（漏了也有 TTL 自动回收）

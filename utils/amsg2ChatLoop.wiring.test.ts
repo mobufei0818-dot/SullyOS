@@ -30,7 +30,10 @@ describe('排程现状块每轮现算', () => {
   });
 
   it('工具循环的后续请求也现算一次（本轮刚排的任务立刻进清单）', () => {
-    expect(src).toMatch(/messages:\s*withAmsg2TaskContext\(loopMessages\)/);
+    // 收尾路径还要往这份消息里追加「停止调用工具」，所以先落局部变量再放进 body；
+    // 仍必须保证局部变量来自每轮现算，而不是复用首轮旧快照。
+    expect(src).toMatch(/const followMessages = withAmsg2TaskContext\(loopMessages\)/);
+    expect(src).toMatch(/messages:\s*followMessages/);
   });
 
   it('本轮新建的任务会被点名，传进渲染函数', () => {

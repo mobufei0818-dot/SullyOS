@@ -37,7 +37,59 @@ export interface FetchFailureContext {
     online?: boolean;
     pageOrigin?: string;
     pageProtocol?: string;
+    /** 只含体积/结构，不含消息正文；用于比较“同 API、不同功能”的请求差异。 */
+    requestSummary?: FetchRequestSummary;
+    /** 调用方显式标注的用途，例如“剧情见面生成”。 */
+    requestPurpose?: string;
+    /** 同一 method + URL 在本页面生命周期内最近一次成功读完整个响应正文的记录。 */
+    recentSuccessfulSameRequest?: { timestamp: number; status: number };
 }
+
+export interface FetchRequestSummary {
+    bodyBytes: number;
+    messageCount?: number;
+    contentChars?: number;
+    lastMessageRole?: string;
+    stream?: boolean;
+    optionalParams?: string[];
+}
+
+const utf8ByteLength = (value: string): number => {
+    try {
+        if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value).byteLength;
+    } catch { /* fall through */ }
+    return value.length;
+};
+
+/**
+ * 提取 chat/completions 请求的安全结构摘要。绝不把 prompt、API key 或角色正文写进日志。
+ * 这组旁证专门回答“同一个 API 为什么陪伴能出、剧情不能出”：两边 URL 相同不代表
+ * 请求相同，剧情常见差异是更大的 messages、assistant 预填充和额外采样参数。
+ */
+export const summarizeFetchRequestBody = (body: unknown): FetchRequestSummary | undefined => {
+    if (typeof body !== 'string') return undefined;
+    const summary: FetchRequestSummary = { bodyBytes: utf8ByteLength(body) };
+    try {
+        const parsed = JSON.parse(body);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return summary;
+        if (Array.isArray(parsed.messages)) {
+            summary.messageCount = parsed.messages.length;
+            summary.contentChars = parsed.messages.reduce((total: number, message: any) => {
+                const content = message?.content;
+                if (typeof content === 'string') return total + content.length;
+                if (content == null) return total;
+                try { return total + JSON.stringify(content).length; } catch { return total; }
+            }, 0);
+            const lastRole = parsed.messages.at(-1)?.role;
+            if (typeof lastRole === 'string') summary.lastMessageRole = lastRole;
+        }
+        if (typeof parsed.stream === 'boolean') summary.stream = parsed.stream;
+        const optionalParams = ['top_p', 'frequency_penalty', 'presence_penalty', 'reasoning_effort', 'tools']
+            .filter(key => parsed[key] !== undefined);
+        if (optionalParams.length > 0) summary.optionalParams = optionalParams;
+    } catch { /* 非 JSON 只记录字节数 */ }
+    return summary;
+};
 
 const readError = (error: unknown): { name: string; message: string } => {
     if (error instanceof Error) return { name: error.name || 'Error', message: error.message || String(error) };
@@ -129,12 +181,25 @@ const VERDICTS: Record<FetchFailureKind, { verdict: string; causes: string }> = 
     },
 };
 
-/** Resource Timing 里那条记录能补两个关键旁证：到底有没有收到响应状态码、传了多少字节。 */
+/**
+ * Resource Timing 里那条记录能补两个关键旁证：到底有没有收到响应状态码、传了多少字节。
+ *
+ * ⚠️ 必须按发起时刻筛。getEntriesByName() 捞的是整个页面生命周期内打过这个地址的**全部**
+ * 记录，而像 /client-state 这种反复请求的端点，timeline 里一直躺着早先成功那次的 200。
+ * 偏偏「连接压根没建立」的失败什么都不会往 timeline 里写——于是不筛的话，越是老用户、
+ * 越是之前一直用得好好的地址，越会拿到一条陈旧的成功记录，并据此打出「对方其实回了 200，
+ * 是被 CORS 拦的」，跟同一条日志里的耗时线索和 no-cors 复检结论正面打架。
+ *
+ * startedAt 用 performance.now() 的基准（跟 entry.startTime 同一条时间轴，不能换成
+ * Date.now()）。取不到就整段不出——宁可少说一句，也不能说反。
+ */
 export const readResourceTimingHint = (
     href: string,
-    perf?: { getEntriesByName?: (name: string, type?: string) => any[] },
+    opts: { startedAt: number; perf?: { getEntriesByName?: (name: string, type?: string) => any[] } },
 ): string => {
-    const target = perf ?? (typeof performance !== 'undefined' ? (performance as any) : undefined);
+    const { startedAt } = opts;
+    if (!Number.isFinite(startedAt)) return '';
+    const target = opts.perf ?? (typeof performance !== 'undefined' ? (performance as any) : undefined);
     if (!target?.getEntriesByName) return '';
     let entries: any[] = [];
     try {
@@ -142,15 +207,29 @@ export const readResourceTimingHint = (
     } catch {
         return '';
     }
-    const entry = entries[entries.length - 1];
+    const entry = entries
+        .filter(item => typeof item?.startTime === 'number' && item.startTime >= startedAt)
+        .pop();
     if (!entry) return 'Resource Timing: 没有这条请求的记录（通常说明连接压根没建立起来，或被扩展在发出前就拦掉了）';
+    // 跨域资源拿不到 Timing-Allow-Origin 授权时，规范要求把 responseStatus、transferSize、
+    // 各阶段时间戳统统置 0。这时候「transferSize=0」的意思是「没授权看」，不是「一个字节都
+    // 没传」——照字面读会得出跟事实相反的结论，所以这些字段整个不印，改成一句说明。
+    // responseStart 是判断有没有授权最稳的探针：它比 responseStatus 老得多，Safari 也有。
+    const timingAllowed = (typeof entry.responseStart === 'number' && entry.responseStart > 0)
+        || (typeof entry.responseStatus === 'number' && entry.responseStatus > 0);
     const parts: string[] = [];
-    if (typeof entry.responseStatus === 'number') parts.push(`responseStatus=${entry.responseStatus}`);
-    if (typeof entry.transferSize === 'number') parts.push(`transferSize=${entry.transferSize}`);
+    if (timingAllowed) {
+        if (typeof entry.responseStatus === 'number' && entry.responseStatus > 0) {
+            parts.push(`responseStatus=${entry.responseStatus}`);
+        }
+        if (typeof entry.transferSize === 'number') parts.push(`transferSize=${entry.transferSize}`);
+    }
     if (typeof entry.duration === 'number') parts.push(`duration=${Math.round(entry.duration)}ms`);
     let note = '';
-    if (typeof entry.responseStatus === 'number' && entry.responseStatus > 0) {
+    if (timingAllowed && typeof entry.responseStatus === 'number' && entry.responseStatus > 0) {
         note = ` → 对方其实回了 HTTP ${entry.responseStatus}，是响应被 CORS 拦掉的，不是网络不通`;
+    } else if (!timingAllowed) {
+        note = '（对方没给 Timing-Allow-Origin，状态码和字节数看不到，只有耗时可信）';
     }
     return `Resource Timing: ${parts.join(', ') || '有记录'}${note}`;
 };
@@ -179,7 +258,7 @@ export const readStallHint = (durationMs?: number, kind?: FetchFailureKind): str
  */
 export const buildFetchFailureDetail = (
     ctx: FetchFailureContext,
-    opts?: { perf?: { getEntriesByName?: (name: string, type?: string) => any[] } },
+    opts: { startedAt: number; perf?: { getEntriesByName?: (name: string, type?: string) => any[] }; now?: number },
 ): string => {
     const { name, message } = readError(ctx.error);
     const kind = classifyFetchFailure(ctx);
@@ -199,12 +278,41 @@ export const buildFetchFailureDetail = (
     }
     if (pageOrigin) lines.push(`本页来源: ${pageOrigin}`);
     lines.push(`浏览器联网状态: ${online === false ? '离线' : '在线'}`);
-    const timing = readResourceTimingHint(target.href, opts?.perf);
+    if (ctx.requestPurpose) lines.push(`调用用途: ${ctx.requestPurpose}`);
+    if (ctx.requestSummary) {
+        const requestParts = [`${ctx.requestSummary.bodyBytes} bytes`];
+        if (typeof ctx.requestSummary.messageCount === 'number') requestParts.push(`messages=${ctx.requestSummary.messageCount}`);
+        if (typeof ctx.requestSummary.contentChars === 'number') requestParts.push(`消息内容=${ctx.requestSummary.contentChars} 字符`);
+        if (ctx.requestSummary.lastMessageRole) requestParts.push(`末条 role=${ctx.requestSummary.lastMessageRole}`);
+        if (typeof ctx.requestSummary.stream === 'boolean') requestParts.push(`stream=${ctx.requestSummary.stream}`);
+        lines.push(`请求体摘要: ${requestParts.join(' · ')}`);
+        if (ctx.requestSummary.optionalParams?.length) {
+            lines.push(`额外参数: ${ctx.requestSummary.optionalParams.join(', ')}`);
+        }
+    }
+    const timing = readResourceTimingHint(target.href, { startedAt: opts.startedAt, perf: opts.perf });
     if (timing) lines.push(timing);
     const stall = readStallHint(ctx.durationMs, kind);
     if (stall) lines.push(stall);
-    lines.push(`初判: ${VERDICTS[kind].verdict}`);
-    lines.push(`可能原因: ${VERDICTS[kind].causes}`);
+    const now = opts.now ?? Date.now();
+    const recentSuccess = ctx.recentSuccessfulSameRequest;
+    const successAgeMs = recentSuccess ? now - recentSuccess.timestamp : Number.POSITIVE_INFINITY;
+    const hasRecentSameRequestSuccess = kind === 'blocked'
+        && successAgeMs >= 0
+        && successAgeMs <= 10 * 60 * 1000;
+    if (hasRecentSameRequestSuccess && recentSuccess) {
+        const ageSeconds = Math.max(1, Math.round(successAgeMs / 1000));
+        lines.push(`同接口对照: ${ageSeconds} 秒前，同一个 ${method} 已成功返回 HTTP ${recentSuccess.status}`);
+        lines.push('初判: 同一接口刚刚成功过，基本排除域名整体不可达、DNS 错误或代理把整个域名拦掉；这是当前请求/响应特有的失败。');
+        if (ctx.requestPurpose === '剧情见面生成') {
+            lines.push('更可能原因: 剧情上下文或请求体更大 · 服务商不接受末条 assistant 预填充或额外参数 · 上游生成/流式传输中途断开 · 上游错误页漏了 CORS 响应头');
+        } else {
+            lines.push('更可能原因: 当前请求体或响应与刚才成功的请求不同 · 上游限流或临时故障 · 生成/传输中途断开 · 上游错误页漏了 CORS 响应头');
+        }
+    } else {
+        lines.push(`初判: ${VERDICTS[kind].verdict}`);
+        lines.push(`可能原因: ${VERDICTS[kind].causes}`);
+    }
     return lines.join('\n');
 };
 
@@ -273,7 +381,7 @@ export const describeReachabilityProbe = (verdict: ReachabilityVerdict, host: st
     const who = host || '该域名';
     switch (verdict) {
         case 'reachable':
-            return `连通性复检: no-cors 直连 ${who} 成功 → 网络路径是通的，问题出在响应本身（对方没回 CORS 头，多半是限流页 / 人机验证页 / 网关错误页）。换个网络或过几分钟重试，仍旧的话把这条日志发给作者。`;
+            return `连通性复检: no-cors 直连 ${who} 成功 → 只能确认这个域名当前可达；原 POST 仍可能在生成后断流、被网关关闭，或因最终响应缺少 CORS 头而被浏览器拦截。上游若已开始生成，即使页面显示失败也可能计费；请先核对服务商日志，不要连续重发。`;
         case 'unreachable':
             return `连通性复检: no-cors 直连 ${who} 同样失败 → 这台设备到 ${who} 是真的连不上。按顺序查：梯子的分流规则（把该域名放进代理）、DNS、浏览器扩展（广告拦截/隐私盾）、系统或路由器防火墙。`;
         case 'timeout':

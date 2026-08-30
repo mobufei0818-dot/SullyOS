@@ -2,14 +2,17 @@
 // 涉及：电子宠物(tamagotchi) / 手游风(mobilegame) 的界面配色方案 + 看板 banner。
 // 这些偏好存在 localStorage，不挂在角色上，早期导出清单里没有——补齐后才能跨设备迁移。
 //
-// 看板图（tama_board_img）是个特例：它是 blobref 令牌，指向本机 blob_assets。
-// 令牌换设备就失效，所以导出时解析回 data URL 内嵌进备份，导入时再落成本机 blob。
-// 与壁纸的可移植策略同源（见 utils/blobRef.ts / OSContext 导出管线）。
+// 看板图（tama_board_img）可能是 blobref 令牌（指向本机 blob_assets）。整包备份（v3）
+// 令牌原样进包：本模块的输出落在 metadata.json，令牌由导出管线统一收集、二进制随
+// blobs/* 旁路走、导入端按原 id 写回（见 utils/backupBlobs.ts）。这里只负责一件事：
+// 图已丢的死令牌不带，恢复端拿到的键要么可解析、要么干脆没有。
 
-import { isBlobRef, getBlobForRef, blobToDataUrl, migrateDataUrlToRef } from './blobRef';
+import { isBlobRef, getBlobForRef, migrateDataUrlToRef } from './blobRef';
 
 // 纯字符串偏好键（原样带走）
 const PLAIN_KEYS = [
+    'companion_frame_style_v1', // 陪伴桌面：框架风格（科技 / 手游 / 卡面 / 画报）
+    'companion_layout_v1', // 陪伴桌面：真实布局（舞台 / 陪伴 / 轻巧）
     'tama_style_v2',   // 电子宠物：界面风格方案 {hue,dark,gold,mute}
     'mg_style_v1',     // 手游风：界面配色方案
     'tama_board_fg',   // 看板文字色（空=自动）
@@ -19,8 +22,8 @@ const BOARD_IMG_KEY = 'tama_board_img'; // 看板 banner 图（blobref 令牌 / 
 
 /**
  * 导出：读齐本机偏好。
- * @param includeImage 是否内嵌看板图（false=纯文本备份，跳过大图，只带配色偏好）。
- *   看板图是 blobref 令牌，令牌换设备失效，故 true 时解析回 data URL；图床 http 链接原样带。
+ * @param includeImage 是否带看板图（false=纯文本备份，跳过大图，只带配色偏好）。
+ *   blobref 令牌原样带走（二进制由导出管线的 blobs/* 旁路随包）；图床 http / 旧 data: 原样带。
  * 无内容返回 undefined。
  */
 export async function exportDesktopSkinLocal(includeImage = true): Promise<Record<string, string> | undefined> {
@@ -33,9 +36,8 @@ export async function exportDesktopSkinLocal(includeImage = true): Promise<Recor
         const img = includeImage ? localStorage.getItem(BOARD_IMG_KEY) : null;
         if (img) {
             if (isBlobRef(img)) {
-                const blob = await getBlobForRef(img);
-                if (blob) rec[BOARD_IMG_KEY] = await blobToDataUrl(blob);
-                // 解析不到（图已丢）就不带，避免导出一个恢复端认不得的死令牌
+                // 解析得到才带令牌；图已丢就不带，避免导出一个恢复端解不开的死键
+                if (await getBlobForRef(img)) rec[BOARD_IMG_KEY] = img;
             } else {
                 rec[BOARD_IMG_KEY] = img; // 旧 data: / 图床 http，原样可移植
             }

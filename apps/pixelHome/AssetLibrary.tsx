@@ -11,6 +11,7 @@ import type { MemoryRoom } from '../../utils/memoryPalace/types';
 import { PixelAssetDB } from './pixelHomeDb';
 import PixelAssetGenerator from './PixelAssetGenerator';
 import { trackEvent } from '../../utils/analytics';
+import { shareOrDownloadBlob } from '../../utils/shareExport';
 
 interface Props {
   assets: PixelAsset[];
@@ -174,12 +175,12 @@ const AssetLibrary: React.FC<Props> = ({ assets, onChanged, onSelectAsset, isSel
       zip.file(`${asset.name}_${asset.pixelSize}px.png`, blob);
     }
     const content = await zip.generateAsync({ type: 'blob' });
-    const url = URL.createObjectURL(content);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `pixel_assets_${Date.now()}.zip`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const result = await shareOrDownloadBlob({
+      blob: content,
+      fileName: `pixel_assets_${Date.now()}.zip`,
+      shareTitle: 'SullyOS 像素素材包',
+    });
+    if (result === 'cancelled') return;
     trackEvent('导出像素素材包');
   }, [assets, selectedIds, selectMode, filtered]);
 

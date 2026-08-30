@@ -6,11 +6,12 @@
  */
 
 import type { Message } from '../../types';
-import type { MemoryNode, MemoryRoom } from './types';
+import type { MemoryEntity, MemoryNode, MemoryRoom } from './types';
 import type { LightLLMConfig } from './pipeline';
 import { safeFetchJson } from '../safeApi';
 import { safeParseJsonArray } from './jsonUtils';
 import { formatMessageForPrompt } from '../messageFormat';
+import { readRecallRuntimeSnapshot } from './trace';
 
 function generateId(): string {
     return `mn_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -26,7 +27,11 @@ function generateId(): string {
 // 会让 embedding 语义轻微漂移。保持 palace 内置风格稳定，手动归档路径提供
 // 风格化的自由度——职责分离。
 
-function buildRulesBlock(charName: string, userLabel: string): string {
+function buildRulesBlock(charName: string, userLabel: string, includeEntities: boolean): string {
+    const entityRule = includeEntities
+        ? `.
+   **明确实体**（entities）：把对话中明确出现的人名、昵称、地点、组织、项目、产品、账号或域名单独列出。只收录专名，不要写“朋友”“他”“那个项目”等泛称，也不要猜别名。格式为 {"name":"雾岚","type":"person"}（虚构示例）。`
+        : '';
     return `## 规则
 
 1. **第一人称叙事**：用 ${charName} 的"我"视角来记录。用户直接用"${userLabel}"称呼。保持完整事件脉络，不要掐头去尾。
@@ -54,7 +59,7 @@ function buildRulesBlock(charName: string, userLabel: string): string {
    - valence（效价）：-1（极痛苦）→ +1（极愉悦）
    - arousal（唤醒度）：-1（极平静）→ +1（极激烈）
    参考："开心"约 (0.7, 0.5)，"平静"约 (0.5, -0.6)，"失落"约 (-0.5, -0.4)，"焦虑"约 (-0.6, 0.7)，"愤怒"约 (-0.7, 0.8)。
-6. **标签**（tags）：提取 2-5 个关键词标签
+6. **标签**（tags）：提取 2-5 个关键词标签${entityRule}
 7. **不要遗漏重要记忆，但也不要把每句话都变成记忆**。一个话题盒通常提取 1–5 条记忆。
 8. **便利贴置顶**（pinDays，可选）：如果这条记忆包含**有时效性的、近期需要持续记住的信息**，设置置顶天数（1-30天）。置顶期间每次对话都会想起这件事。适用场景：
    - 时间段状态："${userLabel}这周出差" → pinDays: 7
@@ -90,7 +95,7 @@ const VALID_ROOMS: MemoryRoom[] = [
 
 /** 从消息缓冲区直接解析记忆节点（不依赖 TopicBox） */
 function parseMemoryNodesFromBuffer(
-    parsed: any[], charId: string, messages: Message[], _batchLabel: string,
+    parsed: any[], charId: string, messages: Message[], _batchLabel: string, includeEntities: boolean,
 ): MemoryNode[] {
     if (parsed.length === 0) return [];
 
@@ -123,6 +128,30 @@ function parseMemoryNodesFromBuffer(
         return ts;
     };
 
+    const parseEntities = (value: unknown): MemoryEntity[] => {
+        if (!Array.isArray(value)) return [];
+        const validTypes = new Set<NonNullable<MemoryEntity['type']>>([
+            'person', 'place', 'organization', 'project', 'product', 'account', 'domain', 'other',
+        ]);
+        const seen = new Set<string>();
+        const result: MemoryEntity[] = [];
+        for (const raw of value) {
+            if (!raw || typeof raw !== 'object') continue;
+            const item = raw as Record<string, unknown>;
+            const name = typeof item.name === 'string' ? item.name.trim().slice(0, 80) : '';
+            const key = name.normalize('NFKC').toLocaleLowerCase();
+            if (name.length < 2 || !key || seen.has(key)) continue;
+            seen.add(key);
+            const entity: MemoryEntity = { name };
+            if (validTypes.has(item.type as NonNullable<MemoryEntity['type']>)) {
+                entity.type = item.type as NonNullable<MemoryEntity['type']>;
+            }
+            result.push(entity);
+            if (result.length >= 12) break;
+        }
+        return result;
+    };
+
     return parsed
         .filter(item => item.content && item.room)
         .map((item): MemoryNode => {
@@ -136,7 +165,7 @@ function parseMemoryNodesFromBuffer(
             // (v, a) 非必需：LLM 没给就不写，下游 getEmotionVA 查表兜底
             const v = typeof item.valence === 'number' ? clampVA(item.valence) : undefined;
             const a = typeof item.arousal === 'number' ? clampVA(item.arousal) : undefined;
-            return {
+            const memory: MemoryNode = {
                 id: generateId(),
                 charId,
                 content: item.content,
@@ -154,6 +183,8 @@ function parseMemoryNodesFromBuffer(
                 eventBoxId: null,  // 由 pipeline 在 binding 阶段设置
                 origin: 'extraction',
             };
+            if (includeEntities) memory.entities = parseEntities(item.entities);
+            return memory;
         });
 }
 
@@ -359,6 +390,7 @@ export async function extractMemoriesFromBuffer(
 ): Promise<BufferExtractionResult> {
     if (messages.length === 0) return { memories: [], crossTimeLinks: [], eventBoxHints: [], unpinIds: [], corrections: [] };
 
+    const includeEntities = readRecallRuntimeSnapshot().featureFlagsSnapshot.recallRouter;
     const userLabel = userName || '用户';
     const conversationText = buildConversationText(messages, charName, userLabel);
 
@@ -388,7 +420,7 @@ export async function extractMemoriesFromBuffer(
 
     const systemPrompt = `你是 ${charName}。根据给定的对话内容，以你的第一人称视角（"我"）提取值得记住的记忆。${contextBlock}${relatedBlock}${pinnedBlock}
 
-${buildRulesBlock(charName, userLabel)}${relatedToRule}${unpinRule}
+${buildRulesBlock(charName, userLabel, includeEntities)}${relatedToRule}${unpinRule}
 
 ## 输出格式
 
@@ -401,7 +433,8 @@ ${buildRulesBlock(charName, userLabel)}${relatedToRule}${unpinRule}
     "mood": "neutral",
     "valence": 0,
     "arousal": 0,
-    "tags": ["标签1", "标签2"],
+    "tags": ["标签1", "标签2"],${includeEntities ? `
+    "entities": [{"name": "明确出现的专名", "type": "person"}],` : ''}
     "date": "YYYY-MM-DD",
     "pinDays": 3${relatedToFormat}
   }
@@ -453,7 +486,7 @@ pinDays 仅在需要置顶时才写，大多数记忆不需要。
         const fmt = (d: Date) => `${d.getMonth() + 1}/${d.getDate()}`;
         const batchLabel = fmt(d1) === fmt(d2) ? fmt(d1) : `${fmt(d1)}-${fmt(d2)}`;
 
-        const memories = parseMemoryNodesFromBuffer(parsed, charId, messages, batchLabel);
+        const memories = parseMemoryNodesFromBuffer(parsed, charId, messages, batchLabel, includeEntities);
 
         // 解析跨时间关联（→ EventBox 绑定信号）+ eventName/eventTags 提示
         const { crossTimeLinks, eventBoxHints } = parseRelatedToAndHints(

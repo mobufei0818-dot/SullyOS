@@ -9,6 +9,7 @@ import {
 } from '../../utils/lifeRecords';
 import { useLocalDateKey } from '../../hooks/useLocalDateKey';
 import { markAmsgStateDirtyForAll } from '../../utils/amsgStateSync';
+import { formatMoney, sumMoney } from '../../utils/format';
 
 /**
  * 档案 App「生活记录」面板 —— 复古优雅浅色系，但四个模块各有独立版式：
@@ -508,10 +509,10 @@ const LifeRecordPanel: React.FC = () => {
     const [txAmount, setTxAmount] = useState('');
     const [txNote, setTxNote] = useState('');
     const dayTxs = useMemo(() => txs.filter(t => t.dateStr === recordDate), [txs, recordDate]);
-    const dayTotal = useMemo(() => dayTxs.reduce((s, t) => s + t.amount, 0), [dayTxs]);
+    const dayTotal = useMemo(() => sumMoney(dayTxs.map(t => t.amount)), [dayTxs]);
     const monthTotal = useMemo(() => {
         const monthKey = recordDate.slice(0, 7);
-        return txs.filter(t => (t.dateStr || '').startsWith(monthKey)).reduce((s, t) => s + t.amount, 0);
+        return sumMoney(txs.filter(t => (t.dateStr || '').startsWith(monthKey)).map(t => t.amount));
     }, [txs, recordDate]);
 
     const handleAddTx = async () => {
@@ -877,13 +878,13 @@ const LifeRecordPanel: React.FC = () => {
                             <div className="flex-1">
                                 <div className="text-[9px] mb-0.5" style={{ color: FADE, letterSpacing: '0.25em' }}>{recordDateLabel}支出</div>
                                 <div style={{ fontFamily: SERIF, color: THEMES.expense.accent }}>
-                                    <span className="text-[34px] font-bold leading-none tabular-nums">{dayTotal}</span>
+                                    <span className="text-[34px] font-bold leading-none tabular-nums">{formatMoney(dayTotal)}</span>
                                 </div>
                             </div>
                             <span className="w-px mx-3" style={{ background: THEMES.expense.soft }} />
                             <div className="text-right flex flex-col justify-end pb-1">
                                 <div className="text-[9px] mb-0.5" style={{ color: FADE, letterSpacing: '0.16em' }}>{recordMonthLabel}</div>
-                                <div className="text-sm font-bold tabular-nums" style={{ fontFamily: SERIF, color: INK }}>{monthTotal}</div>
+                                <div className="text-sm font-bold tabular-nums" style={{ fontFamily: SERIF, color: INK }}>{formatMoney(monthTotal)}</div>
                             </div>
                         </div>
                         <p className="text-[9px] italic mt-2 px-1" style={{ color: FAINT, fontFamily: SERIF }}>
@@ -914,7 +915,7 @@ const LifeRecordPanel: React.FC = () => {
                                     <div key={t.id} className="flex items-center gap-2 py-2 text-[11px]"
                                         style={{ fontFamily: SERIF, borderBottom: `1px dashed ${THEMES.expense.soft}` }}>
                                         <span className="flex-1 truncate" style={{ color: INK }}>{t.note || '未备注'}</span>
-                                        <span className="font-bold tabular-nums" style={{ color: THEMES.expense.accent }}>{t.amount}</span>
+                                        <span className="font-bold tabular-nums" style={{ color: THEMES.expense.accent }}>{formatMoney(t.amount)}</span>
                                         <button
                                             onClick={async () => { await DB.deleteTransaction(t.id); await reload(); addToast('记录已删除', 'success'); }}
                                             className="px-1 text-slate-300 hover:text-rose-400"

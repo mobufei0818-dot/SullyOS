@@ -22,6 +22,8 @@ const DEFAULT_MAX_OUTPUT_ITEMS = 15;
 const MAX_LIVE_NODES_PER_BOX = 8; // 单盒最多展开多少条活节点（防止超大盒污染）
 
 interface RenderItem {
+    /** 精确信号命中项在普通 score 排序前保底进入。 */
+    guaranteed: boolean;
     /** 用于排序：取该 item 内最高的 finalScore */
     score: number;
     /** 用于按房间分组的代表房间 */
@@ -66,7 +68,7 @@ export async function expandAndFormat(
 
     // 1. 按 eventBoxId 去重分组（同一 box 多次命中合并；保留命中里最高分作 box 分）
     //    boxItem: { boxId, topScore, hitNodeIds[] }
-    const boxHits = new Map<string, { topScore: number; hitNodeIds: Set<string>; sample: ScoredMemory }>();
+    const boxHits = new Map<string, { topScore: number; hitNodeIds: Set<string>; sample: ScoredMemory; guaranteed: boolean }>();
     const standaloneItems: ScoredMemory[] = [];
 
     for (const r of results) {
@@ -81,10 +83,12 @@ export async function expandAndFormat(
                     topScore: r.finalScore,
                     hitNodeIds: new Set([r.node.id]),
                     sample: r,
+                    guaranteed: r.recallGuarantee === 'explicit_entity',
                 });
             } else {
                 if (r.finalScore > cur.topScore) cur.topScore = r.finalScore;
                 cur.hitNodeIds.add(r.node.id);
+                if (r.recallGuarantee === 'explicit_entity') cur.guaranteed = true;
             }
         } else {
             standaloneItems.push(r);
@@ -102,7 +106,7 @@ export async function expandAndFormat(
             renderItems.push(buildStandaloneItem(hit.sample, now));
             continue;
         }
-        const item = await buildBoxItem(box, hit.topScore, localNodeMap, now);
+        const item = await buildBoxItem(box, hit.topScore, localNodeMap, now, hit.guaranteed);
         if (item) renderItems.push(item);
     }
 
@@ -112,6 +116,7 @@ export async function expandAndFormat(
 
     // 3. 排序（finalScore 降序，同分时较新者优先）+ 截断到 MAX_OUTPUT_ITEMS
     renderItems.sort((a, b) => {
+        if (a.guaranteed !== b.guaranteed) return a.guaranteed ? -1 : 1;
         if (b.score !== a.score) return b.score - a.score;
         return b.createdAt - a.createdAt;
     });
@@ -196,6 +201,11 @@ export async function expandAndFormat(
     // 4a. 便利贴置顶记忆
     if (pinnedNodes.length > 0) {
         output += `📌 **便利贴（近期重要事项）**\n`;
+        // 便利贴不占名额、每轮全量注入，置顶最长 30 天。没有这句分寸，「记着一件事」
+        // 会退化成每段结尾都追问一遍进展、催对方快去办。同仓库里 Notion 笔记块
+        // （chatPrompts 的「不要每次都提」）和用药提醒（lifeRecords 的「别反复催」）
+        // 早就配了同类措辞，这里补齐。
+        output += `（这些是你这几天一直记着的事。记着不等于要一直说——话赶到那儿了顺口提一句就够了，没赶到就让它待在心里；同一件事不必每次聊天都追问进展，也不必替 ta 安排什么时候去做。）\n`;
         for (const node of pinnedNodes) {
             const daysLeft = Math.ceil((node.pinnedUntil! - now) / (24 * 60 * 60 * 1000));
             output += `- [${formatMemoryDateWithDistance(node.createdAt, now)}] ${node.content}（剩余 ${daysLeft} 天）\n`;
@@ -226,6 +236,8 @@ export async function expandAndFormat(
     const activeAnticipations = anticipations.filter(a => a.status === 'active' || a.status === 'anchor');
     if (activeAnticipations.length > 0) {
         output += `> **窗台期盼**:\n`;
+        // 同便利贴：active/anchor 的期盼每轮全量注入，anchor 更是长期挂着。
+        output += `> （这是你心里盼着的事，不是待办清单。它影响你的心情多过你的话头，不必每次都提起来。）\n`;
         for (const ant of activeAnticipations) {
             const label = ant.status === 'anchor' ? '🔒 锚点' : '✨ 期盼';
             output += `> - ${label}: ${ant.content}\n`;
@@ -245,6 +257,7 @@ function buildStandaloneItem(r: ScoredMemory, now: number): RenderItem {
     const date = formatMemoryDateWithDistance(node.createdAt, now);
     const body = `(${date}, 重要性: ${node.importance})\n${node.content}`;
     return {
+        guaranteed: r.recallGuarantee === 'explicit_entity',
         score: r.finalScore,
         room: node.room,
         body,
@@ -262,6 +275,7 @@ async function buildBoxItem(
     topScore: number,
     localNodeMap: Map<string, MemoryNode>,
     now: number,
+    guaranteed: boolean = false,
 ): Promise<RenderItem | null> {
     // 加载 summary（如有）
     let summary: MemoryNode | null = null;
@@ -313,6 +327,7 @@ async function buildBoxItem(
     for (const n of liveToShow) sourceIds.push(n.id);
 
     return {
+        guaranteed,
         score: topScore,
         room,
         body: body.trimEnd(),

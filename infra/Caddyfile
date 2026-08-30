@@ -1,0 +1,71 @@
+# /etc/caddy/Caddyfile — SullyOS stats
+# 域名：stats.friedsully.com（主）+ stats.palm.cdsv.cc（旧，过渡期保留）
+# 两个域名都必须在 Cloudflare 上是灰云 / DNS only：走橙云的话 Caddy 看到的是 CF 边缘 IP，
+# 下面那套 /24 截断就会静默失效（不报错、自检也照样绿）。
+{
+	admin off
+
+	# 运行时日志（不是 access log）。Caddy 的 error 级日志会包含 TLS 握手失败方的
+	# remote addr，这也算「反代日志里有 IP」。这里整体丢弃。
+	# 需要排障时临时改成 `output stderr` 并在排障后改回。
+	log {
+		output discard
+	}
+}
+
+stats.friedsully.com, stats.palm.cdsv.cc {
+	# access log：Caddy 默认就不开。这里显式写出来，方便别人核对时一眼看到。
+	log {
+		output discard
+	}
+
+	# 把客户端 IP 截断后再交给 umami：
+	#   IPv4 → /24（末段归零）      203.0.113.47   → 203.0.113.0
+	#   IPv6 → /48（保留前三组）    2001:db8:1234:… → 2001:db8:1234::
+	# 完整 IP 在 Caddy 进程内存里存在过，但既不落盘也不进入 umami。
+	map {client_ip} {anon_ip} {
+		~^(\d{1,3}\.\d{1,3}\.\d{1,3})\.\d{1,3}$ "${1}.0"
+		~^([0-9a-fA-F]{0,4}:[0-9a-fA-F]{0,4}:[0-9a-fA-F]{0,4}):.*$ "${1}::"
+		default "0.0.0.0"
+	}
+
+	header {
+		Strict-Transport-Security "max-age=63072000; includeSubDomains"
+		-Server
+	}
+
+	# 只读分析 MCP。Bearer token 在应用层校验，后端只监听 127.0.0.1:3100，
+	# 且后端自身不记录 client IP。
+	# 注意：这里刻意不写 log 指令，继承 site 级的日志丢弃设置。
+	# assert-privacy.sh 用 grep 数 log 指令行数，本文件任何位置都不要再出现
+	# 那个字面量，否则计数断言会误判（连注释都会被数进去）。
+	handle /mcp* {
+		reverse_proxy 127.0.0.1:3100
+	}
+
+	handle {
+		reverse_proxy 127.0.0.1:3000 {
+			# umami 侧配了 CLIENT_IP_HEADER=X-Anon-IP，只会读这一个头
+			header_up X-Anon-IP {anon_ip}
+
+			# 清掉所有 umami 会认的「真实 IP」头，防止客户端自带一个把截断绕过去
+			header_up -X-Forwarded-For
+			header_up -X-Real-IP
+			header_up -Forwarded
+			header_up -True-Client-IP
+			header_up -CF-Connecting-IP
+			header_up -Fastly-Client-IP
+			header_up -X-NF-Client-Connection-IP
+			header_up -DO-Connecting-IP
+			header_up -X-AppEngine-User-IP
+			header_up -X-Client-IP
+			header_up -X-Cluster-Client-IP
+			header_up -X-Forwarded
+
+			# 同样清掉 CDN 的地理头，避免绕过本地 GeoIP 口径
+			header_up -CF-IPCountry
+			header_up -CF-Region-Code
+			header_up -CF-IPCity
+		}
+	}
+}

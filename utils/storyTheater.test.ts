@@ -18,13 +18,17 @@ import {
     buildStoryWorldbookScanMessages,
     buildTheaterWorldbookSlots,
     compileStoryPreset,
+    prepareStoryGenerationSettings,
     createBlankStoryPreset,
     createStoryTheaterDraft,
     dedupeTheaterWorldbooks,
+    describeEmptyStoryCompletion,
+    describeStoryApiError,
     getStoryPresetPromptGroups,
     getActiveStoryMiniTheaterPrompt,
     getPendingStoryRetryInput,
     isProtectedStoryPrompt,
+    isStoryUserLastCompatibilityError,
     memoryTimestampForCharacter,
     parseStoryDisplayBlocks,
     parseStoryMiniTheater,
@@ -37,7 +41,55 @@ import {
     selectStoryArchiveBatch,
     storyTheaterMemoryRecipientIds,
     formatActorRecentMessages,
+    formatStoryTheaterExport,
+    makeStoryPresetFileName,
+    makeStoryTheaterFileName,
 } from './storyTheater';
+
+describe('剧情接口报错诊断', () => {
+    it('保留上游 400 的具体原因', () => {
+        expect(describeStoryApiError(400, { error: { message: 'context_length_exceeded: maximum 32768' } }))
+            .toBe('API Error 400：context_length_exceeded: maximum 32768');
+        expect(describeStoryApiError(400, { error: '最后一条消息必须是 user' }))
+            .toBe('API Error 400：最后一条消息必须是 user');
+    });
+
+    it('只在上游明确拒绝末条角色时建议 400 兼容模式', () => {
+        expect(isStoryUserLastCompatibilityError('API Error 400: final message role must be user')).toBe(true);
+        expect(isStoryUserLastCompatibilityError('API Error 400：最后一条消息必须是 user')).toBe(true);
+        expect(isStoryUserLastCompatibilityError('API Error 400: context_length_exceeded')).toBe(false);
+    });
+
+    it('空正文会暴露 finish_reason，而不是统一叫用户盲目重试', () => {
+        expect(describeEmptyStoryCompletion({ choices: [{ finish_reason: 'length', message: { content: '' } }] }))
+            .toContain('已用完输出额度');
+        expect(describeEmptyStoryCompletion({ choices: [{ finish_reason: 'content_filter', message: { content: '' } }] }))
+            .toContain('内容过滤');
+        expect(describeEmptyStoryCompletion({ choices: [{ finish_reason: 'stop', message: { content: '' } }] }))
+            .toContain('finish_reason=stop');
+    });
+});
+
+describe('剧情原文导出', () => {
+    it('按原始楼层顺序导出真实陪伴的完整推进与正文', () => {
+        const output = formatStoryTheaterExport(
+            { title: '雨夜', premise: '从车站开始', writesToCharacterMemory: true },
+            '条条',
+            ['林星', 'Noir'],
+            [
+                { id: 2, charId: 'story', role: 'assistant', type: 'text', content: '<story_text>他撑开伞。</story_text>', timestamp: 2 },
+                { id: 1, charId: 'story', role: 'user', type: 'text', content: '走出车站。', timestamp: 1 },
+            ] as Message[],
+            new Date(2026, 7, 13, 20, 0, 0).getTime(),
+        );
+
+        expect(output).toContain('模式：真实时间陪伴');
+        expect(output).toContain('角色：林星、Noir');
+        expect(output.indexOf('走出车站。')).toBeLessThan(output.indexOf('<story_text>他撑开伞。</story_text>'));
+        expect(makeStoryTheaterFileName('雨/夜', new Date(2026, 7, 13).getTime())).toBe('雨_夜_剧情记录_2026-08-13.txt');
+        expect(makeStoryPresetFileName('雨/夜：预设')).toBe('雨_夜：预设.json');
+    });
+});
 
 describe('多人剧情记忆的人称与归属', () => {
     it('把每位角色的召回包进具名专属信封，并阻止把“你”重绑定到面具', () => {
@@ -189,6 +241,26 @@ describe('剧情预设发送器', () => {
         },
     };
 
+    it('默认完整发送预设参数，只有显式兼容开关才省略三项', () => {
+        const settings = {
+            temperature: 0.9,
+            top_p: 1,
+            frequency_penalty: 0,
+            presence_penalty: 0,
+            max_tokens: 8000,
+        };
+        expect(prepareStoryGenerationSettings(settings)).toEqual(settings);
+        expect(prepareStoryGenerationSettings(settings, true)).toEqual({ temperature: 0.9, max_tokens: 8000 });
+
+        expect(prepareStoryGenerationSettings({
+            temperature: 0.7,
+            top_p: 0.8,
+            frequency_penalty: 0.1,
+            presence_penalty: 0.2,
+            max_tokens: 2048,
+        }, true)).toEqual({ temperature: 0.7, max_tokens: 2048 });
+    });
+
     it('遵守顺序、enabled、role、marker 去重、宏和 prefill', () => {
         const result = compileStoryPreset({
             preset,
@@ -300,7 +372,7 @@ describe('剧情预设发送器', () => {
 
 describe('剧情沙盒辅助逻辑', () => {
     it('新虚构剧场默认不读取记忆，真实陪伴强制摘下面具', () => {
-        expect(createStoryTheaterDraft(1)).toMatchObject({ openingMode: 'user', writesToCharacterMemory: false, carryCharacterMemory: false, forceUserLastMessage: false });
+        expect(createStoryTheaterDraft(1)).toMatchObject({ openingMode: 'user', writesToCharacterMemory: false, carryCharacterMemory: false, forceUserLastMessage: false, omitSamplingParams: false });
         const normalized = normalizeStoryTheater({
             ...createStoryTheaterDraft(1),
             openingMode: 'assistant',
@@ -309,6 +381,7 @@ describe('剧情沙盒辅助逻辑', () => {
             carryCharacterMemory: false,
         });
         expect(normalized.openingMode).toBe('assistant');
+        expect(normalized.omitSamplingParams).toBe(false);
         expect(normalized.mask).toEqual({ type: 'user' });
         expect(normalized.carryCharacterMemory).toBe(true);
         expect(REAL_COMPANION_MEMORY_GUARD).toContain('不得捏造两人曾经发生过的经历');

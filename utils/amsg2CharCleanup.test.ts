@@ -13,7 +13,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('./activeMsgClient', () => ({
-  ActiveMsgClient: { clearCharClientState: vi.fn() },
+  ActiveMsgClient: {
+    clearCharClientState: vi.fn(),
+    deleteLlmCredentials: vi.fn(async () => undefined),
+    clearClientStateValue: vi.fn(async () => undefined),
+    cancelTask: vi.fn(async (uuid: string) => ({ uuid, alreadyGone: false })),
+  },
 }));
 
 let workerUrl = 'https://amsg.example.workers.dev';
@@ -21,8 +26,22 @@ vi.mock('./activeMsgStore', () => ({
   ActiveMsgStore: { getGlobalConfig: async () => ({ workerUrl }) },
 }));
 
+const { inFlight } = vi.hoisted(() => ({
+  inFlight: { current: null as { jobId: string; at: number; snapshotAt: number; uuid?: string } | null },
+}));
+vi.mock('./memoryPalace/roomPlateCloud', () => ({
+  readPlateJobInFlightRaw: vi.fn(() => inFlight.current),
+  clearPlateJobInFlight: vi.fn(),
+  clearPlateJobDone: vi.fn(),
+}));
+vi.mock('./apiCallLog', () => ({
+  cloudApiCallLogId: (id: string) => `cloud-${id}`,
+  settleCloudApiCall: vi.fn(),
+}));
+
 import { charMayHaveCloudState, purgeCharCloudState } from './amsg2CharCleanup';
 import { ActiveMsgClient } from './activeMsgClient';
+import { settleCloudApiCall } from './apiCallLog';
 import type { CharacterProfile } from '../types';
 
 const charWith = (
@@ -33,6 +52,10 @@ const clearMock = () => ActiveMsgClient.clearCharClientState as unknown as Retur
 
 beforeEach(() => {
   workerUrl = 'https://amsg.example.workers.dev';
+  inFlight.current = null;
+  vi.mocked(settleCloudApiCall).mockClear();
+  vi.mocked(ActiveMsgClient.cancelTask).mockClear();
+  vi.mocked(ActiveMsgClient.clearClientStateValue).mockClear();
   clearMock().mockReset();
   clearMock().mockResolvedValue(['fire_pack', 'tool_pack']);
 });
@@ -98,6 +121,56 @@ describe('purgeCharCloudState', () => {
 
     const result = await purgeCharCloudState(charWith({ enabled: true, tasks: [] }));
     expect(result).toEqual({ status: 'failed', error: boom });
+  });
+
+  // 回归守卫：删角色会把在飞记号清掉，而那个记号是本地唯一记着 job 编号的地方。清完就
+  // 没人再去收「设置 → API 调用记录」里那笔「云端生成中」——它会一直转圈到 5 天后被裁掉，
+  // 用户分不清是还在跑还是早就没了。在飞记号超时那条路特意绕开的就是这个坑。
+  it('删角色时把那笔挂着的「云端生成中」收成失败', async () => {
+    inFlight.current = { jobId: 'job-9', at: 1, snapshotAt: 1 };
+
+    await purgeCharCloudState(charWith({ enabled: true, tasks: [] }));
+
+    expect(settleCloudApiCall).toHaveBeenCalledWith({ id: 'cloud-job-9', ok: false });
+  });
+
+  it('没有在飞的整理就不多收一笔', async () => {
+    await purgeCharCloudState(charWith({ enabled: true, tasks: [] }));
+
+    expect(settleCloudApiCall).not.toHaveBeenCalled();
+  });
+
+  // 回归守卫：原先只撤输入、不动任务行。任务到点照样起跑、照着重试梯子重来几轮（读到
+  // 空值会安静跳过，但每一轮都是一次调度），而它已经没有任何落脚点了。远端任务编号原先
+  // 压根没往本地记，所以想撤也撤不了。
+  it('在飞那份的远端任务要真的取消掉，不只是撤输入', async () => {
+    inFlight.current = { jobId: 'job-9', at: 1, snapshotAt: 1, uuid: 'task-uuid-9' };
+
+    await purgeCharCloudState(charWith({ enabled: true, tasks: [] }));
+
+    expect(ActiveMsgClient.cancelTask).toHaveBeenCalledWith('task-uuid-9');
+    expect(ActiveMsgClient.clearClientStateValue).toHaveBeenCalled();
+  });
+
+  it('取消任务失败（远端挂了）→ 输入照撤，也不拦着角色删掉', async () => {
+    inFlight.current = { jobId: 'job-9', at: 1, snapshotAt: 1, uuid: 'task-uuid-9' };
+    vi.mocked(ActiveMsgClient.cancelTask).mockRejectedValueOnce(new Error('worker down'));
+
+    const result = await purgeCharCloudState(charWith({ enabled: true, tasks: [] }));
+
+    expect(ActiveMsgClient.clearClientStateValue).toHaveBeenCalled();
+    expect(result.status).toBe('cleared');
+  });
+
+  // 提交的答复丢在路上时拿不到远端编号（任务可能建了、编号却没回来）。那种只能等它自己
+  // 跑完——读到空输入会安静跳过。别为了取消它去猜一个 uuid。
+  it('没记下远端编号的（答复丢了）→ 不取消，输入照撤', async () => {
+    inFlight.current = { jobId: 'job-9', at: 1, snapshotAt: 1 };
+
+    await purgeCharCloudState(charWith({ enabled: true, tasks: [] }));
+
+    expect(ActiveMsgClient.cancelTask).not.toHaveBeenCalled();
+    expect(ActiveMsgClient.clearClientStateValue).toHaveBeenCalled();
   });
 
   it('云端本来就是空的 → cleared + 空清单（不是失败）', async () => {

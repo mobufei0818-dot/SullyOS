@@ -22,6 +22,7 @@ import {
 } from '../types';
 import { FIRE_GRACE_MS, recurrencePeriodMs } from './amsg2ExpireGuard';
 import { AMSG_INSTANT_CHAT_SUBTYPE, type AmsgTzRef, formatFireTimeShort } from './amsgFirePack';
+import { AMSG_BACKGROUND_JOB_SUBTYPE } from './amsgTaskKinds';
 
 export const MAX_ACTIVE_TASKS_PER_CHAR = 5;
 
@@ -263,11 +264,20 @@ export const buildFireTaskListBlock = (
 // reason: 'stale'（错过触发时刻太久被跳过）| 投递失败的原始错误信息 }。
 // 服务端只在失败时写、之后成功也不清，所以它永远是「最近一次失败」的记录——
 // 显示时必须带上时间，老记录才不会被读成「现在还坏着」。
+//
+// 2.6.0-next.21 起同一份记录多两个机读字段：errorCode（底层错误的稳定 code）和
+// pushStatus（真正发推送那一步上游回的状态码）。「这次该怎么办」读这两个就够，
+// 不用回去正则匹配 reason 那句人话——那是给用户看的自由文本，上游改个措辞，
+// 按文本分流的代码就静默失效了。
 
 export interface RemoteTaskLastError {
   at?: string;
   occurrence?: string;
   reason?: string;
+  /** 底层错误的稳定 code，如 `LLM_CALL_FAILED` / `PUSH_PAYLOAD_TOO_LARGE`。 */
+  errorCode?: string;
+  /** 推送那一步上游回的 HTTP 状态码；410 / 404 = 这份订阅已经作废了。 */
+  pushStatus?: number;
 }
 
 /** 远端投影是解密出来的任意 JSON，进 UI 前收敛一遍形状；全空/不是对象 → null。 */
@@ -276,16 +286,71 @@ export const parseRemoteTaskLastError = (raw: unknown): RemoteTaskLastError | nu
   const value = raw as Record<string, unknown>;
   const pick = (key: string): string | undefined =>
     typeof value[key] === 'string' && value[key] ? (value[key] as string) : undefined;
+  const pushStatus = Number(value.pushStatus);
   const parsed: RemoteTaskLastError = {
     at: pick('at'),
     occurrence: pick('occurrence'),
     reason: pick('reason'),
+    errorCode: pick('errorCode'),
+    ...(Number.isFinite(pushStatus) && pushStatus > 0 ? { pushStatus } : {}),
   };
-  return parsed.at || parsed.occurrence || parsed.reason ? parsed : null;
+  return parsed.at || parsed.occurrence || parsed.reason || parsed.errorCode || parsed.pushStatus
+    ? parsed
+    : null;
 };
 
-/** reason 是投递失败时的原始错误信息，可能整段 HTML/堆栈，卡片上截个头就够。 */
-const REMOTE_ERROR_REASON_MAX = 60;
+/**
+ * reason 是投递失败时的原始错误信息，可能整段 HTML / 堆栈，界面上截个头就够。
+ *
+ * 从 60 放宽到这个数：amsg-server 2.6.0-next.21 起，上游拒了请求时 reason 是
+ * 「状态行 + 破折号 + 上游原话」两段，光状态行就占掉五六十字（见 pickErrorDetail），
+ * 按老长度截等于每次都把唯一有用的那半句切掉。上游那句原话自己截到 300 字符，
+ * 这里再收一道——卡片上放得下、又装得完典型的那句「模型不存在 / 余额不足」。
+ */
+export const REMOTE_ERROR_REASON_MAX = 120;
+
+/** 推送服务判定「这份订阅已经没了」时回的状态码：410 已注销，404 端点不存在。 */
+const PUSH_GONE_STATUSES = [410, 404];
+
+/**
+ * 从 reason 里挑出最有信息量的那一段。
+ *
+ * 上游拒了请求时，amsg-server 写下来的是这么两行：
+ *
+ *   AI API error: 401 Unauthorized. Request URL: https://api.example.com/v1/chat/completions
+ *     — Incorrect API key provided: sk-[redacted]. (provider code: invalid_api_key)
+ *
+ * 第一行只说得出「是 400 还是 401」，而「模型名写错、余额不够、上下文超长、被内容
+ * 审核拦下」这些真正能照着改的东西全在破折号后面。所以有破折号就取它后面那段，
+ * 没有的话（推送失败、宿主 hook 抛错等）原文照用。
+ *
+ * 取**第一个**破折号：分隔符只有那一个，后面整段都是上游原话，而原话自己也可能带
+ * 破折号（`Web Push delivery failed: 410 Gone — …` 就是），从最后一个切会把它再腰斩一次。
+ */
+const pickErrorDetail = (reason: string): string => {
+  const dashAt = reason.indexOf('—');
+  const detail = dashAt >= 0 ? reason.slice(dashAt + 1) : reason;
+  return detail.replace(/\s+/g, ' ').trim();
+};
+
+/** 上游给了稳定 code 时对用户说的话；没有对应条目的码走通用文案。 */
+const ERROR_CODE_TEXT: Record<string, string> = {
+  // 一条 push 的明文上限是 3993 字节，超了库在加密之前就抛，一个字节都没发出去。
+  PUSH_PAYLOAD_TOO_LARGE: '这条回复太长，一条推送装不下',
+  // 任务正文（角色设定 + 对话历史）整个超过了存储单行上限。
+  TASK_PAYLOAD_TOO_LARGE: '这一轮要带上云的内容太多，超过了单条任务的上限',
+};
+
+/**
+ * 这次失败该怎么办——从机读字段推，不看 reason 那句人话。
+ * 返回 null = 没有专门的说法，调用方走通用文案。
+ */
+const describeActionableFailure = (lastError: RemoteTaskLastError): string | null => {
+  if (lastError.pushStatus && PUSH_GONE_STATUSES.includes(lastError.pushStatus)) {
+    return '这台设备的推送订阅已经失效，去设置页「重置订阅」重新登记一次';
+  }
+  return (lastError.errorCode && ERROR_CODE_TEXT[lastError.errorCode]) || null;
+};
 
 /**
  * 远端 lastError 的人话（任务卡片上那行说明）。formatTime 由调用方注入
@@ -302,7 +367,11 @@ export const describeRemoteLastError = (
   if (lastError.reason === 'stale') {
     return `${whenText}到点时已过期太久，跳过了一次`;
   }
-  const reason = (lastError.reason || '').slice(0, REMOTE_ERROR_REASON_MAX);
+  // 上游点名说了是什么毛病时用它的说法：那句话里有「接下来该做什么」，
+  // 而原始报错只能告诉用户「坏了」。
+  const actionable = describeActionableFailure(lastError);
+  if (actionable) return `${whenText}上次到点没发出去：${actionable}`;
+  const reason = pickErrorDetail(lastError.reason || '').slice(0, REMOTE_ERROR_REASON_MAX);
   return `${whenText}上次到点没发出去（连续失败${reason ? `：${reason}` : ''}）`;
 };
 
@@ -323,7 +392,16 @@ export const describeInstantChatFailure = (
   // 能推给用户的正文。照实说，别掉进下面「生成失败」的口径——生成没失败，是没产出。
   if (lastError.reason === 'empty-generation') return '模型这轮没有生成内容（空输出或拒答）';
   if (lastError.reason === 'side-effects-only') return '角色这轮只做了动作，没有文字回复';
-  const detail = (lastError.reason || '').slice(0, REMOTE_ERROR_REASON_MAX);
+  // 订阅失效 / 正文超限这类有确定处置方式的，直接说该干什么。这些重发多少次都是
+  // 同一个结果，混在「生成失败」里只会让用户对着发送键反复试。
+  const actionable = describeActionableFailure(lastError);
+  if (actionable) return `${actionable}${retried}`;
+  const detail = pickErrorDetail(lastError.reason || '').slice(0, REMOTE_ERROR_REASON_MAX);
+  // 上游明说是模型接口拒了请求：换个说法，别让用户以为是 SullyOS 这边生成挂了——
+  // 这一档要查的是 API Key、模型名、余额，跟本地一点关系没有。
+  if (lastError.errorCode === 'LLM_CALL_FAILED') {
+    return `模型接口拒了这次请求${retried}${detail ? `：${detail}` : ''}`;
+  }
   return `生成失败${retried}${detail ? `：${detail}` : ''}`;
 };
 
@@ -397,12 +475,14 @@ export const reconcileTasksWithRemote = (
     // 字段不全的行不补：宁可少一条，也别拿默认值凑一条跟远端对不上的记录出来。
     // 已经失败的行也不补：它不会再响，补进来就是清单上一条永远等不到的幽灵任务。
     // 即时对话的行同样不补：那是用户此刻正等着的一轮聊天，不是排程，进了清单会显示成
-    // 「待触发的任务」，还可能被「取消全部」顺手掐掉。
+    // 「待触发的任务」，还可能被「取消全部」顺手掐掉。后台任务（门牌整理这类不说话的
+    // 活儿）同理——它们跟聊天任务共用调度器，但不是用户排的主动消息。
     .filter((row) => (
       !known.has(row.uuid)
       && row.nextSendAt && row.recurrenceType && row.messageType
       && row.status !== 'failed'
       && row.messageSubtype !== AMSG_INSTANT_CHAT_SUBTYPE
+      && row.messageSubtype !== AMSG_BACKGROUND_JOB_SUBTYPE
     ))
     .map((row): ActiveMsg2TaskRecord => ({
       taskUuid: row.uuid,

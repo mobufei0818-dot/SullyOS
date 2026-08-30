@@ -26,6 +26,19 @@ vi.mock('./keepAlive', () => ({
   KeepAlive: { init: vi.fn().mockResolvedValue(undefined), reregister: vi.fn().mockResolvedValue(undefined) },
 }));
 
+// 后台任务结果的分发口：真的那份会动态 import 记忆宫殿那一整套（IndexedDB），
+// 这里只关心「补收有没有把它交出去、销账判断对不对」。
+const { resultDispatch } = vi.hoisted(() => ({
+  resultDispatch: { calls: [] as unknown[], contexts: [] as unknown[], settle: true },
+}));
+vi.mock('./amsgResults', () => ({
+  dispatchAmsgResult: vi.fn(async (payload: unknown, context?: unknown) => {
+    resultDispatch.calls.push(payload);
+    resultDispatch.contexts.push(context);
+    return resultDispatch.settle;
+  }),
+}));
+
 const { storeState } = vi.hoisted(() => ({
   storeState: {
     config: {
@@ -61,17 +74,20 @@ import { ActiveMsgClient } from './activeMsgClient';
 import {
   AMSG_INSTANT_CHAT_PENDING_LS_KEY,
   AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY,
-  chatOutboxPayloadToInbox,
+  AMSG_OUTBOX_ADOPTED_LS_KEY,
+  OUTBOX_BACKFILL_MAX_AGE_MS,
   clearInstantChatPending,
   discardInstantChatExpiredNotices,
-  drainChatOutboxForChar,
+  drainOutbox,
   failInstantChatPending,
   getInstantChatPending,
   getStagedInstantChatExpiredNotices,
   isInstantChatReady,
+  resetInstantChatReprobeCooldown,
   resolveInstantChatReadiness,
   sendInstantChatTurn,
   setInstantChatPending,
+  settleInstantChatApiLog,
   settleInstantChatExpiredNotices,
   stageInstantChatExpiredNotices,
 } from './amsgInstantChat';
@@ -109,6 +125,7 @@ const mockInstantChatFetch = (status: number, body: unknown) => {
 beforeEach(() => {
   localStorage.removeItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY);
   localStorage.removeItem(AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY);
+  localStorage.removeItem(AMSG_OUTBOX_ADOPTED_LS_KEY);
   storeState.inbox = [];
   storeState.saved = [];
   storeState.markedNotices = [];
@@ -450,6 +467,114 @@ describe('只有 202 才算发出去', () => {
   });
 });
 
+// 「API 调用记录」的记录点挂在全局 fetch 拦截器上，只认 /chat/completions——上云这一轮
+// 本地只发一个 POST 给自己的 Worker，那条拦不到。不专门记的话，开了即时对话之后聊天
+// 在记录里整个消失，看着像调用凭空没了。
+describe('上云的这一轮也进「API 调用记录」', () => {
+  /** 收走写库的那几笔（apiCallLog 走动态 import('./db')，按 DB 单例打桩拦得到）。 */
+  const captureLog = () => {
+    const logged: any[] = [];
+    vi.spyOn(DB, 'appendApiCallLog').mockImplementation(async (entry: any) => { logged.push(entry); });
+    return logged;
+  };
+
+  const sendOnce = async (status: number, body: unknown) => {
+    stubFirePackDeps();
+    mockInstantChatFetch(status, body);
+    const logged = captureLog();
+    await sendInstantChatTurn({
+      char: CHAR, chatMessages: [{ role: 'user', content: '在吗' }], api: API,
+      userProfile: USER, groups: [], realtimeConfig: {} as any,
+    });
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    return logged[0];
+  };
+
+  it('202 → 落一笔标着云端的「生成中」记录', async () => {
+    const entry = await sendOnce(202, { status: 'accepted', uuid: 'uuid-log' });
+    expect(entry).toMatchObject({
+      id: 'cloud-uuid-log',
+      route: 'cloud-instant-chat',
+      pending: true,
+      ok: true,
+      baseUrl: API.baseUrl,
+      model: API.model,
+      appName: '消息',
+      charId: CHAR.id,
+      charName: CHAR.name,
+      // 跟本地生成那条路同一个词，两条路在列表里对得起来。
+      purpose: '聊天回复',
+    });
+    // 输入构成照算：这一轮到底交上去多大的东西，本地就这一份线索。
+    expect(entry.promptBreakdown?.length).toBeGreaterThan(0);
+  });
+
+  it('连 202 都没拿到 → 记一笔当场就是终态的失败，不留「生成中」挂着', async () => {
+    const entry = await sendOnce(500, { success: false, error: { code: 'X', message: '云端挂了' } });
+    expect(entry).toMatchObject({ route: 'cloud-instant-chat', pending: false, ok: false });
+    expect(entry.promptBreakdown?.length).toBeGreaterThan(0);
+  });
+
+  it('还没等到回复就又发一条 → 上一笔收成「已顶替」，不会一直转圈到被裁掉', async () => {
+    stubFirePackDeps();
+    mockInstantChatFetch(202, { status: 'accepted', uuid: 'uuid-second' });
+    setInstantChatPending(CHAR.id, 'uuid-first', 1_000);
+    const logged = captureLog();
+    await sendInstantChatTurn({
+      char: CHAR, chatMessages: [{ role: 'user', content: '还在吗' }], api: API,
+      userProfile: USER, groups: [], realtimeConfig: {} as any,
+    });
+    await vi.waitFor(() => expect(logged).toHaveLength(2));
+    // 顶掉的那一轮不算失败：云端把两句合成一次回，只是它不再单独等回复了。
+    expect(logged.find((e) => e.id === 'cloud-uuid-first')).toMatchObject({
+      pending: false, superseded: true, ok: true,
+    });
+    expect(logged.find((e) => e.id === 'cloud-uuid-second')?.pending).toBe(true);
+  });
+
+  it('回复回来 → 同一条记录补上用量，时间戳一个字不动（列表顺序不许跟着回复先后跳）', async () => {
+    const logged = captureLog();
+    settleInstantChatApiLog('uuid-log', { amsgUsage: { promptTokens: 1200, completionTokens: 80 } });
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    expect(logged[0]).toMatchObject({
+      id: 'cloud-uuid-log', pending: false, ok: true,
+      promptTokens: 1200, completionTokens: 80,
+      // 云端只报入和出，总数本地自己加——列表顶上的合计读的就是它。
+      totalTokens: 1280,
+    });
+    expect(logged[0].timestamp).toBeUndefined();
+    expect(logged[0].tokensPartial).toBeUndefined();
+  });
+
+  it('这一轮调过工具 → 用量标成只算末轮（云端只报得回最后一次调用的数）', async () => {
+    const logged = captureLog();
+    settleInstantChatApiLog('uuid-log', {
+      amsgUsage: { promptTokens: 1200, completionTokens: 80 },
+      amsgToolTrace: [{ name: 'web_search', count: 1 }],
+    });
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    expect(logged[0].tokensPartial).toBe(true);
+  });
+
+  it('云端没回用量 → 只销「生成中」，不往记录里填 0 冒充真数', async () => {
+    const logged = captureLog();
+    settleInstantChatApiLog('uuid-log', {});
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    expect(logged[0].pending).toBe(false);
+    expect(logged[0].promptTokens).toBeUndefined();
+    expect(logged[0].totalTokens).toBeUndefined();
+  });
+
+  it('云端点名说这一轮没成 → 那笔跟着收尾成失败，不会一直写着「生成中」', async () => {
+    setInstantChatPending(CHAR.id, 'uuid-dead', 1_000);
+    vi.spyOn(DB, 'saveMessage').mockResolvedValue(undefined as any);
+    const logged = captureLog();
+    await failInstantChatPending(CHAR.id, 'uuid-dead', '云端生成失败');
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    expect(logged[0]).toMatchObject({ id: 'cloud-uuid-dead', pending: false, ok: false });
+  });
+});
+
 describe('待收记录（「正在输入…」那盏灯的唯一依据）', () => {
   it('落在 localStorage 里，重启后还在', () => {
     setInstantChatPending('char-a', 'uuid-a', 1_000);
@@ -551,8 +676,22 @@ describe('开关', () => {
   // 新 bundle 少了起跳器直接 503。用户开着开关也得让位给本地生成，否则他对着
   // 「正在输入…」等一条永远不来的回复，而设置页写着「已开启」。
 
-  it('探到 Worker 跑不动 → 用户开着也不走云端（reason worker-outdated）', async () => {
+  // 存量是粘的（只有探测成功才翻得回来），所以让位之前一定要先现探一次——下面四条钉的
+  // 就是这次现探的四种去向。
+
+  /** 存量说跑不动 + 摆好「这次现探会问到什么」。 */
+  const stageOutdatedWithProbe = (outcome: 'supported' | 'unsupported' | 'unknown') => {
     storeState.config = { ...storeState.config, instantChatEnabled: true, instantChatSupported: false };
+    // 冷却是模块级状态，会串到别的用例上去。
+    resetInstantChatReprobeCooldown();
+    return vi.spyOn(ActiveMsgClient, 'probeInstantChatSupportDetailed').mockResolvedValue({
+      outcome,
+      supported: outcome === 'supported' ? true : outcome === 'unsupported' ? false : undefined,
+    });
+  };
+
+  it('现探确认跑不动 → 用户开着也不走云端（reason worker-outdated）', async () => {
+    stageOutdatedWithProbe('unsupported');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* 静音，只数次数 */ });
     const readiness = await resolveInstantChatReadiness();
     expect(readiness).toEqual({ ready: false, reason: 'worker-outdated' });
@@ -561,6 +700,35 @@ describe('开关', () => {
     expect(readiness.reason).not.toBe('disabled');
     // 静默让位正是「静默分流」那个坑，必须留声。
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  // ★ 这条是「一次抖动 ≠ 长期降级」的守卫。
+  // 从前存量一旦是 false 就直接判死，而写下这个 false 的可能只是一次网络抖动——用户不
+  // 碰巧打开设置页就一直卡在本地生成（线上真实故障：Worker 全绿，用户连着几小时全走本地，
+  // 而他的本地直连根本不通）。现在发消息路上会现探一次，好了立刻回到云端。
+  it('存量说跑不动、现探却发现已经好了 → 这一轮就回到云端（不必等用户去开设置页）', async () => {
+    stageOutdatedWithProbe('supported');
+    expect(await resolveInstantChatReadiness()).toEqual({ ready: true });
+  });
+
+  // 够不着云端时不能指人去「更新 Worker」：他多半点不动，而且问题也不在那儿。
+  it('现探够不着云端 → 单独一档 worker-unreachable，不叫人去更新 Worker', async () => {
+    stageOutdatedWithProbe('unknown');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => { /* 静音，只数次数 */ });
+    const readiness = await resolveInstantChatReadiness();
+    expect(readiness).toEqual({ ready: false, reason: 'worker-unreachable' });
+    expect(readiness.reason).not.toBe('worker-outdated');
+    expect(warn).toHaveBeenCalledTimes(1);
+  });
+
+  // 现探是加在发消息路上的，连发几条消息不能变成一串 /config-check。
+  it('冷却期内不重复现探（连发三条只探一次）', async () => {
+    const probe = stageOutdatedWithProbe('unsupported');
+    vi.spyOn(console, 'warn').mockImplementation(() => { /* 静音 */ });
+    await resolveInstantChatReadiness();
+    await resolveInstantChatReadiness();
+    await resolveInstantChatReadiness();
+    expect(probe).toHaveBeenCalledTimes(1);
   });
 
   it('没探过（undefined）→ 放行：不知道 ≠ 知道它不行', async () => {
@@ -693,8 +861,8 @@ describe('随这一轮上云的作废回执', () => {
   });
 });
 
-describe('推送丢了的补收对账', () => {
-  const outboxPayload = (messageId: string) => ({
+describe('推送丢了的补收（服务端账本）', () => {
+  const outboxPush = (messageId: string, overrides: Record<string, any> = {}) => ({
     messageKind: 'content',
     messageType: 'instant',
     source: 'scheduled',
@@ -709,26 +877,30 @@ describe('推送丢了的补收对账', () => {
     taskUuid: 'uuid-round-1',
     occurrenceMs: 1_700_000_000_000,
     metadata: { charId: CHAR.id, charName: '小满', amsgInstantChat: true },
+    ...overrides,
   });
 
-  // 补收只对账目标轮（欠着回复的那一轮 / 显式点名的 uuid）：outbox 是跨轮环形数组，
-  // 不过滤的话被重 roll / 手动删掉的旧轮回复会因「本地查无此 id」复活。
-  beforeEach(() => setInstantChatPending(CHAR.id, 'uuid-round-1', 1_000));
+  const entry = (messageId: string, push: Record<string, any>, createdAt = Date.now()) => ({
+    id: 1, messageId, taskUuid: 'uuid-round-1', sessionId: 'sess-1',
+    messageIndex: 1, totalMessages: 1, createdAt, deliveredAt: null, push,
+  });
 
-  const stubOutbox = (messageIds: string[]) => {
-    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockResolvedValue(JSON.stringify({
-      v: 1,
-      entries: messageIds.map((messageId) => ({
-        messageId, sessionId: 'sess-1', at: 1_700_000_000_000, payload: outboxPayload(messageId),
-      })),
-    }));
+  const stubOutbox = (entries: any[]) => {
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue(entries as any);
   };
 
-  it('没收到的那条写进收件箱，字段跟 SW 收真推送时写的一份对得上', async () => {
-    stubOutbox(['msg_task_7@1700000000000_hook_0']);
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
-    const written = await drainChatOutboxForChar(CHAR.id);
+  // 这一组测的都是「已经接上账本之后」的常规补收。首次接管走的是另一条路（存量整批
+  // 销账、不上屏），单独一组在下面。
+  beforeEach(() => {
+    localStorage.setItem(AMSG_OUTBOX_ADOPTED_LS_KEY, JSON.stringify({ at: Date.now() }));
+  });
+
+  it('账本上的那条写进收件箱，字段跟 SW 收真推送时写的一份对得上', async () => {
+    const messageId = 'msg_task_7@1700000000000_hook_0';
+    stubOutbox([entry(messageId, outboxPush(messageId))]);
+    const { written, ackNow } = await drainOutbox();
     expect(written).toBe(1);
+    expect(ackNow).toEqual([]);           // 落库之前不许销账
     const saved = storeState.saved[0];
     expect(saved.charId).toBe(CHAR.id);
     expect(saved.body).toBe('我在呢');
@@ -738,61 +910,181 @@ describe('推送丢了的补收对账', () => {
     expect(saved.sentAt).toBe(1_700_000_000_000);
   });
 
-  it('已经上过屏的那条不再放一遍（对账读聊天记录里的 messageId）', async () => {
+  // 账本是这一版才开始销账的，头一次拉会把历史积压一次性倒出来。不掐时效的话，那些
+  // 早就落过库的老消息会因为超出近史去重的查询窗口而重新上屏。
+  it('超过时效窗口的条目不进聊天流，当场销账', async () => {
     const messageId = 'msg_task_7@1700000000000_hook_0';
-    stubOutbox([messageId]);
+    const tooOld = Date.now() - OUTBOX_BACKFILL_MAX_AGE_MS - 1;
+    stubOutbox([entry(messageId, outboxPush(messageId), tooOld)]);
+    const { written, ackNow } = await drainOutbox();
+    expect(written).toBe(0);
+    expect(storeState.saved).toHaveLength(0);
+    expect(ackNow).toEqual([messageId]);
+  });
+
+  // 线上真实事故的第二半：一条回复在账本上躺了 28 小时，用户隔天开 App 时被自动补收
+  // 按「太旧了」销掉，一个字都没上屏；他后来去点「找回没收到的消息」，看到的是
+  // 「账本上没有漏收的消息——这条链路是通的」。窗口拉到两天能盖住「隔一夜 + 第二天
+  // 想起来」这个最常见的节奏，而超窗的那些必须数出来说给用户听。
+  it('窗口是两天：47 小时的补回来，49 小时的算作「拿不回来了」', async () => {
+    const fresh = 'msg-47h';
+    const stale = 'msg-49h';
+    stubOutbox([
+      entry(fresh, outboxPush(fresh), Date.now() - 47 * 3_600_000),
+      entry(stale, outboxPush(stale), Date.now() - 49 * 3_600_000),
+    ]);
+    const { written, ackNow, staleDropped } = await drainOutbox();
+    expect(written, '47 小时还在窗口内').toBe(1);
+    expect(ackNow, '49 小时的只销账').toEqual([stale]);
+    expect(staleDropped, '超窗的要数出来，界面靠它说话').toBe(1);
+  });
+
+  // 账本行躺到超龄，最常见的成因根本不是「消息丢了」，而是**消息早就送达了**：收尾那笔
+  // 销账是 fire-and-forget，用户看完随手锁屏就被掐断，账一直挂着。不核对本地就一律按
+  // 「永久拿不回来了」报的话，用户会收到一句红字说自己丢了消息——而那条消息就躺在聊天
+  // 记录里，他刚刚才看过。
+  it('超龄但本地已经有同 id 的消息 → 只补销账，不算「拿不回来了」', async () => {
+    const messageId = 'msg_task_7@1700000000000_hook_0';
+    const tooOld = Date.now() - OUTBOX_BACKFILL_MAX_AGE_MS - 1;
+    stubOutbox([entry(messageId, outboxPush(messageId), tooOld)]);
+    // 落库的每条气泡都继承 metadata.activeMsg2.messageId，核对认的就是它。
     vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([
-      { role: 'assistant', type: 'text', content: '我在呢', metadata: { activeMsg2: { messageId } } },
+      { role: 'assistant', metadata: { activeMsg2: { messageId } } },
     ] as any);
-    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
-    expect(storeState.saved).toHaveLength(0);
+
+    const { written, ackNow, staleDropped } = await drainOutbox();
+
+    expect(written).toBe(0);
+    expect(ackNow, '账还是要销，不然每趟都把它捞回来').toEqual([messageId]);
+    expect(staleDropped, '消息就在聊天记录里，一条都没丢').toBe(0);
   });
 
-  it('还压在收件箱里没冲刷的那条也算收过', async () => {
+  it('超龄且本地确实没有 → 照旧算「拿不回来了」', async () => {
+    const messageId = 'msg-really-lost';
+    const tooOld = Date.now() - OUTBOX_BACKFILL_MAX_AGE_MS - 1;
+    stubOutbox([entry(messageId, outboxPush(messageId), tooOld)]);
+    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
+
+    const { ackNow, staleDropped } = await drainOutbox();
+
+    expect(ackNow).toEqual([messageId]);
+    expect(staleDropped).toBe(1);
+  });
+
+  // staleDropped 只数「本该收到、现在永久拿不回来」的那一档。思维链、工具请求这些
+  // 本来就不进聊天流，销掉不损失任何东西——混进来的话，界面会把「丢了 1 条」说成
+  // 「丢了 3 条」，用户白紧张一场，真出事时也就不信这个数了。
+  it('只数超窗的那一档，不进聊天流的那几类不算「丢了」', async () => {
+    stubOutbox([
+      entry('msg-reasoning', outboxPush('msg-reasoning', { messageKind: 'reasoning' })),
+      entry('msg-tool', outboxPush('msg-tool', { messageKind: 'tool_request' })),
+    ]);
+    const { ackNow, staleDropped } = await drainOutbox();
+    expect(ackNow).toHaveLength(2);
+    expect(staleDropped).toBe(0);
+  });
+
+  // 补收回来已经没有意义的那几类：思维链要挂在正文上、工具请求那头的云端早就收工了、
+  // 隔了一阵子的报错弹出来只会让人摸不着头脑。但账还是要销，不然每趟都把它们捞回来。
+  it.each(['reasoning', 'tool_request', 'error'])('%s 类不进聊天流，当场销账', async (kind) => {
+    const messageId = `msg-${kind}`;
+    stubOutbox([entry(messageId, outboxPush(messageId, { messageKind: kind }))]);
+    const { written, ackNow } = await drainOutbox();
+    expect(written).toBe(0);
+    expect(storeState.saved).toHaveLength(0);
+    expect(ackNow).toEqual([messageId]);
+  });
+
+  // 后台任务（门牌整理这类）跑完送回来的结果**只走这条路**：不弹通知的结果上游只落
+  // 账本、不发推送，所以补收是它唯一的入口。跟 reasoning/error 那批一起当场销账丢掉的
+  // 话，云端跑完的东西会一声不响地全部蒸发——面板全绿、日志干净、就是东西没了。
+  describe('后台任务的结果（messageKind: result）', () => {
+    beforeEach(() => {
+      resultDispatch.calls = [];
+      resultDispatch.contexts = [];
+      resultDispatch.settle = true;
+    });
+
+    it('交给分发口，不写进聊天流', async () => {
+      const messageId = 'msg-result';
+      const push = outboxPush(messageId, {
+        messageKind: 'result',
+        resultKind: 'plate-consolidate',
+        message: undefined,
+        items: [{ room: 'user_room', text: '小明搬去合租了' }],
+      });
+      stubOutbox([entry(messageId, push)]);
+      const { written, ackNow } = await drainOutbox();
+
+      expect(written).toBe(0);
+      expect(storeState.saved).toHaveLength(0);
+      expect(resultDispatch.calls).toEqual([push]);
+      expect(ackNow).toEqual([messageId]);
+    });
+
+    it('消化失败就不销账，下次上线再拉回来', async () => {
+      resultDispatch.settle = false;
+      const messageId = 'msg-result-retry';
+      stubOutbox([entry(messageId, outboxPush(messageId, {
+        messageKind: 'result', resultKind: 'plate-consolidate',
+      }))]);
+      const { ackNow } = await drainOutbox();
+      expect(ackNow).toEqual([]);
+    });
+
+    // 回归守卫：这条路刻意跳过了聊天那两天的时效窗（结果晚到本来就是常态），可跳过
+    // 之后没换上任何上限。账本留 28 天——重装 PWA 的用户第一次接上账本会把一个月前的结果
+    // 一次性拉回来。这里不替各种产物定规矩，但账本上记的时间必须原样交出去，认领它的
+    // 那一方才判得了「陈到不能用了没有」。
+    it('时效窗那道判断不套在结果上，但账本上记的时间要交出去', async () => {
+      const messageId = 'msg-result-old';
+      const tooOld = Date.now() - OUTBOX_BACKFILL_MAX_AGE_MS - 1;
+      stubOutbox([entry(messageId, outboxPush(messageId, {
+        messageKind: 'result', resultKind: 'plate-consolidate',
+      }), tooOld)]);
+      await drainOutbox();
+      expect(resultDispatch.calls).toHaveLength(1);
+      expect(resultDispatch.contexts[0], '不交时间的话它连「这份躺了多久」都问不出来')
+        .toEqual({ createdAt: tooOld });
+    });
+  });
+
+  it('情绪结果显式标成 emotion_update（冲刷管线靠它分流，认不出会当正文气泡渲染）', async () => {
+    const messageId = 'msg-emotion';
+    stubOutbox([entry(messageId, outboxPush(messageId, {
+      messageKind: 'emotion_update',
+      messageType: undefined,
+      message: '',
+      metadata: { charId: CHAR.id, emotionRaw: '{"joy":1}' },
+    }))]);
+    const { written } = await drainOutbox();
+    expect(written).toBe(1);
+    expect(storeState.saved[0].messageType).toBe('emotion_update');
+    expect(storeState.saved[0].metadata.emotionRaw).toBe('{"joy":1}');
+  });
+
+  it('推送载荷少了 charId → 没有落点，丢掉并销账而不是造一条无主消息', async () => {
+    stubOutbox([entry('msg-orphan', { messageKind: 'content', message: '孤儿' })]);
+    const { written, ackNow } = await drainOutbox();
+    expect(written).toBe(0);
+    expect(storeState.saved).toHaveLength(0);
+    expect(ackNow).toEqual(['msg-orphan']);
+  });
+
+  // 销账即失忆：账一销，这条就再也拉不回来了。写不进收件箱时必须留着账。
+  it('写收件箱失败 → 不销账，下次拉回来再试', async () => {
     const messageId = 'msg_task_7@1700000000000_hook_0';
-    stubOutbox([messageId]);
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
-    storeState.inbox = [{ messageId, charId: CHAR.id }];
-    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
+    stubOutbox([entry(messageId, outboxPush(messageId))]);
+    const { ActiveMsgStore } = await import('./activeMsgStore');
+    vi.spyOn(ActiveMsgStore, 'saveInboxMessage').mockRejectedValueOnce(new Error('quota'));
+    const { written, ackNow } = await drainOutbox();
+    expect(written).toBe(0);
+    expect(ackNow).toEqual([]);
   });
 
-  it('不是目标轮的旧条目不复活（重 roll / 删除过的轮次已不在 pending 里）', async () => {
-    clearInstantChatPending(CHAR.id);
-    setInstantChatPending(CHAR.id, 'uuid-round-2', 2_000);   // 正在等的是新一轮
-    stubOutbox(['msg_task_7@1700000000000_hook_0']);          // outbox 里只有旧轮（uuid-round-1）
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
-    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
-    expect(storeState.saved).toHaveLength(0);
-  });
-
-  it('一条都不欠、也没显式点名 → 直接 0，一个请求都不发', async () => {
-    clearInstantChatPending(CHAR.id);
-    const read = vi.spyOn(ActiveMsgClient, 'readClientStateValue');
-    expect(await drainChatOutboxForChar(CHAR.id)).toBe(0);
-    expect(read).not.toHaveBeenCalled();
-  });
-
-  it('显式点名 uuid（销账后的末段补扫）时不依赖 pending 存在', async () => {
-    clearInstantChatPending(CHAR.id);
-    stubOutbox(['msg_task_7@1700000000000_hook_0']);
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockResolvedValue([] as any);
-    expect(await drainChatOutboxForChar(CHAR.id, { uuids: ['uuid-round-1'] })).toBe(1);
-  });
-
-  it('读不到近史时宁可这次不补收（重复上屏比晚一会儿更糟），对外报 null', async () => {
-    stubOutbox(['msg_task_7@1700000000000_hook_0']);
-    vi.spyOn(DB, 'getRecentMessagesByCharId').mockRejectedValue(new Error('IDB down'));
-    expect(await drainChatOutboxForChar(CHAR.id)).toBeNull();
-    expect(storeState.saved).toHaveLength(0);
-  });
-
-  it('云端 outbox 读失败 → 返回 null（「没读到」≠「读到了、确实没有」），不抛错', async () => {
-    vi.spyOn(ActiveMsgClient, 'readClientStateValue').mockRejectedValue(new Error('offline'));
-    expect(await drainChatOutboxForChar(CHAR.id)).toBeNull();
-  });
-
-  it('推送载荷少了 charId → 没有落点，丢掉而不是造一条无主消息', () => {
-    expect(chatOutboxPayloadToInbox({ message: '孤儿' }, 1)).toBeNull();
+  it('账本读失败照常抛（「没读到」≠「读到了、确实没有」，调用方才好分开收场）', async () => {
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockRejectedValue(new Error('offline'));
+    await expect(drainOutbox()).rejects.toThrow('offline');
   });
 
   // 契约测试：push→inbox 的字段映射有两份手工同步的副本（SW 的 saveContentToInbox 与
@@ -800,21 +1092,143 @@ describe('推送丢了的补收对账', () => {
   // 任一副本漏抄这两个字段，多段回复的首段就会被当成末段销账，后续段永久丢失且无报错。
   // 这里钉住补收侧必须把顶层段号抄进 metadata（与 sw-keep-alive.ts 的映射同一条规则；
   // 那份是 SW 代码没法直接 import，改动 SW 映射时这条测试就是要一起过的清单）。
-  it('顶层 messageIndex/totalMessages 必须抄进 metadata（销账检查只认 metadata 里的）', () => {
-    const inbox = chatOutboxPayloadToInbox({
-      charId: CHAR.id,
-      charName: '小满',
+  it('顶层 messageIndex/totalMessages 必须抄进 metadata（销账检查只认 metadata 里的）', async () => {
+    const messageId = 'msg_task_7@1700000000000_hook_0';
+    stubOutbox([entry(messageId, {
+      messageKind: 'content',
       message: '第一段',
-      messageId: 'msg_task_7@1700000000000_hook_0',
+      messageId,
       sessionId: 'sess_task_7@1700000000000',
       taskUuid: 'uuid-round-1',
       messageIndex: 1,
       totalMessages: 3,
       metadata: { charId: CHAR.id },
-    }, Date.now())!;
+    })]);
+    await drainOutbox();
+    const inbox = storeState.saved[0];
     expect(inbox).toBeTruthy();
-    expect((inbox.metadata as any).messageIndex).toBe(1);
-    expect((inbox.metadata as any).totalMessages).toBe(3);
-    expect((inbox.metadata as any).sessionId).toBe('sess_task_7@1700000000000');
+    expect(inbox.metadata.messageIndex).toBe(1);
+    expect(inbox.metadata.totalMessages).toBe(3);
+    expect(inbox.metadata.sessionId).toBe('sess_task_7@1700000000000');
+  });
+});
+
+// 账本上躺着的存量 ≠「我丢了的消息」：服务端从建表那一刻起就在记，而销账是客户端这
+// 一版才有的能力。头一趟要是当补收放进聊天流，用户会被这段时间收过的消息整批重放一遍
+// （角色「疯狂回复」，而且删掉重复消息反而会让近史去重失效、下一趟倒得更凶）。时效
+// 窗口挡不住这一档——存量的年龄本来就在窗口之内，「昨晚更新 worker、今天升级前端」
+// 就是最典型的那条时间线。
+describe('第一次接上服务端账本', () => {
+  const entry = (messageId: string, taskUuid: string) => ({
+    id: 1,
+    messageId,
+    taskUuid,
+    sessionId: 'sess-x',
+    messageIndex: 1,
+    totalMessages: 1,
+    createdAt: Date.now(),
+    deliveredAt: null,
+    push: {
+      messageKind: 'content',
+      message: '这是账本上的存量',
+      messageId,
+      taskUuid,
+      metadata: { charId: CHAR.id, charName: '小满' },
+    },
+  });
+
+  const stubOutboxOnce = (entries: any[]) =>
+    vi.spyOn(ActiveMsgClient, 'listOutboxEntries').mockResolvedValue(entries as any);
+
+  it('存量整批销账，一条都不进聊天流', async () => {
+    stubOutboxOnce([entry('m1', 'uuid-1'), entry('m2', 'uuid-2')]);
+    const ack = vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+
+    const { written, ackNow } = await drainOutbox();
+
+    expect(written).toBe(0);
+    expect(storeState.saved).toHaveLength(0);
+    expect(ack).toHaveBeenCalledWith(['m1', 'm2']);
+    expect(ackNow).toEqual([]);      // 已经在接管里销掉了，不用调用方再销一次
+    expect(localStorage.getItem(AMSG_OUTBOX_ADOPTED_LS_KEY)).toBeTruthy();
+  });
+
+  // 接管那一趟恰好赶上用户发消息时，这一轮的回复不能被当存量销掉——否则他等来的是
+  // 一句「云端已处理，但回复没能取回」。
+  it('此刻正等着的那一轮不算存量，照常补收上屏', async () => {
+    setInstantChatPending(CHAR.id, 'uuid-awaited');
+    stubOutboxOnce([entry('m-old', 'uuid-old'), entry('m-awaited', 'uuid-awaited')]);
+    const ack = vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+
+    const { written } = await drainOutbox();
+
+    expect(written).toBe(1);
+    expect(storeState.saved.map((m: any) => m.messageId)).toEqual(['m-awaited']);
+    expect(ack).toHaveBeenCalledWith(['m-old']);
+  });
+
+  // 回归守卫：换设备 / 重装 PWA / 清过 localStorage 的用户，启动第一趟走的就是这条路。
+  // 后台任务的结果不进聊天流，没有「存量重放刷屏」这回事，而补收是它唯一的入口（不弹
+  // 通知的结果上游只落账本、不发推送）。跟存量一起销掉的话，云端已经跑完的门牌整理会
+  // 一声不响地蒸发，面板全绿、日志干净、就是东西没了。
+  it('后台任务的结果不算存量，照常交给分发口', async () => {
+    resultDispatch.calls = [];
+    resultDispatch.settle = true;
+    const resultEntry = {
+      ...entry('m-result', 'uuid-job'),
+      push: { messageKind: 'result', resultKind: 'plate-consolidate', messageId: 'm-result' },
+    };
+    stubOutboxOnce([entry('m-old', 'uuid-old'), resultEntry]);
+    const ack = vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+
+    const { ackNow } = await drainOutbox();
+
+    expect(ack, '结果不在整批销账那一批里').toHaveBeenCalledWith(['m-old']);
+    expect(resultDispatch.calls).toHaveLength(1);
+    expect(ackNow, '消化成功之后才销它自己那一条').toEqual(['m-result']);
+    expect(localStorage.getItem(AMSG_OUTBOX_ADOPTED_LS_KEY)).toBeTruthy();
+  });
+
+  // 先记标记再销账的话，销账一失败，剩下的存量下一趟就会被当成补收倒进聊天流。
+  it('存量没销干净 → 不记标记，下一趟重新接管', async () => {
+    stubOutboxOnce([entry('m1', 'uuid-1')]);
+    vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockRejectedValue(new Error('worker 没应答'));
+
+    const { written, ackNow } = await drainOutbox();
+
+    expect(written).toBe(0);
+    expect(storeState.saved).toHaveLength(0);
+    expect(ackNow).toEqual([]);
+    expect(localStorage.getItem(AMSG_OUTBOX_ADOPTED_LS_KEY)).toBeNull();
+  });
+
+  it('接管过一次之后，账本上的新条目照常补收', async () => {
+    const list = stubOutboxOnce([entry('m-backlog', 'uuid-old')]);
+    vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+    await drainOutbox();
+    expect(storeState.saved).toHaveLength(0);
+
+    list.mockResolvedValue([entry('m-new', 'uuid-new')] as any);
+    const { written } = await drainOutbox();
+
+    expect(written).toBe(1);
+    expect(storeState.saved.map((m: any) => m.messageId)).toEqual(['m-new']);
+  });
+
+  // 自动路径把存量整批销掉是对的（分不清哪些是真丢的），但对「我确实少收了消息」的
+  // 用户来说，那批存量恰恰就是他要找的东西——销了就再也拿不回来了。所以手动补收
+  // 这条路要能越过接管：用户自己知道自己丢了，这个判断他做得了。
+  it('手动补收越过首次接管，存量照样上屏', async () => {
+    stubOutboxOnce([entry('m-missed', 'uuid-missed')]);
+    const ack = vi.spyOn(ActiveMsgClient, 'ackOutboxMessages').mockResolvedValue(undefined);
+
+    const { written } = await drainOutbox({ treatBacklogAsMissed: true });
+
+    expect(written).toBe(1);
+    expect(storeState.saved.map((m: any) => m.messageId)).toEqual(['m-missed']);
+    // 没被当存量销掉：销账要等落库走完那一步（backfill 里 written 的那条不进 ackNow）。
+    expect(ack).not.toHaveBeenCalledWith(['m-missed']);
+    // 手动补过一次就算接上了，后面回到自动路径，别下次又把新条目当存量销掉。
+    expect(localStorage.getItem(AMSG_OUTBOX_ADOPTED_LS_KEY)).toBeTruthy();
   });
 });

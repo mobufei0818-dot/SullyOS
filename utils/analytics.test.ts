@@ -17,6 +17,8 @@ const SCALE = {
     maxMemoryCount: 1,
     maxMessageCount: 1,
     storageBytes: 0,
+    storageQuotaBytes: 1024 * 1024 * 1024,
+    persistedStorage: false,
     standalone: false,
 };
 
@@ -133,7 +135,7 @@ describe('统计请求识别', () => {
 
     it('未配置统计时不误判同路径的业务请求', async () => {
         const a = await loadModule(false);
-        expect(a.isAnalyticsRequestUrl('https://stats.palm.cdsv.cc/api/send')).toBe(false);
+        expect(a.isAnalyticsRequestUrl('https://stats.friedsully.com/api/send')).toBe(false);
     });
 });
 
@@ -359,6 +361,16 @@ describe('规模档位', () => {
         expect(a.bucketStorageBytes(1024 * MB)).toBe('1GB+');
     });
 
+    it('存储水位的档位边界', async () => {
+        const a = await loadModule(true);
+        const GB = 1024 * 1024 * 1024;
+        expect(a.bucketStorageWatermark(0, GB)).toBe('<25%');
+        expect(a.bucketStorageWatermark(0.25 * GB, GB)).toBe('25-50%');
+        expect(a.bucketStorageWatermark(0.5 * GB, GB)).toBe('50-80%');
+        expect(a.bucketStorageWatermark(0.8 * GB, GB)).toBe('80%+');
+        expect(a.bucketStorageWatermark(GB, GB)).toBe('80%+');
+    });
+
     it('每次会话最多报一次，重复调用不再发', async () => {
         installFakeDom({ withUmami: true });
         const a = await loadModule(true);
@@ -381,13 +393,30 @@ describe('规模档位', () => {
             maxMemoryCount: 388,
             maxMessageCount: 6431,
             storageBytes: 137_428_992,
+            storageQuotaBytes: 2_147_483_648,
+            persistedStorage: true,
             standalone: true,
         });
 
         const payload = JSON.stringify(tracked[0][1]);
-        for (const raw of ['412', '388', '6431', '137428992']) {
+        for (const raw of ['412', '388', '6431', '137428992', '2147483648']) {
             expect(payload).not.toContain(raw);
         }
+    });
+
+    it('持久化许可只报「已获得 / 未获得」两个写死的值', async () => {
+        installFakeDom({ withUmami: true });
+        const a = await loadModule(true);
+        a.trackDataScaleOnce({ ...SCALE, persistedStorage: true });
+        expect((tracked[0][1] as any)['持久化许可']).toBe('已获得');
+    });
+
+    it('查不了持久化状态的浏览器，这一项缺席而不是当成「未获得」', async () => {
+        // 查不了 ≠ 没拿到。混为一谈会把 Safari 那批人全算成裸奔，结论直接反过来。
+        installFakeDom({ withUmami: true });
+        const a = await loadModule(true);
+        a.trackDataScaleOnce({ ...SCALE, persistedStorage: null });
+        expect(tracked[0][1] as any).not.toHaveProperty('持久化许可');
     });
 
     it('浏览器不给存储配额时，这一项直接缺席，不拿 0 顶上', async () => {
@@ -396,6 +425,24 @@ describe('规模档位', () => {
         a.trackDataScaleOnce({ ...SCALE, storageBytes: null });
 
         expect(Object.keys(tracked[0][1] as object)).not.toContain('本地存储占用');
+    });
+
+    it('读不到配额上限时，水位这一项缺席', async () => {
+        installFakeDom({ withUmami: true });
+        const a = await loadModule(true);
+        a.trackDataScaleOnce({ ...SCALE, storageBytes: 100, storageQuotaBytes: null });
+
+        expect(tracked[0][1] as any).not.toHaveProperty('存储水位');
+    });
+
+    it('配额报成 0 时也缺席 —— 别拿 0 去除算出一条假的「80%+」', async () => {
+        // 隐私模式下有浏览器会回 quota: 0。除零得 Infinity，落进最高档，
+        // 结论就成了「这批人全都快满了」，正好反过来。
+        installFakeDom({ withUmami: true });
+        const a = await loadModule(true);
+        a.trackDataScaleOnce({ ...SCALE, storageBytes: 100, storageQuotaBytes: 0 });
+
+        expect(tracked[0][1] as any).not.toHaveProperty('存储水位');
     });
 
     it('全屏运行只有是/否两个值', async () => {
@@ -563,7 +610,6 @@ describe('上报出口', () => {
 
         expect(() => a.trackEvent('触发翻译白屏护栏')).not.toThrow();
         expect(() => a.initAnalytics()).not.toThrow();
-        await expect(a.readStorageBytes()).resolves.toBeNull();
     });
 
     it('事件名和枚举属性原样透传', async () => {

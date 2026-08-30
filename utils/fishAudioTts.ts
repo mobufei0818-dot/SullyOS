@@ -17,6 +17,7 @@ import { hashTtsParams, getCachedTts, saveCachedTts } from './ttsCache';
 import { normalizeApiKey } from './minimaxApiKey';
 import { getProxyWorkerUrl } from './proxyWorker';
 import type { TtsResult } from './minimaxTts';
+import { isStaticWebDeployment } from './staticWebDeployment';
 
 const FISH_PROXY_PATH = '/api/fishaudio/tts';
 const FISH_UPSTREAM = 'https://api.fish.audio/v1/tts';
@@ -275,10 +276,7 @@ const isNative = (): boolean => {
 
 const shouldBypassWebProxy = (): boolean => {
   if (typeof window === 'undefined') return false;
-  const protocol = String(window.location.protocol || '').toLowerCase();
-  if (protocol === 'file:') return true;
-  const host = String(window.location.hostname || '').toLowerCase();
-  return host === 'github.io' || host.endsWith('.github.io');
+  return isStaticWebDeployment(window.location.protocol, window.location.hostname);
 };
 
 /** base64 → Blob（CapacitorHttp 二进制响应是 base64 字符串）。 */

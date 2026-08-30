@@ -9,12 +9,14 @@
 //  1. apizero content-extract（主）：服务端文本密度算法，浏览器直连（CORS 全开），
 //     正文干净、配额充裕（匿名 5000 次/天/IP，带 key 10000 次/天，key 与 videoParser 共用）。
 //     疑似 SPA 壳（正文过短）/ 服务挂了 → 降级下一层。
-//  2. sfworker /fetch-webpage（Jina Reader 无头渲染，SPA 也能读）→ 失败退裸 HTML。
-//  3. 前端直连抓裸 HTML + DOMParser 启发式提取（多数站点会被 CORS 挡掉，纯末路兜底）。
+//  2. 用户配置 Firecrawl 时，用 /scrape 读取动态页（Key 本地保存，直接请求服务商）。
+//  3. sfworker /fetch-webpage（Jina Reader 无头渲染，SPA 也能读）→ 失败退裸 HTML。
+//  4. 前端直连抓裸 HTML + DOMParser 启发式提取（多数站点会被 CORS 挡掉，纯末路兜底）。
 
 import { htmlToText } from './htmlPrompt';
 import { getProxyWorkerUrl } from './proxyWorker';
 import { getVideoParseKey } from './videoParser';
+import { getFirecrawlApiKey, scrapeWebpageWithFirecrawl } from './firecrawl';
 
 // sfworker：项目自带的通用代理 Worker（小红书签名 / 网易云 weapi / Brave 搜索 / WebDAV /
 // 网页抓取都走它，代码见 worker/index.js）。地址走中心配置 utils/proxyWorker.ts，
@@ -62,6 +64,8 @@ export interface ExtractedWebpage {
   truncated: boolean;
   /** 抓取时间戳。 */
   fetchedAt: number;
+  /** 实际命中的抓取来源，便于诊断和实时展示，不参与角色提示词。 */
+  provider?: 'apizero-content' | 'apizero-video' | 'firecrawl' | 'jina' | 'worker-raw' | 'direct';
   /** 视频平台分享时的附加信息（走 videoParser 解析路径才有）。 */
   video?: VideoShareInfo;
 }
@@ -397,6 +401,7 @@ async function extractViaApizero(url: string): Promise<ExtractedWebpage> {
     image: images[0],
     truncated: rawContent.length > MAX_CONTENT_CHARS,
     fetchedAt: Date.now(),
+    provider: 'apizero-content',
   };
 }
 
@@ -411,6 +416,33 @@ export async function extractWebpageContent(url: string): Promise<ExtractedWebpa
     return null;
   });
   if (viaApizero) return viaApizero;
+
+  // 用户自备 Firecrawl Key 时，用它接手 apizero 抓不到的动态页。Key 只在本机保存，
+  // 客户端直连 Firecrawl，不经过公共 Worker，也不会挤作者的共享额度。
+  if (getFirecrawlApiKey()) {
+    const viaFirecrawl = await scrapeWebpageWithFirecrawl(url).catch((e) => {
+      console.warn('[webpageExtractor] Firecrawl failed, fallback to worker/Jina:', e);
+      return null;
+    });
+    if (viaFirecrawl) {
+      const rawContent = viaFirecrawl.markdown;
+      const content = rawContent.length > MAX_CONTENT_CHARS ? rawContent.slice(0, MAX_CONTENT_CHARS) : rawContent;
+      const finalUrl = viaFirecrawl.finalUrl;
+      const siteName = siteNameFromUrl(finalUrl || url);
+      return {
+        url,
+        finalUrl,
+        title: viaFirecrawl.title || siteName || '网页',
+        siteName,
+        content,
+        excerpt: makeExcerpt(content),
+        image: viaFirecrawl.image || firstImageFromMarkdown(rawContent),
+        truncated: rawContent.length > MAX_CONTENT_CHARS,
+        fetchedAt: Date.now(),
+        provider: 'firecrawl',
+      };
+    }
+  }
 
   const viaWorker = await fetchViaWorker(url).catch((e) => {
     // sfworker 抓取报错：记录后让直连兜底再试一把。
@@ -434,6 +466,7 @@ export async function extractWebpageContent(url: string): Promise<ExtractedWebpa
       image: firstImageFromMarkdown(rawContent),
       truncated: rawContent.length > MAX_CONTENT_CHARS,
       fetchedAt: Date.now(),
+      provider: 'jina',
     };
   }
 
@@ -460,5 +493,6 @@ export async function extractWebpageContent(url: string): Promise<ExtractedWebpa
     image: parsed.image,
     truncated: rawContent.length > MAX_CONTENT_CHARS,
     fetchedAt: Date.now(),
+    provider: viaWorker?.mode === 'raw' ? 'worker-raw' : 'direct',
   };
 }

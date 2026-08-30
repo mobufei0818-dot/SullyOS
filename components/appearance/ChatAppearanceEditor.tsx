@@ -480,10 +480,10 @@ export const ChatAppearanceEditor: React.FC<Props> = ({ theme, updateTheme, onRe
     const previewGap = messageSpacing === 'compact' ? 'gap-1.5' : messageSpacing === 'spacious' ? 'gap-4' : 'gap-2.5';
     const previewPad = headerDensity === 'compact' ? 'px-4 py-3' : headerDensity === 'airy' ? 'px-5 py-[18px]' : 'px-4 py-3.5';
     const previewMessages = [
-        { id: 'ai-1', role: 'assistant', text: '今天这套聊天壳已经比之前像样多了。' },
-        { id: 'ai-2', role: 'assistant', text: '现在还能决定头像是连续共用，还是每条都显示。' },
-        { id: 'user-1', role: 'user', text: '对，我想把头像频率也做成可以 DIY 的。' },
-        { id: 'user-2', role: 'user', text: '这样不同软件的味道会更明显。' },
+        { id: 'ai-1', role: 'assistant', kind: 'text', text: '今天这套聊天壳已经比之前像样多了。' },
+        { id: 'ai-2', role: 'assistant', kind: 'voice', text: '00:08' },
+        { id: 'user-1', role: 'user', kind: 'text', text: '对，我想把头像频率也做成可以 DIY 的。' },
+        { id: 'user-2', role: 'user', kind: 'text', text: '这样不同软件的味道会更明显。' },
     ] as const;
 
     return (
@@ -549,7 +549,17 @@ export const ChatAppearanceEditor: React.FC<Props> = ({ theme, updateTheme, onRe
                             const shouldShowAvatar = avatarMode === 'every_message' || nextRole !== message.role;
                             const avatarTone = isUser ? 'bg-primary/25' : 'bg-pink-200';
                             const avatarHidden = isUser ? hidePreviewUserAvatar : hidePreviewAiAvatar;
-                            const bubbleNode = (
+                            const bubbleNode = message.kind === 'voice' ? (
+                                <div className={`sully-voice-bar flex min-w-[190px] items-center gap-2 rounded-2xl border px-3 py-2 ${headerStyle === 'discord' ? 'border-white/10 bg-white/10' : chromeStyle === 'pixel' ? 'border-2 border-[#8f674a] bg-[#fff7ed]' : 'border-black/5 bg-slate-100/90'}`}>
+                                    <span className={`sully-voice-bar-button flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[9px] ${chromeStyle === 'pixel' ? 'bg-[#c99872] text-[#fff7ed]' : 'bg-primary/15 text-primary'}`}>▶</span>
+                                    <span className="sully-voice-bar-wave flex h-5 flex-1 items-center gap-[3px] overflow-hidden">
+                                        {[4, 10, 6, 14, 8, 12, 5, 11, 7, 13].map((height, waveIndex) => (
+                                            <i key={waveIndex} className={`sully-voice-bar-wave-segment block w-[2.5px] rounded-full ${headerStyle === 'discord' ? 'bg-white/55' : chromeStyle === 'pixel' ? 'bg-[#8f674a]/70' : 'bg-primary/45'}`} style={{ height: Math.max(2, height * 0.42) }} />
+                                        ))}
+                                    </span>
+                                    <span className={`sully-voice-bar-toggle rounded-lg px-1.5 py-0.5 text-[8px] font-medium ${headerStyle === 'discord' ? 'bg-white/10 text-white/65' : chromeStyle === 'pixel' ? 'bg-[#eadfce] text-[#8f674a]' : 'bg-black/5 text-slate-500'}`}>转文字</span>
+                                </div>
+                            ) : (
                                 <div style={{ ...previewBubbleStyle(bubbleStyle, isUser, theme), ...previewFineTextStyle }}>
                                     {message.text}
                                     {showTimestamp === 'always' && nextRole !== message.role && (

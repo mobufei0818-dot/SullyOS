@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
     User, MoonStars, HeartStraight, BookOpen,
     House, Buildings, UsersThree, Briefcase, Lightning, Heartbeat,
@@ -7,7 +7,7 @@ import {
 } from '@phosphor-icons/react';
 import type { PlateEntry, PlateRoom, RoomPlate } from '../../utils/memoryPalace/types';
 import { PLATE_ROOMS, PLATE_TITLES, PLATE_ENTRY_CAPS, PLATE_ENTRY_HARD_MAX_CHARS } from '../../utils/memoryPalace/types';
-import { RoomPlateDB } from '../../utils/memoryPalace/db';
+import { ROOM_PLATES_UPDATED_EVENT, RoomPlateDB, mutatePlate } from '../../utils/memoryPalace/db';
 
 /**
  * 房间门牌面板（神经链接 · 底色认知）— 淡紫梦境皮肤
@@ -73,10 +73,31 @@ const RoomPlatePanel: React.FC<RoomPlatePanelProps> = ({ charId, userName }) => 
     const [loading, setLoading] = useState(true);
     const [editing, setEditing] = useState<{ room: PlateRoom; entryId: string; draft: string } | null>(null);
     const [menuEntryId, setMenuEntryId] = useState<string | null>(null);
+    /** 一句一次性提示（改写落空之类），显示在顶部说明卡下面。 */
+    const [notice, setNotice] = useState<string | null>(null);
+
+    // 改到一半时云端整理的结果落库，重读会把 plates 整个换掉，而 editing 里记的还是
+    // 换掉之前那条。所以正在编辑就先不重读，等这次编辑收尾了再补上。
+    const editingRef = useRef(false);
+    const missedUpdateRef = useRef(false);
+    const reloadRef = useRef<(() => void) | null>(null);
+    /** 门牌改动的落库队列（见 editPlate）。补重读要排在它后面。 */
+    const pendingWriteRef = useRef<Promise<void>>(Promise.resolve());
+
+    useEffect(() => {
+        editingRef.current = editing !== null;
+        if (editing !== null || !missedUpdateRef.current) return;
+        missedUpdateRef.current = false;
+        // 收起编辑框这一刻，这次改动多半还没落库：commitEdit 是先 setEditing(null) 再异步
+        // 写进去的。直接重读会跟它抢——重读拿到的是改之前那份，而它的 setPlates 完全可能
+        // 排在落库那次之后，面板于是停在旧文本上（库里明明是新的），要等下一次重读才好。
+        void pendingWriteRef.current.then(() => reloadRef.current?.());
+    }, [editing]);
 
     useEffect(() => {
         let cancelled = false;
-        (async () => {
+        missedUpdateRef.current = false;
+        const load = async () => {
             try {
                 const loaded = await RoomPlateDB.getByCharId(charId);
                 if (!cancelled) {
@@ -87,32 +108,94 @@ const RoomPlatePanel: React.FC<RoomPlatePanelProps> = ({ charId, userName }) => 
             } finally {
                 if (!cancelled) setLoading(false);
             }
-        })();
-        return () => { cancelled = true; };
+        };
+        reloadRef.current = () => { void load(); };
+        void load();
+
+        // 云端整理跑完一两分钟后才把结果落库，那时这个面板多半正开着。不重读的话
+        // 用户看到的还是提交前那份，得关掉再打开——看上去就像整理压根没跑。
+        const onUpdated = (event: Event) => {
+            if ((event as CustomEvent<{ charId?: string }>).detail?.charId !== charId) return;
+            if (editingRef.current) { missedUpdateRef.current = true; return; }
+            void load();
+        };
+        window.addEventListener(ROOM_PLATES_UPDATED_EVENT, onUpdated);
+        return () => {
+            cancelled = true;
+            reloadRef.current = null;
+            window.removeEventListener(ROOM_PLATES_UPDATED_EVENT, onUpdated);
+        };
     }, [charId]);
 
-    const savePlate = async (plate: RoomPlate) => {
-        await RoomPlateDB.save(plate);
-        setPlates(prev => new Map(prev).set(plate.room, plate));
+    /**
+     * 改门牌一律走 mutatePlate：**从库里现读一份再改**，不拿手上这份整块写回去，而且
+     * 同一块门牌上的改动排队走。
+     *
+     * 这个面板会开着好几分钟，期间动这块门牌的还有另外三条路（云端整理结果落地、本地
+     * 整理落库、送达保证兜底并入），它们跟面板互相不知道对方存在。拿渲染时那份改完整块
+     * 存回去，就是把中间那次更新原地抹掉；各自在自己那条路里排队也不够——队伍必须是按
+     * 门牌的一条，所有路共用，否则「用户刚敲的字」和「一整轮整理的成果」谁后写谁赢，
+     * 而两边日志都显示成功。所以队列在 db 那一层（见 mutatePlate），这里只接住结果。
+     *
+     * `change` 要是纯的——只回答「这份门牌该改成什么样」，回 null 表示不用改。要往界面上
+     * 说句话的，在外面等这个 promise 落定之后再说（见 commitEdit）。
+     */
+    const editPlate = (
+        room: PlateRoom,
+        change: (plate: RoomPlate) => RoomPlate | null,
+    ): Promise<void> => {
+        const run = async () => {
+            try {
+                const saved = await mutatePlate(charId, room, change);
+                if (saved) setPlates(prev => new Map(prev).set(saved.room, saved));
+            } catch (e) {
+                console.warn('[RoomPlatePanel] 门牌改动没存上', e);
+                setNotice('这次改动没能存进去，再试一次吧。');
+            }
+        };
+        // 面板自己这条队还留着，但管的是**界面**而不是落库：收起编辑框那一刻要等这次
+        // 改动落定了再重读（见上面那个 effect），得有个东西可以等。
+        const write = pendingWriteRef.current.then(run, run);
+        pendingWriteRef.current = write;
+        return write;
     };
 
     const removeEntry = (room: PlateRoom, entryId: string) => {
-        const plate = plates.get(room);
-        if (!plate) return;
         setMenuEntryId(null);
-        savePlate({ ...plate, entries: plate.entries.filter(e => e.id !== entryId), updatedAt: Date.now() });
+        void editPlate(room, plate => (
+            plate.entries.some(e => e.id === entryId)
+                ? { ...plate, entries: plate.entries.filter(e => e.id !== entryId), updatedAt: Date.now() }
+                : null
+        ));
     };
 
     const commitEdit = () => {
         if (!editing) return;
-        const plate = plates.get(editing.room);
+        const { room, entryId } = editing;
         const text = editing.draft.replace(/\s+/g, ' ').trim().slice(0, PLATE_ENTRY_HARD_MAX_CHARS);
         setEditing(null);
-        if (!plate || !text) return;
-        const entries = plate.entries.map(e =>
-            e.id === editing.entryId && e.text !== text ? { ...e, text, updatedAt: Date.now() } : e
-        );
-        savePlate({ ...plate, entries, updatedAt: Date.now() });
+        setNotice(null);
+        if (!text) return;
+        // 编辑期间这条被整理掉了。默默丢掉的话，用户敲的字就这么没了还不知道；也不能当新
+        // 条目补回去——整理刚决定它不该在这块门牌上。说一句，让人自己判断。
+        // 只在变换里做个标记、出来之后再提示：变换要保持是纯的，setNotice 塞进去的话，
+        // 将来给 editPlate 加一次重试就会弹两遍，而 null 也会同时表示「不用改」和「去报错」。
+        let vanished = false;
+        void editPlate(room, plate => {
+            const target = plate.entries.find(e => e.id === entryId);
+            if (!target) {
+                vanished = true;
+                return null;
+            }
+            if (target.text === text) return null;
+            return {
+                ...plate,
+                entries: plate.entries.map(e => e.id === entryId ? { ...e, text, updatedAt: Date.now() } : e),
+                updatedAt: Date.now(),
+            };
+        }).then(() => {
+            if (vanished) setNotice('刚改的那条在编辑期间已经被整理掉了，这次改写没有落到门牌上。');
+        });
     };
 
     const fmtDate = (ts: number) => new Date(ts).toLocaleDateString();
@@ -138,6 +221,13 @@ const RoomPlatePanel: React.FC<RoomPlatePanelProps> = ({ charId, userName }) => 
                 </p>
                 <p className="text-xs text-violet-400/90 mt-1.5 relative z-10">蒸馏的条目可以在这里改写或删除。</p>
             </div>
+
+            {notice && (
+                <div className="flex items-start gap-2 bg-amber-50 border border-amber-100 rounded-2xl px-4 py-3">
+                    <p className="flex-1 text-xs text-amber-700 leading-relaxed">{notice}</p>
+                    <button onClick={() => setNotice(null)} className="shrink-0 text-[11px] font-bold text-amber-500 px-2 py-0.5">知道了</button>
+                </div>
+            )}
 
             {totalEntries === 0 && (
                 <div className="text-center py-12 bg-gradient-to-b from-white to-violet-50/50 rounded-3xl border border-dashed border-violet-200">

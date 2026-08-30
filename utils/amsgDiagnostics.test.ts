@@ -39,6 +39,7 @@ const healthyReport = (patch: Partial<AmsgDebugReport> = {}): AmsgDebugReport =>
     missingTables: [],
     missingColumns: [],
     pushSubscriptionRegistered: true,
+    pushDelivery: { probed: true, gone: null, registeredAtMs: Date.parse('2026-08-10T04:00:00.000Z') },
     pendingTasks: 2,
     overdueTasks: 0,
     oldestOverdueMinutes: null,
@@ -146,6 +147,35 @@ describe('parseAmsgDebugReport — 只认形状对得上的回执', () => {
     expect(parseAmsgDebugReport({ success: true, data: { config: {} } })).toBeNull();
   });
 
+  // 老 bundle 的回执里压根没有 pushDelivery 这一段。收敛成显式的「没查」而不是让
+  // undefined 一路漏到界面上——判定那侧只要漏写一个 ?. 就又是一个假绿灯。
+  it('缺 pushDelivery 段（老 Worker）收敛成 probed:false / unsupported', () => {
+    const { pushDelivery: _drop, ...storage } = healthyReport().storage;
+    const parsed = parseAmsgDebugReport({ success: true, data: { ...healthyReport(), storage } });
+    expect(parsed?.storage.pushDelivery).toEqual({ probed: false, reason: 'unsupported' });
+  });
+
+  it('worker 显式回 null（自己查不成）收敛成 probed:false / failed', () => {
+    const parsed = parseAmsgDebugReport({
+      success: true,
+      data: healthyReport({ storage: { ...healthyReport().storage, pushDelivery: null as any } }),
+    });
+    expect(parsed?.storage.pushDelivery).toEqual({ probed: false, reason: 'failed' });
+  });
+
+  it('形状不全的 gone（缺状态码或时刻）当没查到，不硬凑成一次失败', () => {
+    const parsed = parseAmsgDebugReport({
+      success: true,
+      data: healthyReport({
+        storage: {
+          ...healthyReport().storage,
+          pushDelivery: { gone: { status: 410 }, registeredAtMs: 1700 } as any,
+        },
+      }),
+    });
+    expect(parsed?.storage.pushDelivery).toEqual({ probed: true, gone: null, registeredAtMs: 1700 });
+  });
+
   it('tick 是没见过的值时退回 unknown，不原样透出去', () => {
     const parsed = parseAmsgDebugReport({ success: true, data: healthyReport({ tick: 'wat' as any }) });
     expect(parsed?.tick).toBe('unknown');
@@ -249,6 +279,85 @@ describe('buildAmsgDiagnosticRows — 红绿判定', () => {
     expect(summarizeAmsgDiagnostics(rows)).not.toBe('ok');
   });
 
+  /**
+   * 回归守卫：查不成的时候要说清楚是**哪一种**查不成。
+   *
+   * 三档要用户做的事完全不同，混成一句「查不了，不知道」等于什么都没说——真实故障里
+   * 原因躺在 Cloudflare 日志里，用户看不到，只能一路猜。2026-08-09 从零部署稳定复现的
+   * 就是 denied 那档：新建的 D1 库自带一张 Cloudflare 内部表，上游逐表问列时被它拒掉。
+   */
+  it('查不成的原因分档说话，不再一句「不知道」打发', () => {
+    const rowFor = (schemaError: 'denied' | 'unsupported' | 'timeout' | 'other' | undefined) =>
+      rowOf(buildAmsgDiagnosticRows({
+        probe: {
+          reachable: true,
+          report: healthyReport({
+            storage: {
+              reachable: true,
+              schemaReady: null,
+              schemaError,
+              missingTables: [],
+              missingColumns: [],
+              pushSubscriptionRegistered: true,
+              pendingTasks: 0,
+              overdueTasks: 0,
+              oldestOverdueMinutes: null,
+            },
+          }),
+        },
+        localPushSubscribed: true,
+      }), 'schema');
+
+    // 后端自己的毛病：得说明不影响收发，别让用户白点一通按钮。
+    expect(rowFor('denied').detail).toContain('内部表');
+    expect(rowFor('denied').detail).toContain('不受影响');
+    // 后端太旧：指向「更新 Worker」，不是「重新连接」。
+    expect(rowFor('unsupported').detail).toContain('更新 Worker');
+    // 库刚醒：再体检一次就好，不用改任何东西。
+    expect(rowFor('timeout').detail).toContain('过一会儿');
+    // 老 worker 不报这一项 → 退回原来那句笼统的，不能变成空字符串。
+    expect(rowFor(undefined).detail).toContain('重新连接并验证');
+    expect(rowFor(undefined).detail.length).toBeGreaterThan(10);
+    // 哪一档都不许把这行说成绿的。
+    (['denied', 'unsupported', 'timeout', 'other', undefined] as const).forEach((kind) => {
+      expect(rowFor(kind).level).toBe('unknown');
+    });
+  });
+
+  /**
+   * 回归守卫：一张表都没建的空库不许显示成全绿。
+   *
+   * 一键部署完还没点「连接并验证」时正好是这个组合：表一张没建（主表不在 → schemaReady
+   * 为 false），而自查被库里的内部表拒掉 → 「缺哪些表」是个空数组。界面只数这个数组的话，
+   * 空库和齐活的库长得一模一样。
+   */
+  it('库是空的但自查也没跑成 → 报红说「一张表都没有」，不报绿', () => {
+    const rows = buildAmsgDiagnosticRows({
+      probe: {
+        reachable: true,
+        report: healthyReport({
+          storage: {
+            reachable: true,
+            schemaReady: false,
+            schemaError: 'denied',
+            missingTables: [],
+            missingColumns: [],
+            pushSubscriptionRegistered: false,
+            pendingTasks: 0,
+            overdueTasks: 0,
+            oldestOverdueMinutes: null,
+          },
+        }),
+      },
+      localPushSubscribed: true,
+    });
+
+    const schema = rowOf(rows, 'schema');
+    expect(schema.level).toBe('bad');
+    expect(schema.detail).not.toContain('表和列都齐了');
+    expect(schema.detail).toContain('重新连接并验证');
+  });
+
   it('表结构是旧的（缺列）要单独报红并指向「重新连接并验证」', () => {
     const rows = buildAmsgDiagnosticRows({
       probe: {
@@ -345,6 +454,111 @@ describe('buildAmsgDiagnosticRows — 红绿判定', () => {
     expect(rowOf(rows, 'pushDevice').level).toBe('bad');
   });
 
+  // ─── 假绿灯回归守卫 ───
+  // 真实事故：登记状态两边一致（浏览器有订阅、Worker 上也有同一条 endpoint），
+  // 但那条订阅在推送服务那侧早就作废，每次投递换回一个 410。体检当时七项里六项
+  // 绿灯，用户看着一排绿灯完全无从下手。事实一直都在（上游把推送服务回的状态码
+  // 记进了任务的失败记录），只是没人往界面上传。
+  const REGISTERED_AT = Date.parse('2026-08-10T04:00:00.000Z');
+  const stamp = (atMs: number) => new Date(atMs).toISOString();
+  const withDelivery = (pushDelivery: AmsgDebugReport['storage']['pushDelivery']) => healthyReport({
+    storage: { ...healthyReport().storage, pushDelivery },
+  });
+  const goneAt = (at: string, status = 410) => ({
+    probed: true as const,
+    gone: { status, atMs: Date.parse(at) },
+    registeredAtMs: REGISTERED_AT,
+  });
+
+  it('登记状态全对，但上一次推送被判订阅失效 → 这台设备报红并指向「重置订阅」', () => {
+    const rows = buildAmsgDiagnosticRows({
+      probe: { reachable: true, report: withDelivery(goneAt('2026-08-10T05:06:00.000Z')) },
+      localPushSubscribed: true,
+      formatTime: stamp,
+    });
+
+    const device = rowOf(rows, 'pushDevice');
+    expect(device.level).toBe('bad');
+    expect(device.detail).toContain('410');
+    expect(device.detail).toContain('重置订阅');
+    expect(summarizeAmsgDiagnostics(rows)).toBe('bad');
+  });
+
+  it('404（端点根本不存在）同样报红', () => {
+    const rows = buildAmsgDiagnosticRows({
+      probe: { reachable: true, report: withDelivery(goneAt('2026-08-10T05:06:00.000Z', 404)) },
+      localPushSubscribed: true,
+      formatTime: stamp,
+    });
+    expect(rowOf(rows, 'pushDevice').level).toBe('bad');
+  });
+
+  it('失败记录早于订阅登记时刻 = 重置之前的旧账，不报红', () => {
+    // 服务端只在失败时写失败记录、之后成功也不清。不比时刻的话，重置完那条红灯
+    // 会一直挂着——假红灯和假绿灯一样会把人带偏。
+    const rows = buildAmsgDiagnosticRows({
+      probe: { reachable: true, report: withDelivery(goneAt('2026-08-10T03:00:00.000Z')) },
+      localPushSubscribed: true,
+      formatTime: stamp,
+    });
+    expect(rowOf(rows, 'pushDevice').level).toBe('ok');
+  });
+
+  it('问不到订阅登记时刻时报 warn：分不清新旧账，但也不给绿灯', () => {
+    const rows = buildAmsgDiagnosticRows({
+      probe: {
+        reachable: true,
+        report: withDelivery({ ...goneAt('2026-08-10T05:06:00.000Z'), registeredAtMs: null }),
+      },
+      localPushSubscribed: true,
+      formatTime: stamp,
+    });
+    expect(rowOf(rows, 'pushDevice').level).toBe('warn');
+    expect(rowOf(rows, 'pushDevice').detail).toContain('重置订阅');
+  });
+
+  it('Worker 太旧、根本不查这一项 → warn + 指去「更新 Worker」，不给绿灯', () => {
+    // 这一档是升级路上的常态：前端已经会读了，用户那台 Worker 还是老 bundle。
+    // 给绿灯的话，假绿灯就原封不动地回来了。
+    const rows = buildAmsgDiagnosticRows({
+      probe: { reachable: true, report: withDelivery({ probed: false, reason: 'unsupported' }) },
+      localPushSubscribed: true,
+    });
+    const device = rowOf(rows, 'pushDevice');
+    expect(device.level).toBe('warn');
+    expect(device.detail).toContain('更新 Worker');
+    expect(summarizeAmsgDiagnostics(rows)).toBe('warn');
+  });
+
+  it('查了但没查成 → 同样 warn，并说清到点收不到该点哪儿', () => {
+    const rows = buildAmsgDiagnosticRows({
+      probe: { reachable: true, report: withDelivery({ probed: false, reason: 'failed' }) },
+      localPushSubscribed: true,
+    });
+    expect(rowOf(rows, 'pushDevice').level).toBe('warn');
+    expect(rowOf(rows, 'pushDevice').detail).toContain('重置订阅');
+  });
+
+  it('云端压根没登记收件设备时不提投递——该修的是上一层', () => {
+    const rows = buildAmsgDiagnosticRows({
+      probe: {
+        reachable: true,
+        report: healthyReport({
+          storage: {
+            ...healthyReport().storage,
+            pushSubscriptionRegistered: false,
+            pushDelivery: goneAt('2026-08-10T05:06:00.000Z'),
+          },
+        }),
+      },
+      localPushSubscribed: true,
+    });
+    const device = rowOf(rows, 'pushDevice');
+    expect(device.level).toBe('bad');
+    expect(device.detail).toContain('开启通知与推送');
+    expect(device.detail).not.toContain('410');
+  });
+
   it('定时任务停摆时说出积压条数和该去哪儿看日志', () => {
     const rows = buildAmsgDiagnosticRows({
       probe: {
@@ -432,3 +646,4 @@ describe('resolveInstantChatBlocker — 即时对话卡在哪一道', () => {
     expect(Object.keys(INSTANT_CHAT_BLOCKER_HINTS)).toHaveLength(codes.length);
   });
 });
+

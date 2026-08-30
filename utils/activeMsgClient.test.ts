@@ -40,8 +40,8 @@ vi.mock('./keepAlive', () => ({
 
 import {
   ActiveMsgClient, buildFirePack, clearNamespaceValuesOrThrow, compareRemotePushSubscription,
-  describeInstantChatFailure, dropStaleSubscription, putClientStateOrThrow, readAmsgFailKind,
-  toRemoteAvatarUrl,
+  describeInstantChatFailure, dropStaleSubscription, maybeGzipRequestBody, putClientStateOrThrow,
+  readAmsgFailKind, toRemoteAvatarUrl,
 } from './activeMsgClient';
 import {
   AMSG_FIRE_PACK_KEY,
@@ -58,6 +58,9 @@ import { KeepAlive } from './keepAlive';
 const TEST_USER_ID = '3f2b1c8a-9d4e-4a1b-8c2d-000000000001';
 
 // cancelTask 要走 ensureWorkerReady（读 IndexedDB 里的 worker 地址），测里给一份固定配置。
+/** 用例想往全局配置里多塞几个字段时改它（比如「上次已经探到 true」）。用完记得清。 */
+const { storeConfigExtra } = vi.hoisted(() => ({ storeConfigExtra: { value: {} as Record<string, unknown> } }));
+
 vi.mock('./activeMsgStore', () => ({
   ActiveMsgStore: {
     ensureUserId: async () => TEST_USER_ID,
@@ -65,6 +68,7 @@ vi.mock('./activeMsgStore', () => ({
       userId: TEST_USER_ID,
       workerUrl: 'https://amsg.example.workers.dev',
       serverToken: '',
+      ...storeConfigExtra.value,
     }),
     // connect() 成功那条路会落盘 initializedAt，走失败分支的用例碰不到它。
     saveGlobalConfig: vi.fn().mockResolvedValue(undefined),
@@ -386,6 +390,64 @@ describe('即时对话能力探测（instantTick）', () => {
     configCheck({ instantChat: true, instantTick: true });
     await ActiveMsgClient.probeInstantChatSupport();
     expect(ActiveMsgStore.saveGlobalConfig).toHaveBeenCalledWith({ instantChatSupported: true });
+  });
+
+  // ★ 核心回归守卫：「探不到」≠「探到了、答案是不行」。
+  //
+  // 这两种从前混用同一个 false，于是一次网络抖动（切代理节点、CF 边缘抖一下、D1 冷启动
+  // 慢）就足以把 instantChatSupported 写死成 false。那份存量是粘的，用户不碰巧打开设置页
+  // 就一直卡在本地生成——线上真实故障就是这么来的：Worker 那头全绿（instantTick:true、
+  // 库也齐），用户却连着几小时每一轮都在本地直连生成，而他的本地直连根本不通，只看得到
+  // 一条读不懂的网络报错，开关还写着「已开启」。
+  describe('探不到的时候一个字都不许写进存量', () => {
+    afterEach(() => { storeConfigExtra.value = {}; });
+
+    /** 上次已经探到「跑得动」，这次没问到答案 → 存量必须原样保留。 */
+    const expectKeepsPreviousTrue = async () => {
+      const { ActiveMsgStore } = await import('./activeMsgStore');
+      (ActiveMsgStore.saveGlobalConfig as any).mockClear();
+      const result = await ActiveMsgClient.probeInstantChatSupportDetailed();
+      expect(result.outcome).toBe('unknown');
+      expect(result.supported).toBe(true);
+      expect(ActiveMsgStore.saveGlobalConfig).not.toHaveBeenCalled();
+    };
+
+    it('网络异常（fetch 直接抛）→ 保留上次探到的 true', async () => {
+      storeConfigExtra.value = { instantChatSupported: true };
+      vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('Load failed'); }));
+      await expectKeepsPreviousTrue();
+    });
+
+    it('401 → 说明共享密钥没填对，跟 Worker 跑不跑得动没关系', async () => {
+      storeConfigExtra.value = { instantChatSupported: true };
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        status: 401,
+        text: async () => JSON.stringify({ success: false, error: { code: 'INVALID_CLIENT_TOKEN' } }),
+        headers: new Headers({ 'content-type': 'application/json' }),
+      })));
+      await expectKeepsPreviousTrue();
+    });
+
+    it('5xx / 中间设备塞回来的网关页 → 说明线路有问题，同样不是答案', async () => {
+      storeConfigExtra.value = { instantChatSupported: true };
+      vi.stubGlobal('fetch', vi.fn(async () => ({
+        status: 503,
+        text: async () => '<html>502 Bad Gateway</html>',
+        headers: new Headers({ 'content-type': 'text/html' }),
+      })));
+      await expectKeepsPreviousTrue();
+    });
+
+    // 别矫枉过正：真的问到「跑不动」时该写还得写，否则这道门就形同虚设。
+    it('200 但没有 instantTick → 这是明确答案，照写 false', async () => {
+      storeConfigExtra.value = { instantChatSupported: true };
+      const { ActiveMsgStore } = await import('./activeMsgStore');
+      (ActiveMsgStore.saveGlobalConfig as any).mockClear();
+      configCheck({ instantChat: true });
+      const result = await ActiveMsgClient.probeInstantChatSupportDetailed();
+      expect(result.outcome).toBe('unsupported');
+      expect(ActiveMsgStore.saveGlobalConfig).toHaveBeenCalledWith({ instantChatSupported: false });
+    });
   });
 });
 
@@ -1783,5 +1845,65 @@ describe('describeInstantChatFailure — 后端那句真话要露出来', () => 
   it('有专属指引的错误码不受影响（401 仍然只说该去核对共享密钥）', () => {
     expect(describeInstantChatFailure(401, internalError('D1_ERROR: whatever')))
       .toBe('即时对话没发出去：共享密钥和 Worker 上的对不上，去「主动消息 2.0」设置里核对一下。');
+  });
+});
+
+// 大 body 走 gzip 上行（省掉密文那层 base64 的膨胀，约 25%）。这几条钉的是
+// 「压缩绝不能变成发不出去的理由」：这条路上唯一该有的结局是「压了」或「原样发」，
+// 任何一种失败都必须落回明文，而不是把整轮聊天卡在发送键上。
+describe('请求体 gzip 上行', () => {
+  const bigJson = () => JSON.stringify({ v: 'ぷ'.repeat(20_000) });
+
+  it('超阈值 → 压，且真能解回原文', async () => {
+    const original = bigJson();
+    const { body, gzipped } = await maybeGzipRequestBody(original);
+    expect(gzipped).toBe(true);
+    expect(body).toBeInstanceOf(ArrayBuffer);
+    const restored = await new Response(
+      new Response(body as ArrayBuffer).body!.pipeThrough(new DecompressionStream('gzip')),
+    ).text();
+    expect(restored).toBe(original);
+  });
+
+  it('小 body 原样发：压缩省下的字节还不够抵一次 CompressionStream 的开销', async () => {
+    const small = JSON.stringify({ hello: 'world' });
+    expect(await maybeGzipRequestBody(small)).toEqual({ body: small, gzipped: false });
+  });
+
+  // 按字符数粗筛会把「1 万个汉字」（3 万字节）判成小 body。真正的字节数只有
+  // TextEncoder 算得准，粗筛之后必须再量一次。
+  it('阈值按 UTF-8 字节算，不按字符数', async () => {
+    // 6000 个汉字 = 6000 字符（不到 16384）但 18000 字节（超了）。
+    const cjk = '字'.repeat(6000);
+    expect((await maybeGzipRequestBody(JSON.stringify({ cjk }))).gzipped).toBe(true);
+  });
+
+  it('运行时没有 CompressionStream（老 Safari）→ 退回明文，不抛', async () => {
+    const original = bigJson();
+    const saved = globalThis.CompressionStream;
+    // @ts-expect-error 故意抹掉，模拟老 Safari
+    delete globalThis.CompressionStream;
+    try {
+      expect(await maybeGzipRequestBody(original)).toEqual({ body: original, gzipped: false });
+    } finally {
+      globalThis.CompressionStream = saved;
+    }
+  });
+
+  it('压缩本身抛错 → 退回明文，不连累这一轮发送', async () => {
+    const original = bigJson();
+    const saved = globalThis.CompressionStream;
+    // @ts-expect-error 换成一个必炸的替身
+    globalThis.CompressionStream = function Broken() { throw new Error('boom'); };
+    try {
+      expect(await maybeGzipRequestBody(original)).toEqual({ body: original, gzipped: false });
+    } finally {
+      globalThis.CompressionStream = saved;
+    }
+  });
+
+  it('非字符串 body（FormData / null）原样穿过去', async () => {
+    expect(await maybeGzipRequestBody(null)).toEqual({ body: null, gzipped: false });
+    expect(await maybeGzipRequestBody(undefined)).toEqual({ body: undefined, gzipped: false });
   });
 });

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { assetMirrors, assetUrl, assetPathFromUrl, mirrorsForUrl } from './assetUrl';
+import { assetMirrors, assetUrl, assetPathFromUrl, mirrorsForUrl, audioMirrors } from './assetUrl';
 
 describe('assetMirrors', () => {
     it('主源是 jsDelivr，末位兜底是 raw.githubusercontent', () => {
@@ -55,5 +55,20 @@ describe('mirrorsForUrl', () => {
     it('认不出的 url 原样单条返回（不误伤第三方图床）', () => {
         const u = 'https://sharkpan.xyz/f/BZ3VSa/head.png';
         expect(mirrorsForUrl(u)).toEqual([u]);
+    });
+});
+
+describe('audioMirrors', () => {
+    it('prioritizes the byte-range capable GitHub Raw source for repository audio', () => {
+        const mirrors = audioMirrors('bgm/qixi/02/02_0_旧钟房间.mp3');
+        expect(mirrors[0]).toBe(
+            'https://raw.githubusercontent.com/qegj567-cloud/SullyOS-assets/main/bgm/qixi/02/02_0_旧钟房间.mp3',
+        );
+        expect(new Set(mirrors).size).toBe(mirrors.length);
+    });
+
+    it('keeps an unrelated third-party audio URL untouched', () => {
+        const url = 'https://example.com/music.mp3';
+        expect(audioMirrors(url)).toEqual([url]);
     });
 });

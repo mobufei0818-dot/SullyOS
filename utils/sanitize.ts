@@ -477,8 +477,8 @@ interface ProtectedAtomSegment {
  *  1.5. Phase 1.5 — 用 amsg-instant 标准保护分段器识别客户端要二次消费的"原子语义块",
  *                   防止 chunkText 按 \n 把它们切碎: [html]...[/html] / <翻译>...</翻译> /
  *                   <语音>...</语音>. 保护块两侧按旧逻辑补 \n, 让 chunkText 必把它独立成 chunk.
- *  2. Phase 2   — chunkText: 按 `\n` 切 + 按 CJK 字符之间的空格切, 跟客户端
- *                  `chatParser.chunkText` 字节对齐 (LLM 在 prompt 引导下用换行断句).
+ *  2. Phase 2   — chunkText: 只按显式换行切, 跟客户端 `chatParser.chunkText`
+ *                  字节对齐 (普通空格属于正文, 不能把中日混排的一句话拦腰拆开).
  *  3. Phase 3   — 还原占位符 (独占 chunk → 直接成单 segment; 同行 inline → 替换回原文 +
  *                  banner 兜底). 每个文字 chunk 内拆 SEND_EMOJI 独立成段, 文字段跑
  *                  banner-only 替换 (markdown link / [html] / markdown header/bold/backtick /
@@ -637,35 +637,13 @@ function sanitizeTextForBanner(text: string): string {
 
 /**
  * `chatParser.chunkText` 的无依赖版本. 行为字节对齐:
- *  1. 按换行符切 (\n / \r\n / \r /   /  )
- *  2. 每个 chunk 再按 CJK 字符之间的空格切 (中文里本不该有空格 = LLM 想断行)
- *  3. trim + filter empty
+ *  1. 只按显式换行符切 (\n / \r\n / \r /   /  )
+ *  2. trim + filter empty；行内普通空格原样保留
  */
 function chunkText(text: string): string[] {
-  const CJK = '\\u4e00-\\u9fff\\u3400-\\u4dbf\\u3000-\\u303f\\uff00-\\uffef\\u2000-\\u206f\\u2e80-\\u2eff\\u3001-\\u3003\\u2018-\\u201f\\u300a-\\u300f\\uff01-\\uff0f\\uff1a-\\uff20';
-  // No lookbehind (?<=): iOS Safari <16.4 JSC doesn't support it; old devices throw
-  // "invalid group specifier name" at new RegExp. Capture the left CJK char + zero-width
-  // lookahead on the right, restore via $1. Byte-equivalent (see utils/lookbehindFree.test.ts).
-  const cjkSplitRe = new RegExp(`([${CJK}])\\s+(?=[${CJK}])`, 'g');
-  const SPLIT = String.fromCharCode(1);  // CJK split marker (distinct slot from SPACE_SENTINEL below)
-
-  const lineChunks = text.split(/(?:\r\n|\r|\n|\u2028|\u2029)+/)
+  return text.split(/(?:\r\n|\r|\n|\u2028|\u2029)+/)
     .map((c) => c.trim())
     .filter((c) => c.length > 0);
-
-  // 括号内的空格要保护: 否则裸括号表情包 / 标签 (如 "[你 交给我吧]" 或 "[[SEND_EMOJI: a b]]")
-  // 会被 CJK-空格断行规则劈成 "[你" + "交给我吧]" 掉格式. 先把 [...] / [[...]] 内空格换成
-  // 占位符, split 后再换回. 跟 chatParser.chunkText 同一份逻辑, 保持字节对齐.
-  const SPACE_SENTINEL = String.fromCharCode(0);
-  const out: string[] = [];
-  for (const chunk of lineChunks) {
-    const guarded = chunk.replace(/\[{1,2}[^\[\]]*\]{1,2}/g, (m) => m.replace(/\s/g, SPACE_SENTINEL));
-    const sub = guarded.replace(cjkSplitRe, `$1${SPLIT}`).split(SPLIT)
-      .map((c) => c.split(SPACE_SENTINEL).join(' ').trim())
-      .filter((c) => c.length > 0);
-    out.push(...sub);
-  }
-  return out;
 }
 
 /**

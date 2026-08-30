@@ -12,7 +12,9 @@ import { deleteGroupMemoriesByGroupId } from '../utils/memoryPalace/groupPipelin
 import { processImage } from '../utils/file';
 import { stickerNameFromUrl } from '../utils/messageFormat';
 import { PRESET_THEMES } from '../components/chat/ChatConstants';
-import { resolveChatTheme } from '../utils/groupChat/theme';
+import { resolveChatTheme, scopeBubbleThemeCss } from '../utils/groupChat/theme';
+import { resolveBubbleCornerRadii, shouldHideBubbleTail } from '../utils/bubbleAppearance';
+import { buildChatFineTuneCss } from '../utils/chatFineTuneCss';
 import { parseDirectorActions, stripSkipMarker, parseGroupTopicBox } from '../utils/groupChat/parse';
 import { GroupPacketMeta, PacketReceiptMeta, ClaimResult, claimPacket, effectivePacketStatus, makePacketMeta } from '../utils/groupChat/redpacket';
 import { messageLogText } from '../utils/groupChat/format';
@@ -28,6 +30,9 @@ import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } fr
 import { UsersThree, Money, GearSix, Image as ImageIcon, ArrowsClockwise, PaintBrush, BellSimpleRinging, Code, Question } from '@phosphor-icons/react';
 import ChatHeaderShell from '../components/chat/ChatHeaderShell';
 import ChatInputArea from '../components/chat/ChatInputArea';
+import TokenImg from '../components/os/TokenImg';
+import { useBlobRefUrl, isBlobRef, getBlobForRef, migrateDataUrlToRef } from '../utils/blobRef';
+import { buildReplySnapshotContent } from '../utils/applyAssistantPostProcessing';
 import ChromeCssEditor from '../components/chat/ChromeCssEditor';
 import WhiteboxSoundEditor from '../components/chat/WhiteboxSoundEditor';
 import HtmlCard from '../components/chat/HtmlCard';
@@ -122,7 +127,16 @@ const GroupMessageItem = React.memo(({
     onReply,
     nameOf,
     onPacketClick,
-    styleConfig
+    styleConfig,
+    themeScopeClass,
+    isFirstInGroup,
+    isLastInGroup,
+    avatarShape = 'circle',
+    avatarSize = 'medium',
+    avatarMode = 'grouped',
+    bubbleVariant = 'modern',
+    messageSpacing = 'default',
+    showTimestamp = 'always',
 }: {
     msg: Message,
     isUser: boolean,
@@ -137,10 +151,53 @@ const GroupMessageItem = React.memo(({
     nameOf: (id: string) => string,
     onPacketClick: (msg: Message) => void,
     /** 气泡样式（用户=群设置选的主题 user 侧；成员=统一或各自私聊主题 ai 侧）。引用需稳定（memo） */
-    styleConfig: BubbleStyle
+    styleConfig: BubbleStyle,
+    /** 将当前成员的气泡工坊 CSS 限定在自己的消息上，防止群成员主题互串。 */
+    themeScopeClass: string,
+    isFirstInGroup: boolean,
+    isLastInGroup: boolean,
+    avatarShape?: 'circle' | 'rounded' | 'square',
+    avatarSize?: 'small' | 'medium' | 'large',
+    avatarMode?: 'grouped' | 'every_message',
+    bubbleVariant?: 'modern' | 'flat' | 'outline' | 'shadow' | 'wechat' | 'ios',
+    messageSpacing?: 'compact' | 'default' | 'spacious',
+    showTimestamp?: 'always' | 'hover' | 'never',
 }) => {
     const avatar = isUser ? userAvatar : char?.avatar;
     const name = isUser ? '我' : char?.name || '未知成员';
+
+    const spacingClass = messageSpacing === 'compact'
+        ? (isLastInGroup ? 'mb-3' : 'mb-0.5')
+        : messageSpacing === 'spacious'
+            ? (isLastInGroup ? 'mb-8' : 'mb-2.5')
+            : (isLastInGroup ? 'mb-6' : 'mb-1.5');
+    const avatarSizeClass = avatarSize === 'small' ? 'w-7 h-7' : avatarSize === 'large' ? 'w-12 h-12' : 'w-9 h-9';
+    const avatarSizePx = avatarSize === 'small' ? 28 : avatarSize === 'large' ? 48 : 36;
+    const avatarRadiusClass = avatarShape === 'square' ? 'rounded-sm' : avatarShape === 'rounded' ? 'rounded-xl' : 'rounded-full';
+    const shouldShowAvatar = avatarMode === 'every_message' || isLastInGroup;
+    const cornerRadii = resolveBubbleCornerRadii(styleConfig);
+    const hideBubbleTail = shouldHideBubbleTail(styleConfig.tailMode, isLastInGroup);
+    const bubbleGroupClasses = [
+        isFirstInGroup ? 'sully-bubble-group-first' : '',
+        isLastInGroup ? 'sully-bubble-group-last' : '',
+        hideBubbleTail ? 'sully-bubble-tail-hidden' : 'sully-bubble-tail-visible',
+    ].filter(Boolean).join(' ');
+    const bubbleStyle: React.CSSProperties = {
+        backgroundColor: bubbleVariant === 'outline' ? 'transparent' : styleConfig.backgroundColor,
+        opacity: styleConfig.opacity ?? 1,
+        borderTopLeftRadius: cornerRadii.topLeft,
+        borderTopRightRadius: cornerRadii.topRight,
+        borderBottomRightRadius: cornerRadii.bottomRight,
+        borderBottomLeftRadius: cornerRadii.bottomLeft,
+        ...(bubbleVariant === 'outline' ? { border: `2px solid ${styleConfig.backgroundColor}`, boxShadow: 'none' } : {}),
+        ...(bubbleVariant === 'shadow' ? { boxShadow: '0 4px 12px rgba(0,0,0,0.12)' } : {}),
+        ...(bubbleVariant === 'flat' ? { boxShadow: 'none' } : {}),
+        ...(bubbleVariant === 'wechat' ? { boxShadow: 'none', border: '1px solid rgba(15,23,42,0.05)' } : {}),
+        ...(bubbleVariant === 'ios' ? { boxShadow: '0 10px 24px rgba(148,163,184,0.16)', border: '1px solid rgba(255,255,255,0.75)', backdropFilter: 'blur(12px)' } : {}),
+    };
+    // 气泡底纹画在 CSS background-image 上，拿不到 <img> 那层的自动解析，只能在顶层
+    // 无条件解析一次（hook 不能进条件分支）。挂件/头像挂件走 TokenImg，各自组件内解析。
+    const bubbleBgUrl = useBlobRefUrl(styleConfig.backgroundImage);
 
     // pointer-event 手势（对齐私聊 MessageItem 的方案）：600ms 长按 → 操作菜单；
     // 触屏左滑 ≤-52px → 引用回复（带位移动画）；鼠标右键 → 操作菜单
@@ -154,7 +211,7 @@ const GroupMessageItem = React.memo(({
     const [isReplyGestureActive, setIsReplyGestureActive] = useState(false);
 
     // Time formatting
-    const timeStr = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const timeStr = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 
     const clearLongPressTimer = () => {
         if (!longPressTimer.current) return;
@@ -243,6 +300,36 @@ const GroupMessageItem = React.memo(({
         }
     };
 
+    const renderAvatar = (forceVisible = false) => (
+        <div className={`relative ${avatarSizeClass} z-0 sully-chat-message-avatar`}>
+            {(forceVisible || shouldShowAvatar) && (
+                <>
+                    <TokenImg
+                        value={avatar}
+                        className={`sully-chat-message-avatar-img w-full h-full ${avatarRadiusClass} object-cover shadow-sm ring-1 ring-black/5 relative z-0`}
+                        alt="avatar"
+                        loading="lazy"
+                        decoding="async"
+                    />
+                    {styleConfig.avatarDecoration && (
+                        <TokenImg
+                            value={styleConfig.avatarDecoration}
+                            className="absolute pointer-events-none z-10 max-w-none"
+                            style={{
+                                left: `${styleConfig.avatarDecorationX ?? 50}%`,
+                                top: `${styleConfig.avatarDecorationY ?? 50}%`,
+                                width: `${avatarSizePx * (styleConfig.avatarDecorationScale ?? 1)}px`,
+                                height: 'auto',
+                                transform: `translate(-50%, -50%) rotate(${styleConfig.avatarDecorationRotate ?? 0}deg)`,
+                            }}
+                            alt=""
+                        />
+                    )}
+                </>
+            )}
+        </div>
+    );
+
     // Special Content Renderers
     const renderContent = () => {
         switch (msg.type) {
@@ -252,12 +339,12 @@ const GroupMessageItem = React.memo(({
                         if (selectionMode) handleClick(e);
                         else onImageClick(msg.content);
                     }}>
-                        <img src={msg.content} className="max-w-[200px] max-h-[200px] rounded-xl shadow-sm border border-black/5" loading="lazy" />
+                        <TokenImg value={msg.content} className="max-w-[200px] max-h-[200px] rounded-xl shadow-sm border border-black/5" loading="lazy" />
                     </div>
                 );
             case 'emoji':
                 // 尺寸跟随外观 → 表情包大小（--sully-emoji-size 三挡，默认 96px = 原 w-24）
-                return <img src={msg.content} className="sully-emoji-msg max-w-[var(--sully-emoji-size,96px)] max-h-[var(--sully-emoji-size,96px)] object-contain drop-shadow-sm hover:scale-110 transition-transform" />;
+                return <TokenImg value={msg.content} className="sully-emoji-msg max-w-[var(--sully-emoji-size,96px)] max-h-[var(--sully-emoji-size,96px)] object-contain drop-shadow-sm hover:scale-110 transition-transform" />;
             case 'transfer':
                 return (
                     <div onClick={(e) => { if (selectionMode) handleClick(e); }}>
@@ -276,30 +363,42 @@ const GroupMessageItem = React.memo(({
                 return <HtmlCard html={html} />;
             }
             default:
-                // 核心样式字段对齐私聊 MessageItem 的应用方式（decoration/voiceBar 群聊不做）
                 return (
                     <div
-                        className={`px-3.5 py-2 text-[15px] leading-relaxed shadow-sm whitespace-pre-wrap break-all relative overflow-hidden ${isUser ? '' : 'border border-black/5'}`}
-                        style={{
-                            color: styleConfig.textColor,
-                            backgroundColor: styleConfig.backgroundColor,
-                            opacity: styleConfig.opacity ?? 1,
-                            borderRadius: styleConfig.borderRadius ?? 18,
-                            ...(isUser ? { borderTopRightRadius: 4 } : { borderTopLeftRadius: 4 }),
-                        }}
+                        className={`relative px-5 py-3 text-[15px] leading-relaxed whitespace-pre-wrap break-all overflow-visible active:scale-[0.98] transition-transform ${bubbleVariant === 'flat' || bubbleVariant === 'outline' || bubbleVariant === 'wechat' ? '' : 'shadow-sm'} ${bubbleVariant === 'outline' ? '' : 'border border-black/5'} ${isUser ? 'sully-bubble-user' : 'sully-bubble-ai'} ${bubbleGroupClasses}`}
+                        style={bubbleStyle}
                     >
-                        {styleConfig.backgroundImage && (
+                        {bubbleBgUrl && (
                             <div
-                                className="absolute inset-0 pointer-events-none"
+                                className="absolute inset-0 bg-cover bg-center pointer-events-none z-0"
                                 style={{
-                                    backgroundImage: `url(${styleConfig.backgroundImage})`,
-                                    backgroundSize: 'cover',
-                                    backgroundPosition: 'center',
+                                    backgroundImage: `url(${bubbleBgUrl})`,
                                     opacity: styleConfig.backgroundImageOpacity ?? 0.5,
+                                    borderRadius: 'inherit',
                                 }}
                             />
                         )}
-                        <span className="relative z-10">{msg.content}</span>
+                        {styleConfig.decoration && (
+                            <TokenImg
+                                value={styleConfig.decoration}
+                                className="absolute z-10 w-8 h-8 object-contain drop-shadow-sm pointer-events-none"
+                                style={{
+                                    left: `${styleConfig.decorationX ?? (isUser ? 90 : 10)}%`,
+                                    top: `${styleConfig.decorationY ?? -10}%`,
+                                    transform: `translate(-50%, -50%) scale(${styleConfig.decorationScale ?? 1}) rotate(${styleConfig.decorationRotate ?? 0}deg)`,
+                                }}
+                                alt=""
+                            />
+                        )}
+                        {msg.replyTo && (
+                            <div className="relative z-10 mb-1 text-[10px] bg-black/5 p-1.5 rounded-md border-l-2 border-current opacity-60 flex flex-col gap-0.5 max-w-full overflow-hidden">
+                                <span className="font-bold opacity-90 truncate">{msg.replyTo.name}</span>
+                                {/* 历史快照里可能原样存着令牌 / data: / 图床 URL，直接截 10 个字
+                                    就成了气泡里一串 `blobref:b_`；交给写入端同一个快照函数换占位符 */}
+                                <span className="truncate italic">"{buildReplySnapshotContent({ content: msg.replyTo.content })}"</span>
+                            </div>
+                        )}
+                        <div className="relative z-10 select-text" style={{ color: styleConfig.textColor }}>{msg.content}</div>
                     </div>
                 );
         }
@@ -307,58 +406,71 @@ const GroupMessageItem = React.memo(({
 
     return (
         <div
-            className={`flex gap-3 mb-4 w-full relative ${isUser ? 'justify-end' : 'justify-start'} ${selectionMode ? 'pl-8' : ''}`}
-            style={{
-                transform: `translateX(${replyOffset}px)`,
-                transition: isReplyGestureActive ? 'none' : 'transform 0.2s ease-out',
-                touchAction: 'pan-y',
-            }}
-            onPointerDown={handlePointerDown}
-            onPointerMove={handlePointerMove}
-            onPointerUp={handlePointerEnd}
-            onPointerCancel={handlePointerCancel}
-            onContextMenu={(e) => {
-                e.preventDefault();
-                if (selectionMode || replyGestureActiveRef.current) return;
-                clearLongPressTimer();
-                activePointerId.current = null;
-                activePointerType.current = '';
-                resetReplyGesture();
-                onLongPress(msg.id);
-            }}
-            onDragStart={(e) => e.preventDefault()}
-            onClick={handleClick}
+            className={`${themeScopeClass} sully-chat-message ${isUser ? 'sully-chat-message-user justify-end' : 'sully-chat-message-ai justify-start'} ${isFirstInGroup ? 'sully-chat-message-group-first' : ''} ${isLastInGroup ? 'sully-chat-message-group-last' : ''} flex items-end ${spacingClass} px-3 w-full group relative transition-[padding] duration-300 ${selectionMode ? 'pl-12' : ''}`}
+            style={{ '--sully-chat-message-avatar-size': `${avatarSizePx}px` } as React.CSSProperties}
         >
             {selectionMode && (
-                <div className="absolute left-0 top-1/2 -translate-y-1/2 cursor-pointer z-10">
+                <div className="absolute left-3 top-1/2 -translate-y-1/2 cursor-pointer z-20" onClick={handleClick}>
                     <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-colors ${isSelected ? 'bg-violet-500 border-violet-500' : 'border-slate-300 bg-white'}`}>
                         {isSelected && <svg className="w-3 h-3 text-white" fill="none" viewBox="0 0 24 24" strokeWidth={3} stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" /></svg>}
                     </div>
                 </div>
             )}
 
-            {!isUser && (
-                <div className="flex flex-col items-center gap-1 shrink-0">
-                    <img src={avatar} className="w-9 h-9 rounded-full object-cover shadow-sm border border-white" loading="lazy" />
+            {isFirstInGroup && (
+                <div className={`sully-chat-turn-avatar-slot hidden absolute top-0 z-0 ${isUser ? 'right-3' : (selectionMode ? 'left-14' : 'left-3')}`}>
+                    {renderAvatar(true)}
                 </div>
             )}
-            
-            <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'} max-w-[80%] ${selectionMode ? 'pointer-events-none' : ''}`}>
-                {!isUser && <span className="text-[10px] text-slate-400 ml-1 mb-1">{name}</span>}
-                {/* 引用条（对齐私聊 MessageItem 的极简样式） */}
-                {msg.replyTo && (
-                    <div className="mb-1 text-[10px] bg-black/5 p-1.5 rounded-md border-l-2 border-slate-300 text-slate-500 flex flex-col gap-0.5 max-w-full overflow-hidden">
-                        <span className="font-bold truncate">{msg.replyTo.name}</span>
-                        <span className="truncate italic">"{msg.replyTo.content.length > 10 ? msg.replyTo.content.slice(0, 10) + '...' : msg.replyTo.content}"</span>
+
+            {!isUser && (
+                <div className={`sully-chat-message-avatar-slot absolute bottom-0 z-0 ${selectionMode ? 'left-14' : 'left-3'} transition-[left] duration-300`}>
+                    {renderAvatar()}
+                </div>
+            )}
+
+            <div className={`sully-chat-message-content relative min-w-0 max-w-[72%] ${isUser ? 'mr-12' : 'ml-12'}`}>
+                <div
+                    className={`relative flex flex-col ${isUser ? 'items-end' : 'items-start'} min-w-0 ${selectionMode ? 'pointer-events-none' : ''}`}
+                    style={{
+                        transform: `translateX(${replyOffset}px)`,
+                        transition: isReplyGestureActive ? 'none' : 'transform 220ms cubic-bezier(0.22, 1, 0.36, 1)',
+                        touchAction: 'pan-y',
+                        userSelect: 'none',
+                        WebkitUserSelect: 'none',
+                        WebkitTouchCallout: 'none',
+                    } as React.CSSProperties}
+                    onPointerDown={handlePointerDown}
+                    onPointerMove={handlePointerMove}
+                    onPointerUp={handlePointerEnd}
+                    onPointerCancel={handlePointerCancel}
+                    onContextMenu={(e) => {
+                        e.preventDefault();
+                        if (selectionMode || replyGestureActiveRef.current) return;
+                        clearLongPressTimer();
+                        activePointerId.current = null;
+                        activePointerType.current = '';
+                        resetReplyGesture();
+                        onLongPress(msg.id);
+                    }}
+                    onDragStart={(e) => e.preventDefault()}
+                    onClick={handleClick}
+                >
+                    {!isUser && isFirstInGroup && (
+                        <span className="sully-chat-message-sender text-[10px] text-slate-400 ml-1 mb-1">{name}</span>
+                    )}
+                    <div className={selectionMode ? 'pointer-events-none' : ''}>
+                        {renderContent()}
                     </div>
-                )}
-                {renderContent()}
-                <span className="text-[9px] text-slate-300 mt-1 px-1">{timeStr}</span>
+                    {isLastInGroup && showTimestamp !== 'never' && (
+                        <span className={`absolute top-full ${isUser ? 'right-0' : 'left-0'} mt-0.5 px-1 text-[9px] text-slate-400/80 font-medium whitespace-nowrap pointer-events-none ${showTimestamp === 'hover' ? 'opacity-0 group-hover:opacity-100 transition-opacity' : ''}`}>{timeStr}</span>
+                    )}
+                </div>
             </div>
 
             {isUser && (
-                <div className="flex flex-col items-center gap-1 shrink-0">
-                    <img src={avatar} className="w-9 h-9 rounded-full object-cover shadow-sm border border-white" loading="lazy" />
+                <div className="sully-chat-message-avatar-slot absolute right-3 bottom-0 z-0">
+                    {renderAvatar()}
                 </div>
             )}
         </div>
@@ -702,10 +814,12 @@ const GroupChat: React.FC = () => {
         if (!file || !activeGroup) return;
         try {
             const base64 = await processImage(file);
+            // 群头像存令牌，二进制单独躺在 blob_assets 里；转不动时原样还回 data URL，图不会丢
+            const avatar = await migrateDataUrlToRef(base64);
             // 走 context 的 updateGroup：同步内存 groups + DB，
             // 否则只改了本地 activeGroup，退出回列表/再次进群会读回旧头像（恢复默认）
-            await updateGroup(activeGroup.id, { avatar: base64 });
-            setActiveGroup({ ...activeGroup, avatar: base64 });
+            await updateGroup(activeGroup.id, { avatar });
+            setActiveGroup({ ...activeGroup, avatar });
             addToast('群头像已修改', 'success');
         } catch (err: any) {
             addToast('图片处理失败', 'error');
@@ -793,11 +907,12 @@ const GroupChat: React.FC = () => {
             metadata
         };
 
-        // 引用回复：落快照（对齐私聊 Chat.tsx 的做法），发完清空
+        // 引用回复：落快照（对齐私聊 Chat.tsx 的做法），发完清空。
+        // 图片 / 表情走占位符，不把 blobref 令牌原样存进快照。
         if (replyTarget) {
             newMessage.replyTo = {
                 id: replyTarget.id,
-                content: replyTarget.content,
+                content: buildReplySnapshotContent(replyTarget),
                 name: replyTarget.role === 'user'
                     ? '我'
                     : (characters.find(c => c.id === replyTarget.charId)?.name || '成员'),
@@ -821,7 +936,9 @@ const GroupChat: React.FC = () => {
     const handleImageFile = async (file: File) => {
         try {
             const base64 = await processImage(file, { maxWidth: 600, quality: 0.7, forceJpeg: true });
-            handleSendMessage(base64, 'image');
+            // 群聊图消息存令牌，二进制单独躺在 blob_assets 里（省掉 base64 那 ~33% 的膨胀）。
+            // 同一张图之前存过就复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
+            handleSendMessage(await migrateDataUrlToRef(base64), 'image');
         } catch (err) {
             addToast('图片发送失败', 'error');
         }
@@ -866,7 +983,17 @@ const GroupChat: React.FC = () => {
         setModalType('packet-detail');
     }, []);
 
-    const handleGroupImageClick = useCallback((url: string) => window.open(url, '_blank'), []);
+    // 点图看大图：新标签页只认得真正的 URL，blobref 令牌得先换成 objectURL 再开
+    // （data: 顶层导航被浏览器挡，只能走 objectURL）。开完不立刻回收——新标签页还在
+    // 用它加载；留一分钟再 revoke，图早读完了，也不至于把整张图一直挂在内存里。
+    const handleGroupImageClick = useCallback(async (url: string) => {
+        if (!isBlobRef(url)) { window.open(url, '_blank'); return; }
+        const blob = await getBlobForRef(url);
+        if (!blob) { addToast('图片数据已丢失', 'error'); return; }
+        const objectUrl = URL.createObjectURL(blob);
+        window.open(objectUrl, '_blank');
+        setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    }, [addToast]);
     const handleGroupReply = useCallback((target: Message) => { setReplyTarget(target); trackEvent('引用回复一条群消息'); }, []);
 
     // 用户抢/收/退：updater 内重跑状态机（以库内最新 claims 判重，防与 AI 派发并发双写）
@@ -914,23 +1041,43 @@ const GroupChat: React.FC = () => {
     };
 
     // --- Logic: 气泡体系 ---
-    // useMemo 保证引用稳定：GroupMessageItem 是 React.memo，styleConfig 每帧换新对象会导致整列表重渲
-    const userBubble = useMemo<BubbleStyle>(() => (
+    // 保留完整 ChatTheme：群聊不再只摘基础色值，气泡工坊 customCss 也一起复用。
+    const userBubbleTheme = useMemo<ChatTheme>(() => (
         activeGroup?.userBubbleThemeId
-            ? resolveChatTheme(activeGroup.userBubbleThemeId, customThemes, PRESET_THEMES).user
-            : PRESET_THEME_GROUP.user
+            ? resolveChatTheme(activeGroup.userBubbleThemeId, customThemes, PRESET_THEMES)
+            : PRESET_THEME_GROUP
     ), [activeGroup?.userBubbleThemeId, customThemes]);
 
-    const memberBubbles = useMemo(() => {
-        const map = new Map<string, BubbleStyle>();
+    const memberBubbleThemes = useMemo(() => {
+        const map = new Map<string, ChatTheme>();
         if (activeGroup?.memberBubbleIndependent) {
             for (const mid of activeGroup.members) {
                 const c = characters.find(ch => ch.id === mid);
-                map.set(mid, resolveChatTheme(c?.bubbleStyle, customThemes, PRESET_THEMES).ai);
+                map.set(mid, resolveChatTheme(c?.bubbleStyle, customThemes, PRESET_THEMES));
             }
         }
         return map;
     }, [activeGroup?.memberBubbleIndependent, activeGroup?.members, characters, customThemes]);
+
+    const memberThemeScopeClasses = useMemo(() => {
+        const map = new Map<string, string>();
+        activeGroup?.members.forEach((mid, index) => map.set(mid, `sully-group-member-theme-${index}`));
+        return map;
+    }, [activeGroup?.members]);
+
+    const groupBubbleCustomCss = useMemo(() => {
+        const chunks: string[] = [];
+        if (userBubbleTheme.customCss) {
+            chunks.push(scopeBubbleThemeCss(userBubbleTheme.customCss, '.sully-group-user-theme'));
+        }
+        memberBubbleThemes.forEach((theme, mid) => {
+            const scopeClass = memberThemeScopeClasses.get(mid);
+            if (theme.customCss && scopeClass) {
+                chunks.push(scopeBubbleThemeCss(theme.customCss, `.${scopeClass}`));
+            }
+        });
+        return chunks.filter(Boolean).join('\n');
+    }, [userBubbleTheme.customCss, memberBubbleThemes, memberThemeScopeClasses]);
 
     // 表情面板按分类过滤（对齐私聊 ChatInputArea 的行为）
     const filteredEmojis = useMemo(() => emojis.filter(e => {
@@ -1025,7 +1172,8 @@ ${sharedScene.text}${activeGroup ? buildGroupTopicContext(activeGroup) : ''}`;
             skipWorldview: sharedScene.worldviewIsShared,
             skipWorldbookIds: sharedScene.sharedWorldbookIds,
             headerOverride: `[Group Member Profile: ${member.name}]`,
-        }, { worldbookMessages: liveGroupMsgs });
+        // conversational：群聊同样是用户正在说话的场合（见 buildTimeAwarenessBlock）
+        }, { worldbookMessages: liveGroupMsgs, conversational: true });
         // Get private gap string
         const privateGapInfo = await getPrivateTimeGap(member.id);
 
@@ -1053,10 +1201,11 @@ ${coreContext}
 - **重要指令**: 如果 [私聊空窗期] 显示 "刚刚" 或 "几小时前"，请【忽略】群聊的时间流逝感知。哪怕群里很久没说话，只要你和用户私底下刚聊过，就【严禁】说 "好久不见" 或表现出疏离感。
 - 你的近期互动时间线（按时间排序；[私聊]=你和用户单独聊的，别人看不见；[群聊]=本群公开记录。仅作为你内心状态的底色，不要变成默认反应模板）：
 ${memberTimeline || '(暂无互动记录)'}
+- **先认清 U**：群聊里的用户，就是你一直在私聊、记忆和印象里认识的同一个人。已经建立的关系、承诺和亲密程度继续成立；公开场合可以换一种表达方式，但不能重置关系或突然把 U 当成普通陌生群友。
 - **关于私聊状态如何影响群聊表现**：
   · 私聊在吵架 → **可能**有点别扭/冷淡/借题发挥，但**强度由你的性格决定**。情绪稳定的人不会因为私下闹矛盾就在群里失态；脾气大的人才会带情绪到群里。绝大多数情况是"心里有点疙瘩"而不是"摆脸色给所有人看"。
-  · 私聊在甜蜜 → **可能**有点想低调、不好意思声张，或者反而想隐隐显摆一下，看你性格。**不必每次都"支支吾吾"**——这是套路化反应，不真实。
-  · 关键原则：你是一个完整的人，不是"私聊状态的应激反应器"。你在群里此刻什么状态，更多取决于你**这个人本身**和**群里此刻在聊什么**，私聊只是底色之一。
+  · 私聊在甜蜜 → **可能**想低调、不好意思声张，或者反而想隐隐显摆一下，看你性格。**不必每次都"支支吾吾"**——这是套路化反应，不真实。
+  · 关键原则：你是一个完整的人，不是"私聊状态的应激反应器"。群里此刻的状态由你本身、群聊话题和既有关系共同决定；私聊不必抢占群聊中心，但它建立的关系底色不会消失。
 <<< 角色档案 END >>>
 `;
     };
@@ -1483,12 +1632,12 @@ ${memberTimeline || '(暂无互动记录)'}
                             {/* Group Avatar Logic */}
                             <div className="w-14 h-14 rounded-2xl bg-slate-100 overflow-hidden border border-slate-200 relative shadow-sm">
                                 {g.avatar ? (
-                                    <img src={g.avatar} className="w-full h-full object-cover" />
+                                    <TokenImg value={g.avatar} className="w-full h-full object-cover" />
                                 ) : (
                                     <div className="grid grid-cols-2 gap-0.5 p-0.5 w-full h-full bg-slate-200">
                                         {g.members.slice(0, 4).map(mid => {
                                             const c = characters.find(char => char.id === mid);
-                                            return <img key={mid} src={c?.avatar} className="w-full h-full object-cover rounded-sm bg-white" />;
+                                            return <TokenImg key={mid} value={c?.avatar} className="w-full h-full object-cover rounded-sm bg-white" />;
                                         })}
                                     </div>
                                 )}
@@ -1521,7 +1670,7 @@ ${memberTimeline || '(暂无互动记录)'}
                             <div className="grid grid-cols-4 gap-2 max-h-48 overflow-y-auto pr-1">
                                 {filterCharactersByGroup(characters, characterGroups, memberGroupId).map(c => (
                                     <div key={c.id} onClick={() => toggleMemberSelection(c.id)} className={`flex flex-col items-center gap-1 p-2 rounded-xl border transition-all cursor-pointer ${selectedMembers.has(c.id) ? 'border-violet-500 bg-violet-50 ring-1 ring-violet-500' : 'border-slate-100 bg-white hover:border-slate-300'}`}>
-                                        <img src={c.avatar} className="w-10 h-10 rounded-full object-cover" />
+                                        <TokenImg value={c.avatar} className="w-10 h-10 rounded-full object-cover" />
                                         <span className="text-[9px] text-slate-600 truncate w-full text-center font-medium">{c.name}</span>
                                     </div>
                                 ))}
@@ -1536,14 +1685,60 @@ ${memberTimeline || '(暂无互动记录)'}
     // CHAT VIEW
     // 动森彩蛋模式（与私聊同一开关联动）
     const acnh = osTheme.skin === 'animalcrossing' && osTheme.acnhChatSync !== false;
+    const chatChromeStyle = osTheme.chatChromeStyle || 'soft';
+    const chatBackgroundStyle = osTheme.chatBackgroundStyle || 'plain';
+    const groupChatRootClass = chatChromeStyle === 'pixel'
+        ? 'h-full w-full bg-[#efe1cf] flex flex-col overflow-hidden font-sans relative transition-[background-image,background-color] duration-500'
+        : chatChromeStyle === 'flat'
+            ? 'h-full w-full bg-white flex flex-col overflow-hidden font-sans relative transition-[background-image,background-color] duration-500'
+            : chatChromeStyle === 'floating'
+                ? 'h-full w-full bg-[#eef2ff] flex flex-col overflow-hidden font-sans relative transition-[background-image,background-color] duration-500'
+                : 'h-full w-full bg-[#f1f5f9] flex flex-col overflow-hidden font-sans relative transition-[background-image,background-color] duration-500';
+    const groupChatRootStyle: React.CSSProperties = chatBackgroundStyle === 'grid'
+        ? {
+            backgroundColor: chatChromeStyle === 'pixel' ? '#efe1cf' : '#f8fafc',
+            backgroundImage: 'linear-gradient(rgba(148,163,184,0.14) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.14) 1px, transparent 1px)',
+            backgroundSize: '20px 20px',
+        }
+        : chatBackgroundStyle === 'paper'
+            ? {
+                backgroundColor: chatChromeStyle === 'pixel' ? '#f4e8d9' : '#f9f7f2',
+                backgroundImage: 'radial-gradient(circle at 1px 1px, rgba(148,163,184,0.12) 1px, transparent 0)',
+                backgroundSize: '16px 16px',
+            }
+            : chatBackgroundStyle === 'mesh'
+                ? {
+                    backgroundColor: '#f8fafc',
+                    backgroundImage: 'radial-gradient(circle at 15% 20%, rgba(59,130,246,0.18), transparent 28%), radial-gradient(circle at 85% 15%, rgba(244,114,182,0.18), transparent 24%), radial-gradient(circle at 60% 75%, rgba(45,212,191,0.18), transparent 26%)',
+                }
+                : { backgroundImage: 'none' };
+    const groupFineTuneCss = buildChatFineTuneCss(osTheme);
+    const finalGroupRootClass = acnh
+        ? 'h-full w-full flex flex-col overflow-hidden font-sans relative transition-[background-color] duration-500'
+        : groupChatRootClass;
+    const finalGroupRootStyle = acnh
+        ? { backgroundColor: '#F6F0D8', backgroundImage: 'none' }
+        : groupChatRootStyle;
     return (
-        <div className="sully-chat-root h-full w-full bg-[#f0f4f8] flex flex-col font-sans relative">
+        <div className={`sully-chat-root ${finalGroupRootClass}`} style={finalGroupRootStyle}>
+            {/* 外观 App 的全局聊天细节与私聊共用同一份生成 CSS。 */}
+            {groupFineTuneCss && <style>{groupFineTuneCss}</style>}
             {/* 白框自定义 CSS：全局默认在前、群专属在后（后者叠加覆盖）。作用于 .sully-chat-* 各零件。 */}
             {osTheme.chatChromeCustomCss && <style>{osTheme.chatChromeCustomCss}</style>}
             {activeGroup?.chromeCustomCss && <style>{activeGroup.chromeCustomCss}</style>}
-            {/* 守护样式（注在用户 CSS 之后）：保证返回键永远可见可点，坏 CSS 也能退出群聊 */}
-            {(osTheme.chatChromeCustomCss || activeGroup?.chromeCustomCss) && (
-                <style>{`.sully-chat-back{visibility:visible!important;opacity:1!important;pointer-events:auto!important;}`}</style>
+            {/* 气泡工坊 CSS 排在白框之后，与私聊优先级一致；每套成员主题都限定在自己的消息上。 */}
+            {groupBubbleCustomCss && <style>{groupBubbleCustomCss}</style>}
+            <style>{`
+                .sully-bubble-tail-hidden::before,
+                .sully-bubble-tail-hidden::after { content: none !important; display: none !important; }
+            `}</style>
+            {/* 守护样式（注在用户 CSS 之后）：保证返回键与输入区永远可见可点。 */}
+            {(osTheme.chatChromeCustomCss || activeGroup?.chromeCustomCss || groupBubbleCustomCss) && (
+                <style>{`
+                    .sully-chat-back{visibility:visible!important;opacity:1!important;pointer-events:auto!important;}
+                    .sully-chat-inputbar{visibility:visible!important;opacity:1!important;pointer-events:auto!important;}
+                    .sully-chat-inputbar textarea,.sully-chat-inputbar button{pointer-events:auto!important;visibility:visible!important;}
+                `}</style>
             )}
             {/* 公共话题盒整理状态 — 不阻塞交互 */}
             {groupPalaceStatus && (
@@ -1614,7 +1809,7 @@ ${memberTimeline || '(暂无互动记录)'}
             />
 
             {/* Messages Area */}
-            <div className="flex-1 overflow-y-auto p-4 no-scrollbar space-y-2 bg-[#f0f4f8]" ref={scrollRef}>
+            <div className="flex-1 overflow-y-auto overflow-x-hidden pt-6 pb-6 no-scrollbar" ref={scrollRef}>
                 {collapsedCount > 0 && activeGroup && (
                     <div className="flex justify-center mb-6">
                         <button onClick={async () => {
@@ -1631,6 +1826,17 @@ ${memberTimeline || '(暂无互动记录)'}
                 {displayMessages.map((m, i) => {
                     const isUser = m.role === 'user';
                     const char = characters.find(c => c.id === m.charId);
+                    const prevMessage = i > 0 ? displayMessages[i - 1] : null;
+                    const nextMessage = i < displayMessages.length - 1 ? displayMessages[i + 1] : null;
+                    const messageGroupGapMs = 30 * 60 * 1000;
+                    const sameSpeaker = (other: Message | null) => !!other
+                        && other.role === m.role
+                        && other.charId === m.charId;
+                    const isFirstInGroup = !sameSpeaker(prevMessage)
+                        || Math.abs(m.timestamp - prevMessage!.timestamp) > messageGroupGapMs;
+                    const isLastInGroup = !sameSpeaker(nextMessage)
+                        || Math.abs(nextMessage!.timestamp - m.timestamp) > messageGroupGapMs;
+                    const memberTheme = memberBubbleThemes.get(m.charId);
 
                     return (
                         <GroupMessageItem
@@ -1647,7 +1853,16 @@ ${memberTimeline || '(暂无互动记录)'}
                             onReply={handleGroupReply}
                             nameOf={nameOf}
                             onPacketClick={openPacketDetail}
-                            styleConfig={isUser ? userBubble : (memberBubbles.get(m.charId) || PRESET_THEME_GROUP.ai)}
+                            styleConfig={isUser ? userBubbleTheme.user : (memberTheme?.ai || PRESET_THEME_GROUP.ai)}
+                            themeScopeClass={isUser ? 'sully-group-user-theme' : (memberThemeScopeClasses.get(m.charId) || 'sully-group-default-theme')}
+                            isFirstInGroup={isFirstInGroup}
+                            isLastInGroup={isLastInGroup}
+                            avatarShape={osTheme.chatAvatarShape}
+                            avatarSize={osTheme.chatAvatarSize}
+                            avatarMode={osTheme.chatAvatarMode}
+                            bubbleVariant={osTheme.chatBubbleStyle}
+                            messageSpacing={osTheme.chatMessageSpacing}
+                            showTimestamp={osTheme.chatShowTimestamp}
                         />
                     );
                 })}
@@ -1666,7 +1881,8 @@ ${memberTimeline || '(暂无互动记录)'}
             {/* 回复预览条（对齐私聊 Chat.tsx 的样式与位置） */}
             {replyTarget && !selectionMode && (
                 <div className="flex items-center justify-between px-4 py-2 bg-slate-50 border-t border-slate-200 text-xs text-slate-500 shrink-0 z-40">
-                    <div className="flex items-center gap-2 truncate"><span className="font-bold text-slate-700">正在回复:</span><span className="truncate max-w-[200px]">{replyTarget.content.length > 10 ? replyTarget.content.slice(0, 10) + '...' : replyTarget.content}</span></div>
+                    {/* 引用的是图片 / 表情时这里显示占位符，跟落库的快照同一口径 */}
+                    <div className="flex items-center gap-2 truncate"><span className="font-bold text-slate-700">正在回复:</span><span className="truncate max-w-[200px]">{buildReplySnapshotContent(replyTarget)}</span></div>
                     <button onClick={() => setReplyTarget(null)} className="p-1 text-slate-400 hover:text-slate-600">×</button>
                 </div>
             )}
@@ -1776,7 +1992,7 @@ ${memberTimeline || '(暂无互动记录)'}
                     {/* Header Info */}
                     <div className="flex justify-center">
                         <div onClick={() => groupAvatarInputRef.current?.click()} className="w-24 h-24 rounded-3xl bg-slate-100 border-2 border-dashed border-slate-300 flex items-center justify-center cursor-pointer overflow-hidden relative group hover:border-violet-400">
-                            {activeGroup?.avatar ? <img src={activeGroup.avatar} className="w-full h-full object-cover opacity-90 group-hover:opacity-100" /> : <span className="text-xs text-slate-400 font-bold">更换头像</span>}
+                            {activeGroup?.avatar ? <TokenImg value={activeGroup.avatar} className="w-full h-full object-cover opacity-90 group-hover:opacity-100" /> : <span className="text-xs text-slate-400 font-bold">更换头像</span>}
                             <div className="absolute inset-0 bg-black/20 hidden group-hover:flex items-center justify-center text-white"><svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M6.827 6.175A2.31 2.31 0 0 1 5.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 0 0-1.134-.175 2.31 2.31 0 0 1-1.64-1.055l-.822-1.316a2.192 2.192 0 0 0-1.736-1.039 48.774 48.774 0 0 0-5.232 0 2.192 2.192 0 0 0-1.736 1.039l-.821 1.316Z" /><path strokeLinecap="round" strokeLinejoin="round" d="M16.5 12.75a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0ZM18.75 10.5h.008v.008h-.008V10.5Z" /></svg></div>
                         </div>
                         <input type="file" ref={groupAvatarInputRef} className="hidden" accept="image/*" onChange={handleGroupAvatarUpload} />
@@ -1813,7 +2029,7 @@ ${memberTimeline || '(暂无互动记录)'}
                         <div className="flex items-center justify-between mb-3">
                             <div className="flex-1 pr-3">
                                 <div className="text-xs font-bold text-slate-700">成员独立气泡</div>
-                                <p className="text-[9px] text-slate-400 mt-0.5 leading-tight">开启后每位成员的气泡使用其私聊气泡主题（AI 侧）；关闭则全员统一。</p>
+                                <p className="text-[9px] text-slate-400 mt-0.5 leading-tight">开启后每位成员完整沿用其私聊气泡主题（AI 侧，包含自定义 CSS 与装饰）；关闭则全员统一。</p>
                             </div>
                             <div
                                 onClick={() => setTempMemberBubbleIndependent(v => !v)}
@@ -2051,7 +2267,7 @@ ${memberTimeline || '(暂无互动记录)'}
                                     if (!c) return null;
                                     return (
                                         <div key={mid} onClick={() => setPacketTargetId(mid)} className={`flex flex-col items-center gap-1 p-2 rounded-xl border transition-all cursor-pointer ${packetTargetId === mid ? 'border-orange-500 bg-orange-50 ring-1 ring-orange-500' : 'border-slate-100 bg-white hover:border-slate-300'}`}>
-                                            <img src={c.avatar} className="w-10 h-10 rounded-full object-cover" />
+                                            <TokenImg value={c.avatar} className="w-10 h-10 rounded-full object-cover" />
                                             <span className="text-[9px] text-slate-600 truncate w-full text-center font-medium">{c.name}</span>
                                         </div>
                                     );
@@ -2096,7 +2312,7 @@ ${memberTimeline || '(暂无互动记录)'}
                                         const avatar = c.claimantId === 'user' ? userProfile.avatar : characters.find(ch => ch.id === c.claimantId)?.avatar;
                                         return (
                                             <div key={i} className="flex items-center gap-3 bg-slate-50 rounded-xl px-3 py-2">
-                                                <img src={avatar} className="w-8 h-8 rounded-full object-cover" />
+                                                <TokenImg value={avatar} className="w-8 h-8 rounded-full object-cover" />
                                                 <div className="flex-1 min-w-0">
                                                     <div className="text-xs font-bold text-slate-700 truncate">{nameOf(c.claimantId)}</div>
                                                     <div className="text-[9px] text-slate-400">{new Date(c.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>

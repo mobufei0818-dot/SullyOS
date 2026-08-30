@@ -13,11 +13,13 @@ import {
     bootstrapPlatesFromHistory, markPlateBootstrapDone,
     getBootstrapResume, setBootstrapResume, clearBootstrapResume,
     updateStoredMemoryNode,
+    DEFAULT_CHARACTER_ACCOMMODATION,
 } from '../utils/memoryPalace';
 import type { Anticipation, MigrationProgress, DigestResult, MemoryLink, EventBox, DigestReport } from '../utils/memoryPalace';
 import { confirmExportSafety } from '../utils/exportGuard';
-import type { CharacterProfile, MemoryPalaceWaterlinePreset, Message } from '../types';
+import type { CharacterAccommodationPolicy, CharacterProfile, MemoryPalaceWaterlinePreset, Message } from '../types';
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
+import TokenImg from '../components/os/TokenImg';
 import {
     CONTEXT_RANGE_POLICY_VERSION,
     DEFAULT_MANUAL_CONTEXT_LIMIT,
@@ -29,6 +31,7 @@ import {
     getRangeSelectionHint,
 } from '../utils/memoryPalace/rangeSelection';
 import { trackEvent } from '../utils/analytics';
+import { shareOrDownloadFile } from '../utils/shareExport';
 import {
     EXTERNAL_MEMORY_MAX_CHARS,
     getExternalMemoryLengthInfo,
@@ -1410,6 +1413,17 @@ export default function MemoryPalaceApp() {
         setTimeout(() => setRrSaved(false), 2000);
     };
 
+    const updateAccommodation = (key: keyof CharacterAccommodationPolicy, value: number) => {
+        if (!char) return;
+        updateCharacter(char.id, {
+            interactionAccommodation: {
+                ...DEFAULT_CHARACTER_ACCOMMODATION,
+                ...(char.interactionAccommodation || {}),
+                [key]: value,
+            },
+        });
+    };
+
     const handleSaveLightApi = () => {
         const api = {
             baseUrl: lightUrl.trim(),
@@ -1884,6 +1898,10 @@ export default function MemoryPalaceApp() {
                 if (result.aspirations?.length) parts.push(`${result.aspirations.length} 个新期盼`);
                 if (result.distilled?.length) parts.push(`${result.distilled.length} 条沉淀到门牌`);
                 if (result.plateUpdated?.length) parts.push(`${result.plateUpdated.length} 块门牌更新`);
+                // 门牌整理是交给云端跑的（页面关着也能跑完），交出去就返回，门牌得过几分钟
+                // 才动。手动消化时用户刚盯着「正在整理门牌…」一路看到这里，不说这一句的话
+                // 他看到的就是整理阶段一闪而过、门牌纹丝不动，跟没跑过一模一样。
+                if (result.plateCloudPending) parts.push('门牌整理在云端跑，结果晚几分钟落地');
                 setDigestResult(parts.length > 0 ? `[ok]${parts.join('，')}` : '没有变化');
             }
             loadStats();
@@ -2037,18 +2055,15 @@ export default function MemoryPalaceApp() {
             const json = JSON.stringify(data, null, 2);
             const safeName = (char.name || 'character').replace(/[\\/:*?"<>|]/g, '_');
             const fileName = `${safeName}_记忆宫殿_${new Date().toISOString().slice(0, 10)}.json`;
-            const blob = new Blob([json], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = fileName;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(url);
+            const exportDisposition = await shareOrDownloadFile({
+                content: json,
+                fileName,
+                mimeType: 'application/json;charset=utf-8',
+                shareTitle: `${char.name}的记忆宫殿`,
+            });
             trackEvent('导出记忆宫殿备份');
             const vecPart = exportWithVectors ? `、${c.vectors} 条向量` : '';
-            setExportResult(`[ok]已导出 ${nodeCount} 条记忆、${c.eventBoxes} 个事件盒、${c.anticipations} 个期盼${vecPart}`);
+            setExportResult(`[ok]${exportDisposition === 'shared' ? '已打开分享面板：' : '已导出 '}${nodeCount} 条记忆、${c.eventBoxes} 个事件盒、${c.anticipations} 个期盼${vecPart}`);
         } catch (e: any) {
             setExportResult(`[err]导出失败：${e?.message || e}`);
         } finally {
@@ -2401,7 +2416,7 @@ export default function MemoryPalaceApp() {
                                                     background: '#f3f4f6',
                                                 }}
                                             >
-                                                <img src={c.avatar} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                                                <TokenImg value={c.avatar} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                                                 {palaceOn && (
                                                     <div
                                                         style={{
@@ -2829,7 +2844,7 @@ export default function MemoryPalaceApp() {
                                 border: '1px solid #e5e7eb', backgroundColor: '#fafafa',
                             }}
                         >
-                            <img src={c.avatar} alt="" style={{ width: 28, height: 28, borderRadius: 8, objectFit: 'cover' }} />
+                            <TokenImg value={c.avatar} alt="" style={{ width: 28, height: 28, borderRadius: 8, objectFit: 'cover' }} />
                             <div>
                                 <div style={{ fontSize: 12, fontWeight: 600 }}>{c.name}</div>
                                 <div style={{ fontSize: 10, color: '#7c3aed', display: 'inline-flex' }}>
@@ -3822,6 +3837,57 @@ create table if not exists memory_vectors (
                     </div>
                 </details>
 
+                <details style={{ marginTop: 12 }}>
+                    <summary style={{ fontSize: 10, color: '#0f766e', cursor: 'pointer', userSelect: 'none' }}>
+                        ChatApp 交流步伐
+                    </summary>
+                    <div style={{ marginTop: 8, background: '#f0fdfa', borderRadius: 12, padding: 14, border: '1px solid #99f6e4' }}>
+                        <div style={{ fontSize: 11, color: '#115e59', lineHeight: 1.65, marginBottom: 12 }}>
+                            设置这个角色愿意在多大程度上跟随用户当下的说话步伐。0% 表示该维度完全保持自己，100% 也只会在安全范围内适应，不会改写角色人格。
+                        </div>
+                        {([
+                            ['length', '回复长度'],
+                            ['rhythm', '来回节奏'],
+                            ['energy', '情绪能量'],
+                            ['punctuation', '标点力度'],
+                            ['emoji', 'Emoji 使用'],
+                        ] as Array<[keyof CharacterAccommodationPolicy, string]>).map(([key, label]) => {
+                            const value = char.interactionAccommodation?.[key]
+                                ?? DEFAULT_CHARACTER_ACCOMMODATION[key];
+                            return (
+                                <div key={key} style={{ marginBottom: key === 'emoji' ? 0 : 10 }}>
+                                    <label className={labelClass} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                                        <span>{label}</span>
+                                        <span style={{ color: '#0f766e' }}>{Math.round(value * 100)}%</span>
+                                    </label>
+                                    <input
+                                        type="range"
+                                        min="0"
+                                        max="1"
+                                        step="0.05"
+                                        value={value}
+                                        onChange={event => updateAccommodation(key, parseFloat(event.target.value))}
+                                        style={{ width: '100%', accentColor: '#0f766e' }}
+                                    />
+                                </div>
+                            );
+                        })}
+                        <button
+                            onClick={() => updateCharacter(char.id, { interactionAccommodation: { ...DEFAULT_CHARACTER_ACCOMMODATION } })}
+                            style={{
+                                width: '100%', marginTop: 12, padding: '8px 0', borderRadius: 9,
+                                border: '1px solid #99f6e4', background: '#ffffff',
+                                fontSize: 11, fontWeight: 700, color: '#0f766e', cursor: 'pointer',
+                            }}
+                        >
+                            恢复温和默认值
+                        </button>
+                        <div style={{ fontSize: 10, color: '#0f766e', lineHeight: 1.55, marginTop: 10 }}>
+                            这里只影响 ChatApp 回复。角色回复不会被拿来反向训练这些数值，其他 App 的写作人格也不会变化。
+                        </div>
+                    </div>
+                </details>
+
                 {/* 手动总结与向量化（保底机制）：圈选聊天区间走一次总结，不碰水位线 */}
                 <div style={{ marginTop: 16, background: '#f5f3ff', borderRadius: 16, padding: 16, border: '1px solid #ddd6fe' }}>
                     <div style={{ fontSize: 12, fontWeight: 700, color: '#5b21b6', marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -4436,7 +4502,12 @@ create table if not exists memory_vectors (
                                                         门牌已更新：{report.plateUpdated.map(r => (PLATE_TITLES as Record<string, string>)[r] || r).join('、')}
                                                     </div>
                                                 )}
-                                                {submitCount > 0 && report.plateUpdated.length === 0 && (
+                                                {report.plateCloudPending && (
+                                                    <div style={{ fontSize: 10, color: '#8b5cf6', marginTop: 6 }}>
+                                                        门牌整理已交给云端跑，结果晚几分钟落地
+                                                    </div>
+                                                )}
+                                                {submitCount > 0 && report.plateUpdated.length === 0 && !report.plateCloudPending && (
                                                     <div style={{ fontSize: 10, color: '#f59e0b', marginTop: 6 }}>
                                                         ⚠️ 本次提交的候选未合并进门牌（整理未跑成或未被采纳）
                                                     </div>
@@ -4768,7 +4839,7 @@ create table if not exists memory_vectors (
                         onClick={() => setShowCharPicker(!showCharPicker)}
                         style={{ fontSize: 18, fontWeight: 700, cursor: 'pointer', display: 'inline-flex', alignItems: 'center', gap: 6 }}
                     >
-                        <img src={char.avatar} alt="" style={{ width: 24, height: 24, borderRadius: 8, objectFit: 'cover' }} />
+                        <TokenImg value={char.avatar} alt="" style={{ width: 24, height: 24, borderRadius: 8, objectFit: 'cover' }} />
                         {char.name} 的记忆宫殿
                         <span style={{ fontSize: 10, color: '#9ca3af' }}>▼</span>
                     </div>
@@ -4856,7 +4927,7 @@ create table if not exists memory_vectors (
                                         backgroundColor: c.id === activeCharacterId ? '#f3f0ff' : 'transparent',
                                     }}
                                 >
-                                    <img src={c.avatar} alt="" style={{ width: 32, height: 32, borderRadius: 10, objectFit: 'cover' }} />
+                                    <TokenImg value={c.avatar} alt="" style={{ width: 32, height: 32, borderRadius: 10, objectFit: 'cover' }} />
                                     <div>
                                         <div style={{ fontSize: 13, fontWeight: 600 }}>{c.name}</div>
                                         <div style={{ fontSize: 10, color: '#9ca3af' }}>

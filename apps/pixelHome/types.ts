@@ -3,6 +3,7 @@
  */
 
 import type { MemoryRoom } from '../../utils/memoryPalace/types';
+import { isImageValue } from '../../utils/blobRef';
 
 // ─── 像素资产 ─────────────────────────────────────────
 
@@ -102,7 +103,7 @@ export function decodeColorField(v: string | undefined | null):
   | { kind: 'color'; value: string }
   | { kind: 'default' } {
   if (!v) return { kind: 'default' };
-  if (v.startsWith('data:')) return { kind: 'image', value: v };
+  if (isImageValue(v)) return { kind: 'image', value: v };
   // 允许 "#rgb"/"#rgba"/"#rrggbb"/"#rrggbbaa"
   if (/^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(v)) return { kind: 'color', value: v };
   return { kind: 'default' };
