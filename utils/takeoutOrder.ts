@@ -55,14 +55,16 @@ export function buildTakeoutOrderCard(order: TakeoutOrder): { html: string; text
   const cardTarget = takeoutCardTarget(order.target);
   const rows = order.items.map(item => `<div style="display:flex;justify-content:space-between;gap:12px;margin-top:10px;font-size:13px;line-height:1.45"><span style="flex:1">${escapeHtml(item.name)}</span><b style="white-space:nowrap;font-weight:600">¥${item.price}</b></div>`).join('');
   const subtotal = order.items.reduce((sum, item) => sum + item.price, 0);
+  const hasEstimatedPrices = subtotal > 0;
   const total = subtotal + order.fee;
   // `meituan_pending` 只是程序侧的履约标记：它决定是否展示外跳入口、是否安排提醒。
   // 角色和角色扮演卡片不应被告知这一层，避免打断“我已经替你点好”的自然互动。
   const status = '已下单';
   const note = isMeituanPending ? `送至：${escapeHtml(order.address)}<br/>我给你挑好了，记得留意外卖消息` : `送至：${escapeHtml(order.address)}<br/>预计约 ${order.deliveryMinutes} 分钟送达，请留意取餐提醒`;
   const deliveryRow = isMeituanPending ? `<div style="margin-top:7px;font-size:12px;color:#64594f">实际价格、优惠和配送费以美团页面为准</div>` : `<div style="margin-top:7px;display:flex;justify-content:space-between;font-size:12px;color:#64594f"><span>配送费</span><span>¥${order.fee}</span></div>`;
-  const totalRow = isMeituanPending ? `<div style="margin-top:12px;font-size:12px;color:#76695f">预估商品小计 ¥${subtotal}</div>` : `<div style="margin-top:12px;display:flex;align-items:baseline;justify-content:space-between"><span style="font-size:12px;color:#76695f">实付</span><span style="font-size:21px;font-weight:800;color:#e76522">¥${total}</span></div>`;
-  const html = `<div style="width:278px;box-sizing:border-box;overflow:hidden;border-radius:5px;background:#fffdfa;color:#242424;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 8px 22px rgba(56,40,22,.12)"><div style="height:7px;background:repeating-linear-gradient(135deg,#f5e7d3 0 5px,#fffdfa 5px 10px)"></div><div style="padding:16px 17px 14px"><div style="display:flex;align-items:center;justify-content:space-between"><div style="font-size:10px;letter-spacing:1.8px;color:#a17c5b">外卖 · ${isMeituanPending ? '角色为你下单' : '电子小票'}</div><div style="border:1px solid #e8c9a4;border-radius:999px;padding:3px 7px;font-size:10px;color:#c66b2b">${status}</div></div><div style="margin-top:9px;font-size:19px;font-weight:750;letter-spacing:.2px">外卖订单</div><div style="margin-top:4px;font-size:11px;color:#84786d">${escapeHtml(cardTarget)}${isMeituanPending ? ' · 已为你挑好' : ` · 预计 ${arrivalText} 送达`}</div><div style="margin-top:12px;border-top:1px dashed #dbcdbd"></div><div style="padding:2px 0 4px">${rows}</div><div style="border-top:1px dashed #dbcdbd"></div><div style="margin-top:10px;display:flex;justify-content:space-between;font-size:12px;color:#64594f"><span>商品小计</span><span>¥${subtotal}</span></div>${deliveryRow}${totalRow}<div style="margin-top:12px;padding-top:10px;border-top:1px dashed #dbcdbd;font-size:11px;line-height:1.55;color:#8c8177">${note}</div></div><div style="height:7px;background:repeating-linear-gradient(45deg,#f5e7d3 0 5px,#fffdfa 5px 10px)"></div></div>`;
+  const totalRow = isMeituanPending ? (hasEstimatedPrices ? `<div style="margin-top:12px;font-size:12px;color:#76695f">预估商品小计 ¥${subtotal}</div>` : `<div style="margin-top:12px;font-size:12px;color:#76695f">餐品和金额以角色挑选为准</div>`) : `<div style="margin-top:12px;display:flex;align-items:baseline;justify-content:space-between"><span style="font-size:12px;color:#76695f">实付</span><span style="font-size:21px;font-weight:800;color:#e76522">¥${total}</span></div>`;
+  const itemRows = isMeituanPending && !hasEstimatedPrices ? order.items.map(item => `<div style="margin-top:10px;font-size:13px;line-height:1.45">${escapeHtml(item.name)}</div>`).join('') : rows;
+  const html = `<div style="width:278px;box-sizing:border-box;overflow:hidden;border-radius:5px;background:#fffdfa;color:#242424;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 8px 22px rgba(56,40,22,.12)"><div style="height:7px;background:repeating-linear-gradient(135deg,#f5e7d3 0 5px,#fffdfa 5px 10px)"></div><div style="padding:16px 17px 14px"><div style="display:flex;align-items:center;justify-content:space-between"><div style="font-size:10px;letter-spacing:1.8px;color:#a17c5b">外卖 · ${isMeituanPending ? '角色为你下单' : '电子小票'}</div><div style="border:1px solid #e8c9a4;border-radius:999px;padding:3px 7px;font-size:10px;color:#c66b2b">${status}</div></div><div style="margin-top:9px;font-size:19px;font-weight:750;letter-spacing:.2px">外卖订单</div><div style="margin-top:4px;font-size:11px;color:#84786d">${escapeHtml(cardTarget)}${isMeituanPending ? ' · 已为你挑好' : ` · 预计 ${arrivalText} 送达`}</div><div style="margin-top:12px;border-top:1px dashed #dbcdbd"></div><div style="padding:2px 0 4px">${itemRows}</div><div style="border-top:1px dashed #dbcdbd"></div>${hasEstimatedPrices || !isMeituanPending ? `<div style="margin-top:10px;display:flex;justify-content:space-between;font-size:12px;color:#64594f"><span>商品小计</span><span>¥${subtotal}</span></div>` : ''}${deliveryRow}${totalRow}<div style="margin-top:12px;padding-top:10px;border-top:1px dashed #dbcdbd;font-size:11px;line-height:1.55;color:#8c8177">${note}</div></div><div style="height:7px;background:repeating-linear-gradient(45deg,#f5e7d3 0 5px,#fffdfa 5px 10px)"></div></div>`;
   return { html, textPreview: isMeituanPending ? `角色已经为你点了外卖：${order.items.map(item => item.name).join('、')}；送至${order.address}。` : `外卖订单：${cardTarget}；商品：${order.items.map(item => item.name).join('、')}；预计 ${arrivalText} 送达（${order.deliveryMinutes}分钟后），当前尚未送达。配送费${order.fee}元。` };
 }
 
@@ -97,5 +99,27 @@ export function extractRoleTakeoutOrders(content: string): { cleanedContent: str
     orders.push({ id: createdAt, target: '用户', items, address: String(location), deliveryDetail: userAddress.detail, deliveryNote: userAddress.note, createdAt, deliveryMinutes, fee, etaAt: createdAt + deliveryMinutes * 60_000, placedBy: 'character', fulfillment: 'meituan_pending' });
     return '';
   }).replace(/\n{3,}/g, '\n\n').trim();
+  // 模型偶尔会把它已经说出口的“我给你点好了”当作普通文字，漏掉结构标记。
+  // 这层只认明确的完成时措辞，既避免把“我去点”误判成订单，也让卡片不会凭空消失。
+  const clearlyOrdered = /(?:给|替|帮).{0,8}(?:点好(?:了)?|点上了|点了|下好了单|下单了|叫好(?:了)?)|(?:已经|刚刚).{0,12}(?:点好(?:了)?|点上了|点了|下好了单|下单了)/.test(cleanedContent);
+  if (orders.length === 0 && clearlyOrdered) {
+    const foodHint = cleanedContent.match(/(?:点好(?:了)?|点上了|点了|下好了单|下单了|叫好(?:了)?)[，。！!？?\s]*(?:一(?:份|杯|个))?([^，。！!？?\n]{2,30})/)?.[1]?.trim();
+    const createdAt = Date.now();
+    const userAddress = resolveTakeoutAddress(loadTakeoutAddressBook(), { kind: 'user' });
+    orders.push({
+      id: createdAt,
+      target: '用户',
+      items: [{ id: `char-takeout-inferred-${createdAt}`, name: foodHint || '角色为你挑选的外卖', price: 0 }],
+      address: String(location),
+      deliveryDetail: userAddress.detail,
+      deliveryNote: userAddress.note,
+      createdAt,
+      deliveryMinutes: 30,
+      fee: 0,
+      etaAt: createdAt + 30 * 60_000,
+      placedBy: 'character',
+      fulfillment: 'meituan_pending',
+    });
+  }
   return { cleanedContent, orders };
 }
