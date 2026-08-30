@@ -2209,7 +2209,7 @@ export async function applyAssistantPostProcessing(
             setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
 
             if (order.fulfillment === 'meituan_pending') {
-                addToast('角色已生成美团待确认单；请在美团外卖完成真实下单', 'info');
+                addToast('角色已为你生成外卖小票；如需真实下单，可打开美团外卖查看', 'info');
                 continue;
             }
 
