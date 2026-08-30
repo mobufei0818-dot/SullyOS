@@ -4,7 +4,7 @@
  * App 内下单和角色聊天下单都通过这里产出同一种订单数据和同一张卡片；模型只需要给出
  * 商品与规格，不能再直接生成一张样式不受控的 HTML 订单卡。
  */
-import { loadTakeoutAddressBook, resolveTakeoutAddress } from './takeoutAddressBook';
+import { loadTakeoutAddressBook, resolveTakeoutAddress, saveConfirmedUserTakeoutAddress } from './takeoutAddressBook';
 
 
 export type TakeoutOrderItem = {
@@ -62,9 +62,16 @@ export function buildTakeoutOrderCard(order: TakeoutOrder): { html: string; text
  * 仅由程序生成订单，模型输出的文字不会直接成为卡片样式。
  */
 export function extractRoleTakeoutOrders(content: string): { cleanedContent: string; orders: TakeoutOrder[] } {
+  let cleaned = content.replace(/\[\[TAKEOUT_ADDRESS:\s*([^\]]+?)\s*\]\]/gi, (_all, raw: string) => {
+    const [nameRaw, addressRaw, modeRaw, mappedRaw] = raw.split('|').map(value => value.trim());
+    // This directive is only emitted after the user has explicitly confirmed a travel/current address in conversation.
+    if (!nameRaw) return '';
+    saveConfirmedUserTakeoutAddress({ name: nameRaw.slice(0, 30), address: (addressRaw || '').slice(0, 120), mode: modeRaw, mappedAddress: (mappedRaw || '').slice(0, 120) });
+    return '';
+  });
   const location = resolveTakeoutAddress(loadTakeoutAddressBook(), { kind: 'user' }).address || '当前收货地址';
   const orders: TakeoutOrder[] = [];
-  const cleanedContent = content.replace(/\[\[TAKEOUT_ORDER:\s*([^\]]+?)\s*\]\]/gi, (_all, raw: string) => {
+  const cleanedContent = cleaned.replace(/\[\[TAKEOUT_ORDER:\s*([^\]]+?)\s*\]\]/gi, (_all, raw: string) => {
     const items = raw.split(/[;；]/).map((part: string, index: number) => {
       const [nameRaw, priceRaw, specRaw] = part.split('|').map(value => value.trim());
       const name = nameRaw?.slice(0, 48) || '';
