@@ -3035,8 +3035,12 @@ const MessageItem = React.memo(({
                 </div>
             );
         }
-        // 渲染逻辑抽到共享组件 components/chat/HtmlCard.tsx（群聊共用），行为不变
-        return commonLayout(<HtmlCard html={html} />);
+        const order = meta.order as { fulfillment?: string; items?: Array<{ name?: string }>; address?: string } | undefined;
+        const meituanAction = meta.source === 'takeout' && order?.fulfillment === 'meituan_pending'
+            ? { label: '去美团外卖确认下单', url: 'https://waimai.meituan.com/', copyText: `美团外卖下单参考\n商品：${(order.items || []).map(item => item.name).filter(Boolean).join('、')}\n收货地址：${order.address || ''}` }
+            : undefined;
+        // 外链按钮放在 sandbox iframe 外，只有“角色给用户点单”的美团待确认卡才显示。
+        return commonLayout(<HtmlCard html={html} action={meituanAction} />);
     }
 
     if (m.type === 'social_card' && m.metadata?.post) {
