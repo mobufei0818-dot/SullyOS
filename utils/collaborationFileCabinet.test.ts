@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Message } from '../types';
 import {
   buildCollaborationFileCabinetBlock,
+  collaborationLibraryGroupOf,
   collaborationFileMessageMetadata,
   extractCollaborationFileDirectives,
   resolveCollaborationFileByTitle,
@@ -33,6 +34,18 @@ const message = (patch: Partial<Message>): Message => ({
   ...patch,
 });
 
+const installable = (
+  name: string,
+  assetId: string,
+  installableKind: CollaborationLibraryFile['installableKind'],
+): CollaborationLibraryFile => ({
+  ...file(name, assetId),
+  kind: 'installable',
+  mimeType: 'application/vnd.sullyos.installable+json',
+  format: undefined,
+  installableKind,
+});
+
 describe('current-chat collaboration file cabinet', () => {
   it('parses Chinese and protocol directives while keeping natural text', () => {
     const parsed = extractCollaborationFileDirectives('我做过这个，发你看看。\n[[COLLAB_FILE:项目说明.pdf]]\n[[协同文件：《项目说明.pdf》]]');
@@ -46,6 +59,19 @@ describe('current-chat collaboration file cabinet', () => {
     expect(resolveCollaborationFileByTitle(files, '项目说明')).toBeNull();
     expect(resolveCollaborationFileByTitle([files[0]], '项目说明')?.assetId).toBe('asset-1');
     expect(resolveCollaborationFileByTitle(files, '项目说名.pdf')).toBeNull();
+  });
+
+  it('classifies installable works and exposes their titles to ordinary chat', () => {
+    const files = [
+      installable('月光气泡', 'asset-20', 'bubble-theme'),
+      installable('Noir 角色卡', 'asset-21', 'character-card'),
+      file('项目说明.pdf', 'asset-22'),
+    ];
+    expect(files.map(collaborationLibraryGroupOf)).toEqual(['beautification', 'character', 'document']);
+    const block = buildCollaborationFileCabinetBlock(files, [], '条条');
+    expect(block).toContain('【美化作品】\n- 《月光气泡》');
+    expect(block).toContain('【角色与世界观】\n- 《Noir 角色卡》');
+    expect(block).toContain('【文档与资料】\n- 《项目说明.pdf》');
   });
 
   it('injects titles only and expands exact content for the current title mention or next turn after delivery', () => {
@@ -115,5 +141,9 @@ describe('current-chat collaboration file cabinet', () => {
     expect(metadata.fileName).toBe('交付.pdf');
     expect(JSON.stringify(metadata)).not.toContain('很长的正文');
     expect(metadata).not.toHaveProperty('blob');
+
+    const workMetadata = collaborationFileMessageMetadata(installable('月光气泡', 'asset-10', 'bubble-theme'));
+    expect(workMetadata.collaborationAttachmentKind).toBe('installable');
+    expect(workMetadata.collaborationInstallableKind).toBe('bubble-theme');
   });
 });
