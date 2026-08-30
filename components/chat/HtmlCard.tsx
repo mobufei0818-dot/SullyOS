@@ -60,12 +60,17 @@ const HtmlCard: React.FC<{ html: string; action?: HtmlCardAction }> = ({ html, a
         feedbackTimerRef.current = setTimeout(() => setCopyState('idle'), 1600);
     };
 
-    const launchAction = async (event: React.MouseEvent<HTMLButtonElement>) => {
+    const launchAction = (event: React.MouseEvent<HTMLButtonElement>) => {
         event.preventDefault();
         event.stopPropagation();
         if (!action) return;
-        try { if (action.copyText && navigator.clipboard?.writeText) await navigator.clipboard.writeText(action.copyText); } catch { /* opening the official page remains useful if clipboard is unavailable */ }
+        // 必须在点击事件仍处于同步调用栈时打开。iOS/Safari 会把「await 复制剪贴板后
+        // 再 window.open」视作弹窗，直接拦掉，因此用户会看见按钮却完全没有跳转。
         window.open(action.url, '_blank', 'noopener,noreferrer');
+        // 复制只是附加便利，绝不能阻塞跳转；浏览器拒绝复制时也不影响打开美团。
+        if (action.copyText && navigator.clipboard?.writeText) {
+            void navigator.clipboard.writeText(action.copyText).catch(() => undefined);
+        }
     };
 
     return (
