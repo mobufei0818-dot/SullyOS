@@ -4,6 +4,8 @@
  * App 内下单和角色聊天下单都通过这里产出同一种订单数据和同一张卡片；模型只需要给出
  * 商品与规格，不能再直接生成一张样式不受控的 HTML 订单卡。
  */
+import { loadTakeoutAddressBook, resolveTakeoutAddress } from './takeoutAddressBook';
+
 
 export type TakeoutOrderItem = {
   id: string;
@@ -60,9 +62,7 @@ export function buildTakeoutOrderCard(order: TakeoutOrder): { html: string; text
  * 仅由程序生成订单，模型输出的文字不会直接成为卡片样式。
  */
 export function extractRoleTakeoutOrders(content: string): { cleanedContent: string; orders: TakeoutOrder[] } {
-  const location = (() => {
-    try { return JSON.parse(localStorage.getItem('nmj-takeout-location') || '{}')?.address || '当前收货地址'; } catch { return '当前收货地址'; }
-  })();
+  const location = resolveTakeoutAddress(loadTakeoutAddressBook(), { kind: 'user' }).address || '当前收货地址';
   const orders: TakeoutOrder[] = [];
   const cleanedContent = content.replace(/\[\[TAKEOUT_ORDER:\s*([^\]]+?)\s*\]\]/gi, (_all, raw: string) => {
     const items = raw.split(/[;；]/).map((part: string, index: number) => {
