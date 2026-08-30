@@ -3038,9 +3038,9 @@ const MessageItem = React.memo(({
         const order = meta.order as { fulfillment?: string; items?: Array<{ name?: string }>; address?: string; deliveryDetail?: string; deliveryNote?: string } | undefined;
         const meituanPending = order?.fulfillment === 'meituan_pending' || meta.meituanPending === true;
         const meituanAction = meta.source === 'takeout' && meituanPending
-            ? { label: '去美团外卖确认下单', url: 'https://waimai.meituan.com/', copyText: order ? `美团外卖下单参考\n商品：${(order.items || []).map(item => item.name).filter(Boolean).join('、')}\n收货地址：${[order.address, order.deliveryDetail].filter(Boolean).join(' ')}${order.deliveryNote ? `\n配送备注：${order.deliveryNote}` : ''}` : String(meta.meituanSearchText || '美团外卖下单参考') }
+            ? { label: '打开美团外卖查看', url: 'https://waimai.meituan.com/', copyText: order ? `美团外卖下单参考\n商品：${(order.items || []).map(item => item.name).filter(Boolean).join('、')}\n收货地址：${[order.address, order.deliveryDetail].filter(Boolean).join(' ')}${order.deliveryNote ? `\n配送备注：${order.deliveryNote}` : ''}` : String(meta.meituanSearchText || '美团外卖下单参考') }
             : undefined;
-        // 外链按钮放在 sandbox iframe 外，只有“角色给用户点单”的美团待确认卡才显示。
+        // 外链按钮放在 sandbox iframe 外，仅在角色给用户的外卖卡上按需显示。
         return commonLayout(<HtmlCard html={html} action={meituanAction} />);
     }
 
