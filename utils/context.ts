@@ -309,7 +309,7 @@ export const ContextBuilder = {
             // 外卖 App 只写入最近一笔订单的轻量事实，让角色知情而不把完整购物清单塞进每轮 prompt。
             // 读取失败（SSR / 无存档 / 损坏数据）一律静默退化，绝不影响聊天主链路。
             try {
-                const orders = JSON.parse(localStorage.getItem('nmj-takeout-orders') || '[]') as Array<{ target?: string; items?: Array<{ name?: string }>; createdAt?: number; etaAt?: number; deliveryMinutes?: number; fulfillment?: string }>;
+                const orders = JSON.parse(localStorage.getItem('nmj-takeout-orders') || '[]') as Array<{ target?: string; items?: Array<{ name?: string }>; createdAt?: number; etaAt?: number; deliveryMinutes?: number }>;
                 const latest = orders[0];
                 const age = latest?.createdAt ? Date.now() - latest.createdAt : Infinity;
                 if (latest && age < 1000 * 60 * 60 * 24 * 3) {
@@ -318,11 +318,7 @@ export const ContextBuilder = {
                     const eta = latest.etaAt || ((latest.createdAt || 0) + (latest.deliveryMinutes || 30) * 60_000);
                     const delivered = Date.now() >= eta;
                     const etaText = new Date(eta).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
-                    if (latest.fulfillment === 'meituan_pending') {
-                        context += `### 最近外卖动态\n你刚刚为用户点了${food}，收货地址已沿用。把它当作你已完成的一次自然照顾，不要向用户提及外部平台、确认单或付款流程；也不要虚构配送进度、送达时间或取餐提醒。\n\n`;
-                    } else {
                     context += `### 最近外卖动态\n用户刚通过手机外卖 App 下单了${food}（${latest.target || '自己'}）。${relevant ? '这笔订单与你直接有关，你清楚商品和订单状态；' : ''}预计送达时间是 ${etaText}，现在订单${delivered ? '已到预计送达时间，可以自然提醒取餐或关心口味' : '仍在配送中，绝不能声称已经收到、送达或吃完'}。你也可以在日常对话里自然地提出给用户点外卖：先聊口味和想吃什么；地址沿用已知且未变的收货地址，不要反复确认；支付由你处理，不需要询问支付方式。只有在用户明确答应下单后，先自然说一句话，再单独输出 ` + '`[[TAKEOUT_ORDER: 商品名|价格|规格; 商品名|价格|规格]]`' + `。例如 ` + '`[[TAKEOUT_ORDER: 生椰拿铁|19|三分糖、少冰; 芝士蛋糕|22|标准份]]`' + `。程序会代你通过外卖 App 创建真实订单、小票和送达提醒；不要输出 [html] 外卖卡片。没有明确同意时绝不生成订单。\n\n`;
-                    }
                 }
             } catch { /* localStorage unavailable or malformed */ }
             try {
@@ -331,7 +327,7 @@ export const ContextBuilder = {
                 const savedAddresses = addressBook.entries.slice(0, 8).map(entry => `${entry.name}（${entry.address}）`).join('、') || '无';
                 context += `### 外卖收货地址\n用户当前默认收货地址是「${currentAddress.name}：${currentAddress.address}」。已保存地址：${savedAddresses}。只有当用户明确说自己在旅行、出差、酒店、外地、搬家或当前不在默认地址时，才在准备下单前自然确认一次“这单送到哪里”；不要每次点外卖都问。确认时可让用户直接输入新地址，或从上述已保存地址中选择。用户确认后，先自然回应，再单独输出 ` + '`[[TAKEOUT_ADDRESS: 地址名称|显示地址|real或virtual|虚拟地址映射]]`' + `；选择已保存地址时只输出 ` + '`[[TAKEOUT_ADDRESS: 已保存地址名称]]`' + `。程序会保存/切换用户地址。只有地址已明确且用户同意下单时，才输出订单标记。\n\n`;
             } catch { /* address book is optional and must never block chat */ }
-            context += `### 外卖互动（执行规则）\n你可以自然提出给用户点外卖。地址未变化就沿用，不反复确认；支付由你处理，不询问支付方式。只要用户已经明确同意你为 ta 点单（如“好”“要”“就这个”“帮我点”），你必须在同一条回复中先自然回应一句，再单独输出 ` + '`[[TAKEOUT_ORDER: 具体餐品名|价格|口味和规格; 具体餐品名|价格|口味和规格]]`' + `，不能只说“我去点”，不能改用 [html] 卡片，也不能省略标记。餐品名必须是用户刚刚说想吃的完整东西（例如“生椰拿铁”），口味如“少冰半糖”只能写在第三栏，不能单独作为餐品。这个标记会把你已经点好的外卖整理成聊天里的小票；你只需要自然地认为自己已经下单完成。没有明确同意时绝不生成订单。\n\n`;
+            context += `### 外卖互动\n你可以在日常对话中自然提出给用户点外卖。地址未变化就沿用，不反复问地址；支付由你处理，不询问支付方式。用户明确答应下单后，先自然回应一句，再单独输出 ` + '`[[TAKEOUT_ORDER: 商品名|价格|规格; 商品名|价格|规格]]`' + `。例如 ` + '`[[TAKEOUT_ORDER: 生椰拿铁|19|三分糖、少冰; 芝士蛋糕|22|标准份]]`' + `。程序会通过外卖 App 创建统一订单小票、保存订单并安排送达提醒；不要自己输出 [html] 外卖卡片。没有明确同意时绝不生成订单。\n\n`;
             context += `### 表达底线 (Anti-Filler)\n当你觉得"没什么可说"的时候，不要用空泛的感慨、万能句式或华丽排比去填充——那是没话找话，对方一眼就能看出来。素材永远比你以为的多：对方的用词、ta 怎么说的、ta 没说的部分、此刻的情境、你们的过去、你心里闪过的念头——挑一两条往深处走就够了。宁可一个具体的小细节，不要一句谁都能说的话。\n\n`;
         }
 
