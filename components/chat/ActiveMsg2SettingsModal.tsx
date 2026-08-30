@@ -543,6 +543,12 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
           </div>
         ) : null}
 
+        {enabled && char.activeMsg2Config?.lastError ? (
+          <div className="bg-rose-50 border border-rose-200 rounded-2xl px-4 py-3 text-xs leading-relaxed text-rose-600">
+            ⚠ {char.activeMsg2Config.lastError}
+          </div>
+        ) : null}
+
         {enabled && tasks.length > 0 ? (
           <div>
             <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 block pl-1">
