@@ -32,14 +32,15 @@ const ORDER_STORAGE_KEY = 'nmj-takeout-orders';
 const escapeHtml = (value: string) => value.replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char] || char));
 
 /**
- * 聊天模型偶尔会漏掉 [[TAKEOUT_ORDER]]，但它自然地说出“已经给你点好了”时，
- * 仍必须落回外卖 App 的统一订单链路。这里刻意只识别「用户明确要了食物」+「角色
- * 明确完成下单」两个条件，不把“要不要点 / 我去看看”误当成订单。
+ * 这是纯本地角色互动：用户明确让角色点餐后，角色的下一次回复就应落回外卖 App
+ * 的统一订单链路，不依赖模型是否恰好输出隐藏标记或某句“已下单”。
  */
 function findRecentFoodRequest(conversation: Array<{ role?: string; content?: string }>): string | null {
   const userMessages = conversation
     .filter(message => message.role === 'user')
-    .slice(-8)
+    // 只取当前这一次用户发言：本地订单应在紧随点餐请求的角色回复中生成，
+    // 不能在之后的普通聊天里因为旧请求重复落单。
+    .slice(-1)
     .reverse()
     .map(message => String(message.content || '').replace(/\s+/g, ' ').trim())
     .filter(Boolean);
@@ -57,17 +58,6 @@ function findRecentFoodRequest(conversation: Array<{ role?: string; content?: st
     }
   }
   return null;
-}
-
-function hasCompletedTakeoutOrder(content: string): boolean {
-  const normalized = content.replace(/\s+/g, ' ');
-  return [
-    // “给你点了”是最常见的自然说法；有用户刚提出的具体餐品这个前置条件，
-    // 不会将无对象的闲聊误判为订单。
-    /(?:给你|替你|帮你).{0,14}(?:点好了?|点上了?|点了|下好了?单|下单了?|买好了?|买了|安排好了?|安排了|叫好了?|叫了|按下去了)/,
-    /(?:已经|刚刚|直接|这就).{0,16}(?:点好了?|点上了?|点了|下好了?单|下单了?|买好了?|买了|安排好了?|安排了|叫好了?|叫了|按下去了)/,
-    /(?:订单|外卖).{0,12}(?:已经|已).{0,8}(?:下单|点好|安排好|提交)/,
-  ].some(pattern => pattern.test(normalized));
 }
 
 export function saveTakeoutOrder(order: TakeoutOrder): void {
@@ -129,12 +119,10 @@ export function extractRoleTakeoutOrders(content: string, conversation: Array<{ 
     return '';
   }).replace(/\n{3,}/g, '\n\n').trim();
 
-  // 正常路径由模型给出结构标记；但角色常会自然地说“给你点了”，而漏掉隐藏标记。
-  // 此时只在用户最近明确提出餐品、且角色明确表示已完成下单时兜底创建订单，
-  // 不会把“我去点”“要不要点”这种未完成意图误判成订单。
+  // 正常路径由模型给出结构标记。模型漏标记时，用户刚明确让角色点餐就直接创建本地
+  // 剧情订单；不等待“已下单”等额外完成词，也不涉及任何真实支付或第三方平台。
   const requestedFood = findRecentFoodRequest(conversation);
-  const orderCompleted = hasCompletedTakeoutOrder(cleanedContent);
-  if (orders.length === 0 && requestedFood && orderCompleted) {
+  if (orders.length === 0 && requestedFood) {
     const specs = cleanedContent.match(/(?:正常冰|少冰|去冰|热饮|全糖|半糖|少糖|无糖|三分糖|五分糖|七分糖|大杯|中杯|小杯|标准份|加量)/g) || [];
     const foodName = requestedFood.trim();
     if (foodName) {
