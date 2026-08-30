@@ -141,12 +141,12 @@ export async function extractCharacterIdentityProfile(
         ],
       }],
       temperature: 0,
-      max_tokens: 700,
       stream: false,
     }),
   }, 1, 60_000, { appName: '角色设定', purpose: '提取生图身份特征' });
 
-  const profile = cleanDescription(extractContent(data));
+  // 身份锚点会被用户复核和编辑，不在前端二次截断；避免长发细节等刚好落在截断点后丢失。
+  const profile = extractContent(data).replace(/\s+/g, ' ').trim();
   if (!profile) throw new Error('识图 API 没有返回可用的身份特征');
   return profile;
 }
