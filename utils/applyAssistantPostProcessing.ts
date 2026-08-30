@@ -25,10 +25,10 @@
  * Phase 2 会让 worker 端把识别出的副作用 (RECALL/SEARCH/...) 结构化传 directives, 这里只重放。
  */
 
-import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, RealtimeConfig, GroupProfile } from '../types';
+import { CharacterProfile, UserProfile, Message, Emoji, EmojiCategory, RealtimeConfig, GroupProfile, ActiveMsg2TaskRecord } from '../types';
 import { DB } from './db';
 import { ChatParser, type FrozenMusicSong } from './chatParser';
-import { resolveCharTimeZone } from './timezone';
+import { nowInTimeZone, resolveCharTimeZone } from './timezone';
 import { NotionManager, FeishuManager, XhsNote } from './realtimeContext';
 import { enqueuePendingDiary, removePendingDiary } from './pendingDiary';
 import { parseXhsCount, XhsMcpClient } from './xhsMcpClient';
@@ -54,6 +54,9 @@ import { normalizeAssistantActionFormatting } from './assistantActionFormat';
 import { markAmsgStateDirty } from './amsgStateSync';
 import { announceScheduleChanges, applyAssistantScheduleChanges } from './scheduleChange';
 import { isBlobRef } from './blobRef';
+import { ActiveMsgClient } from './activeMsgClient';
+import { applyScheduledTask } from './amsg2Tasks';
+import { buildTakeoutOrderCard, extractRoleTakeoutOrders, saveTakeoutOrder } from './takeoutOrder';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -2179,7 +2182,80 @@ export async function applyAssistantPostProcessing(
         return merged;
     };
 
-    // ─── Step 5: HTML 卡片 ───
+    // ─── Step 5: 角色外卖订单 ───
+    // 角色不能自己画一张看似订单的普通 HTML；确认下单后输出紧凑标记，由外卖 App
+    // 生成固定小票、写入订单记录并安排送达提醒。这样跟用户在 App 内下单是同一条业务链。
+    const roleTakeout = extractRoleTakeoutOrders(aiContent);
+    if (roleTakeout.orders.length > 0) {
+        aiContent = roleTakeout.cleanedContent;
+        for (const order of roleTakeout.orders) {
+            saveTakeoutOrder(order);
+            const card = buildTakeoutOrderCard(order);
+            await persistMessage({
+                charId: char.id,
+                role: 'assistant',
+                type: 'html_card',
+                content: '[HTML卡片] 外卖订单已提交',
+                metadata: mergeAssistantMeta({
+                    htmlSource: card.html,
+                    htmlTextPreview: card.textPreview,
+                    source: 'takeout',
+                    order,
+                    placedBy: 'character',
+                    ...(mcdInheritMeta || {}),
+                }),
+            } as any);
+            setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+
+            const config = char.activeMsg2Config;
+            if (!config?.enabled) {
+                addToast('外卖订单已创建；主动消息 2.0 未开启，无法自动安排送达提醒', 'info');
+                continue;
+            }
+            if (!groups || !realtimeConfig) {
+                addToast('外卖订单已创建；当前会话缺少主动消息配置，未安排送达提醒', 'info');
+                continue;
+            }
+            try {
+                const wallClock = nowInTimeZone(resolveCharTimeZone(char), new Date(order.etaAt));
+                const sendAt = `${wallClock.getFullYear()}-${String(wallClock.getMonth() + 1).padStart(2, '0')}-${String(wallClock.getDate()).padStart(2, '0')}T${String(wallClock.getHours()).padStart(2, '0')}:${String(wallClock.getMinutes()).padStart(2, '0')}:00`;
+                const promptHint = `现在才是你为用户点的外卖预计送达时刻。订单商品：${order.items.map(item => item.name).join('、')}。自然提醒用户取餐；此前绝不能声称已经收到、送达或吃完。`;
+                const result = await ActiveMsgClient.scheduleCharacterTask({
+                    char,
+                    config,
+                    task: { mode: 'prompted', firstSendTime: sendAt, recurrenceType: 'none', promptHint, expirePolicy: 'force', selfScheduled: false },
+                    userProfile,
+                    groups,
+                    realtimeConfig,
+                    apiConfig: effectiveApi,
+                });
+                const task: ActiveMsg2TaskRecord = {
+                    taskUuid: result.uuid,
+                    clientTaskId: result.clientTaskId,
+                    mode: 'prompted',
+                    firstSendTime: result.firstSendAt,
+                    recurrenceType: 'none',
+                    promptHint,
+                    expirePolicy: 'force',
+                    anchorLastUserMsgAt: result.anchorMs,
+                    source: 'character',
+                    status: 'scheduled',
+                    createdAt: Date.now(),
+                };
+                const updatedChar: CharacterProfile = {
+                    ...char,
+                    activeMsg2Config: { ...config, tasks: applyScheduledTask(config.tasks || [], task, {}, Date.now()), lastSyncedAt: Date.now(), lastError: undefined },
+                };
+                await DB.saveCharacter(updatedChar);
+                if (groups) markAmsgStateDirty({ char: updatedChar, userProfile, groups, realtimeConfig });
+            } catch (error) {
+                console.error('[Takeout] character order reminder schedule failed', error);
+                addToast('订单已创建，但送达提醒未能安排；请检查主动消息 2.0 配置', 'error');
+            }
+        }
+    }
+
+    // ─── Step 5.1: 普通 HTML 卡片 ───
     if ((char as any).htmlModeEnabled && /\[html\]/i.test(aiContent)) {
         const { blocks, cleanedContent } = extractHtmlBlocks(aiContent);
         for (const blk of blocks) {
