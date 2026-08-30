@@ -24,6 +24,7 @@ export type TakeoutOrder = {
   fee: number;
   etaAt: number;
   placedBy?: 'user' | 'character';
+  fulfillment?: 'simulated' | 'meituan_pending';
 };
 
 const ORDER_STORAGE_KEY = 'nmj-takeout-orders';
@@ -47,13 +48,18 @@ export function takeoutCardTarget(target: string): string {
 }
 
 export function buildTakeoutOrderCard(order: TakeoutOrder): { html: string; textPreview: string } {
+  const isMeituanPending = order.fulfillment === 'meituan_pending';
   const arrivalText = new Date(order.etaAt).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
   const cardTarget = takeoutCardTarget(order.target);
   const rows = order.items.map(item => `<div style="display:flex;justify-content:space-between;gap:12px;margin-top:10px;font-size:13px;line-height:1.45"><span style="flex:1">${escapeHtml(item.name)}</span><b style="white-space:nowrap;font-weight:600">¥${item.price}</b></div>`).join('');
   const subtotal = order.items.reduce((sum, item) => sum + item.price, 0);
   const total = subtotal + order.fee;
-  const html = `<div style="width:278px;box-sizing:border-box;overflow:hidden;border-radius:5px;background:#fffdfa;color:#242424;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 8px 22px rgba(56,40,22,.12)"><div style="height:7px;background:repeating-linear-gradient(135deg,#f5e7d3 0 5px,#fffdfa 5px 10px)"></div><div style="padding:16px 17px 14px"><div style="display:flex;align-items:center;justify-content:space-between"><div style="font-size:10px;letter-spacing:1.8px;color:#a17c5b">外卖 · 电子小票</div><div style="border:1px solid #e8c9a4;border-radius:999px;padding:3px 7px;font-size:10px;color:#c66b2b">已下单</div></div><div style="margin-top:9px;font-size:19px;font-weight:750;letter-spacing:.2px">外卖订单</div><div style="margin-top:4px;font-size:11px;color:#84786d">${escapeHtml(cardTarget)} · 预计 ${arrivalText} 送达</div><div style="margin-top:12px;border-top:1px dashed #dbcdbd"></div><div style="padding:2px 0 4px">${rows}</div><div style="border-top:1px dashed #dbcdbd"></div><div style="margin-top:10px;display:flex;justify-content:space-between;font-size:12px;color:#64594f"><span>商品小计</span><span>¥${subtotal}</span></div><div style="margin-top:7px;display:flex;justify-content:space-between;font-size:12px;color:#64594f"><span>配送费</span><span>¥${order.fee}</span></div><div style="margin-top:12px;display:flex;align-items:baseline;justify-content:space-between"><span style="font-size:12px;color:#76695f">实付</span><span style="font-size:21px;font-weight:800;color:#e76522">¥${total}</span></div><div style="margin-top:12px;padding-top:10px;border-top:1px dashed #dbcdbd;font-size:11px;line-height:1.55;color:#8c8177">送至：${escapeHtml(order.address)}<br/>预计约 ${order.deliveryMinutes} 分钟送达，请留意取餐提醒</div></div><div style="height:7px;background:repeating-linear-gradient(45deg,#f5e7d3 0 5px,#fffdfa 5px 10px)"></div></div>`;
-  return { html, textPreview: `外卖订单：${cardTarget}；商品：${order.items.map(item => item.name).join('、')}；预计 ${arrivalText} 送达（${order.deliveryMinutes}分钟后），当前尚未送达。配送费${order.fee}元。` };
+  const status = isMeituanPending ? '待在美团确认' : '已下单';
+  const note = isMeituanPending ? `送至：${escapeHtml(order.address)}<br/>请在美团外卖确认门店、价格和配送时间后完成付款` : `送至：${escapeHtml(order.address)}<br/>预计约 ${order.deliveryMinutes} 分钟送达，请留意取餐提醒`;
+  const deliveryRow = isMeituanPending ? `<div style="margin-top:7px;font-size:12px;color:#64594f">实际价格、优惠和配送费以美团页面为准</div>` : `<div style="margin-top:7px;display:flex;justify-content:space-between;font-size:12px;color:#64594f"><span>配送费</span><span>¥${order.fee}</span></div>`;
+  const totalRow = isMeituanPending ? `<div style="margin-top:12px;font-size:12px;color:#76695f">预估商品小计 ¥${subtotal}</div>` : `<div style="margin-top:12px;display:flex;align-items:baseline;justify-content:space-between"><span style="font-size:12px;color:#76695f">实付</span><span style="font-size:21px;font-weight:800;color:#e76522">¥${total}</span></div>`;
+  const html = `<div style="width:278px;box-sizing:border-box;overflow:hidden;border-radius:5px;background:#fffdfa;color:#242424;font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;box-shadow:0 8px 22px rgba(56,40,22,.12)"><div style="height:7px;background:repeating-linear-gradient(135deg,#f5e7d3 0 5px,#fffdfa 5px 10px)"></div><div style="padding:16px 17px 14px"><div style="display:flex;align-items:center;justify-content:space-between"><div style="font-size:10px;letter-spacing:1.8px;color:#a17c5b">外卖 · ${isMeituanPending ? '美团待确认单' : '电子小票'}</div><div style="border:1px solid #e8c9a4;border-radius:999px;padding:3px 7px;font-size:10px;color:#c66b2b">${status}</div></div><div style="margin-top:9px;font-size:19px;font-weight:750;letter-spacing:.2px">外卖订单</div><div style="margin-top:4px;font-size:11px;color:#84786d">${escapeHtml(cardTarget)}${isMeituanPending ? ' · 角色为你挑好了' : ` · 预计 ${arrivalText} 送达`}</div><div style="margin-top:12px;border-top:1px dashed #dbcdbd"></div><div style="padding:2px 0 4px">${rows}</div><div style="border-top:1px dashed #dbcdbd"></div><div style="margin-top:10px;display:flex;justify-content:space-between;font-size:12px;color:#64594f"><span>商品小计</span><span>¥${subtotal}</span></div>${deliveryRow}${totalRow}<div style="margin-top:12px;padding-top:10px;border-top:1px dashed #dbcdbd;font-size:11px;line-height:1.55;color:#8c8177">${note}</div></div><div style="height:7px;background:repeating-linear-gradient(45deg,#f5e7d3 0 5px,#fffdfa 5px 10px)"></div></div>`;
+  return { html, textPreview: isMeituanPending ? `角色为你挑选了外卖：${order.items.map(item => item.name).join('、')}；送至${order.address}。此单尚未在美团外卖完成下单，实际门店、价格、配送费和送达时间以美团页面为准。` : `外卖订单：${cardTarget}；商品：${order.items.map(item => item.name).join('、')}；预计 ${arrivalText} 送达（${order.deliveryMinutes}分钟后），当前尚未送达。配送费${order.fee}元。` };
 }
 
 /**
@@ -83,7 +89,7 @@ export function extractRoleTakeoutOrders(content: string): { cleanedContent: str
     const createdAt = Date.now();
     const deliveryMinutes = 25 + Math.floor(Math.random() * 11);
     const fee = 3 + Math.floor(Math.random() * 5);
-    orders.push({ id: createdAt, target: '用户', items, address: String(location), createdAt, deliveryMinutes, fee, etaAt: createdAt + deliveryMinutes * 60_000, placedBy: 'character' });
+    orders.push({ id: createdAt, target: '用户', items, address: String(location), createdAt, deliveryMinutes, fee, etaAt: createdAt + deliveryMinutes * 60_000, placedBy: 'character', fulfillment: 'meituan_pending' });
     return '';
   }).replace(/\n{3,}/g, '\n\n').trim();
   return { cleanedContent, orders };
