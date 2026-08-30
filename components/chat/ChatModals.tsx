@@ -9,6 +9,7 @@ import { isTranslationLangPreset, normalizeTranslationLangLabel, TRANSLATION_LAN
 import type { ContextRangeMode, ContextRangeSnapshot } from '../../utils/chatContextRange';
 import { trackEvent } from '../../utils/analytics';
 import { CANTONESE_VOICE_SUPPORT_NOTE, VOICE_LANGUAGE_OPTIONS } from '../../utils/voiceLanguage';
+import { chatMessageFuzzyMatchesKeyword } from '../../utils/chatMessageSearch';
 
 interface ChatModalsProps {
     modalType: string;
@@ -313,22 +314,6 @@ const ChatModals: React.FC<ChatModalsProps> = ({
         }
         // 范围内直接设置；范围外由上层直接提示先调整拉杆。
         onSetHistoryStart(msgId);
-    };
-
-    // 模糊匹配：query 的所有字符按顺序在 content 里出现即算命中（大小写不敏感）。
-    // 中文按字符级 subsequence 匹配，英文同理。
-    const fuzzyMatch = (content: string, query: string): boolean => {
-        if (!query) return true;
-        const c = content.toLowerCase();
-        const q = query.toLowerCase();
-        if (c.includes(q)) return true;
-        let idx = 0;
-        for (const ch of q) {
-            const found = c.indexOf(ch, idx);
-            if (found < 0) return false;
-            idx = found + 1;
-        }
-        return true;
     };
 
     // 高亮命中的连续子串（优先），否则不高亮（subsequence 命中时高亮意义不大）。
@@ -917,7 +902,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                     {(() => {
                         const reversed = allHistoryMessages.slice().reverse();
                         const query = historySearch.trim();
-                        const filtered = query ? reversed.filter(m => fuzzyMatch(m.content || '', query)) : reversed;
+                        const filtered = query ? reversed.filter(message => chatMessageFuzzyMatchesKeyword(message, query)) : reversed;
                         const limited = query ? filtered.slice(0, HISTORY_SEARCH_MAX) : filtered;
                         const totalPages = Math.max(1, Math.ceil(limited.length / HISTORY_PAGE_SIZE));
                         const pageMessages = limited.slice(historyPage * HISTORY_PAGE_SIZE, (historyPage + 1) * HISTORY_PAGE_SIZE);
