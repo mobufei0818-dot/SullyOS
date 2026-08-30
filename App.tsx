@@ -17,6 +17,19 @@ const App: React.FC = () => {
   React.useEffect(() => {
     // 常驻监听前后台 / 焦点 / 网络事件；抓不抓由 devDebug 的 lifecycle 类勾选决定
     installDevDebugLifecycleCapture();
+
+    // 外卖模块已移除。清掉旧版本留下的本地业务数据，避免它继续影响聊天上下文或占用存储。
+    try {
+      [
+        'nmj-takeout-orders',
+        'nmj-takeout-catalog-v2',
+        'nmj-takeout-address-book-v1',
+        'nmj-takeout-location',
+        'nmj-takeout-api',
+        'nmj-takeout-secondary-api',
+        'nmj-takeout-role-order-intents',
+      ].forEach(key => localStorage.removeItem(key));
+    } catch { /* private mode or unavailable storage: no action needed */ }
   }, []);
 
   const useAbsoluteShell = typeof window !== 'undefined' && isIOSStandaloneWebApp();
