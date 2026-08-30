@@ -30,6 +30,7 @@ export type TakeoutOrder = {
 
 const ORDER_STORAGE_KEY = 'nmj-takeout-orders';
 const escapeHtml = (value: string) => value.replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char] || char));
+const STORE_PREFIX_RE = /^(?:古茗|蜜雪冰城|霸王茶姬|喜茶|奈雪(?:的茶)?|瑞幸|星巴克|库迪|茶百道|沪上阿姨|一点点|coco|书亦烧仙草|益禾堂|快乐柠檬)\s*的\s*/i;
 
 /**
  * 这是纯本地角色互动：用户明确让角色点餐后，角色的下一次回复就应落回外卖 App
@@ -53,6 +54,8 @@ function findRecentFoodRequest(conversation: Array<{ role?: string; content?: st
       const candidate = text.match(pattern)?.[1]
         ?.replace(/^(?:一(?:份|杯|个|碗|盒|瓶))\s*/, '')
         .replace(/^(?:的|个|份)\s*/, '')
+        // 品牌/店名属于搜索线索，不属于小票上的商品名。
+        .replace(STORE_PREFIX_RE, '')
         .trim();
       if (candidate) return candidate;
     }
