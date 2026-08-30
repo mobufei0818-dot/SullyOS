@@ -2216,21 +2216,23 @@ export async function applyAssistantPostProcessing(
     // ─── Step 5.5: 聊天照片卡 ───
     // 用原版后处理管线解析专用结构化标签，而不是把可点击逻辑塞进 HTML iframe。
     // 存成 image 消息，后续可在原位被真实图片替换，主动消息/即时推送同样会走这里。
-    if ((char as any).chatImageEnabled && /<照片>/i.test(aiContent)) {
-        const photoRe = /<照片>\s*([\s\S]*?)\s*<\/照片>/gi;
+    if ((char as any).chatImageEnabled && /<(?:角色)?照片>/i.test(aiContent)) {
+        // <角色照片> 明确要求角色入镜；普通 <照片> 是场景/物品照，绝不自动塞角色外貌。
+        // 这比从自然语言猜“咖啡/窗外/自拍”可靠，也能让角色自己有意识地选择镜头类型。
+        const photoRe = /<(角色)?照片>\s*([\s\S]*?)\s*<\/(?:角色)?照片>/gi;
         let match: RegExpExecArray | null;
         while ((match = photoRe.exec(aiContent))) {
-            const prompt = match[1].trim();
+            const prompt = match[2].trim();
             if (!prompt) continue;
             await persistMessage({
                 charId: char.id, role: 'assistant', type: 'image', content: '',
-                metadata: mergeAssistantMeta({ imageGeneration: { status: 'pending', prompt, createdAt: Date.now() }, ...(mcdInheritMeta || {}) }),
+                metadata: mergeAssistantMeta({ imageGeneration: { status: 'pending', prompt, includeCharacter: !!match[1], createdAt: Date.now() }, ...(mcdInheritMeta || {}) }),
             } as any);
             setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
         }
         aiContent = aiContent.replace(photoRe, '').trim();
-    } else if (/<照片>/i.test(aiContent)) {
-        aiContent = aiContent.replace(/<照片>[\s\S]*?<\/照片>/gi, '[照片]').trim();
+    } else if (/<(?:角色)?照片>/i.test(aiContent)) {
+        aiContent = aiContent.replace(/<(?:角色)?照片>[\s\S]*?<\/(?:角色)?照片>/gi, '[照片]').trim();
     }
 
     // ─── Step 6: 展示本轮回复 (二轮结果 B / 无二轮时的单轮回复) ───
