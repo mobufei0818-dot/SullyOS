@@ -19,6 +19,8 @@ export type TakeoutOrder = {
   target: string;
   items: TakeoutOrderItem[];
   address: string;
+  deliveryDetail?: string;
+  deliveryNote?: string;
   createdAt: number;
   deliveryMinutes: number;
   fee: number;
@@ -89,7 +91,8 @@ export function extractRoleTakeoutOrders(content: string): { cleanedContent: str
     const createdAt = Date.now();
     const deliveryMinutes = 25 + Math.floor(Math.random() * 11);
     const fee = 3 + Math.floor(Math.random() * 5);
-    orders.push({ id: createdAt, target: '用户', items, address: String(location), createdAt, deliveryMinutes, fee, etaAt: createdAt + deliveryMinutes * 60_000, placedBy: 'character', fulfillment: 'meituan_pending' });
+    const userAddress = resolveTakeoutAddress(loadTakeoutAddressBook(), { kind: 'user' });
+    orders.push({ id: createdAt, target: '用户', items, address: String(location), deliveryDetail: userAddress.detail, deliveryNote: userAddress.note, createdAt, deliveryMinutes, fee, etaAt: createdAt + deliveryMinutes * 60_000, placedBy: 'character', fulfillment: 'meituan_pending' });
     return '';
   }).replace(/\n{3,}/g, '\n\n').trim();
   return { cleanedContent, orders };
