@@ -6,6 +6,7 @@ import { ActiveMsgClient } from '../utils/activeMsgClient';
 import { applyScheduledTask } from '../utils/amsg2Tasks';
 import { safeFetchJson } from '../utils/safeApi';
 import { nowInTimeZone, resolveCharTimeZone } from '../utils/timezone';
+import { buildTakeoutOrderCard, saveTakeoutOrder } from '../utils/takeoutOrder';
 import type { APIConfig, ActiveMsg2TaskRecord, CharacterProfile } from '../types';
 
 type Category = '美食' | '甜点饮品' | '超市便利' | '蔬菜水果' | '看病买药' | '早餐' | '拼好饭' | '跑腿';
@@ -183,16 +184,12 @@ export default function TakeoutApp() {
   const pay = async (target: string) => {
     const deliveryMinutes = 25 + Math.floor(Math.random() * 11);
     const fee = 3 + Math.floor(Math.random() * 5);
-    const order = { id: Date.now(), target, items: cart, address: location.address, createdAt: Date.now(), deliveryMinutes, fee, etaAt: Date.now() + deliveryMinutes * 60000 };
-    const prior = JSON.parse(localStorage.getItem('nmj-takeout-orders') || '[]');
-    localStorage.setItem('nmj-takeout-orders', JSON.stringify([order, ...prior]));
+    const order = { id: Date.now(), target, items: cart, address: location.address, createdAt: Date.now(), deliveryMinutes, fee, etaAt: Date.now() + deliveryMinutes * 60000, placedBy: 'user' as const };
+    saveTakeoutOrder(order);
     const targetChar = characters.find(c => target === c.name || target === `${c.name} 代付`);
-    const cardTarget = target === '自己' ? '为自己下单' : target.endsWith('代付') ? `${target} · 已代付` : `送给 ${target}`;
-    const rows = cart.map(x => `<div style="display:flex;justify-content:space-between;margin-top:6px"><span>${x.name}</span><b>¥${x.price}</b></div>`).join('');
-    const arrivalText = new Date(order.etaAt).toLocaleString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
-    const html = `<div style="width:270px;padding:18px;border-radius:16px;background:linear-gradient(135deg,#fff7df,#fff);font-family:system-ui;color:#4b3424"><div style="font-size:11px;letter-spacing:2px;opacity:.55">TAKEOUT · ORDER</div><div style="font-size:19px;font-weight:700;margin-top:5px">外卖订单已提交</div><div style="font-size:12px;margin-top:6px;color:#8a6b55">${cardTarget} · 预计 ${arrivalText} 送达（约 ${deliveryMinutes} 分钟）</div><div style="margin-top:12px;padding-top:8px;border-top:1px solid #f0dfc4">${rows}</div><div style="display:flex;justify-content:space-between;margin-top:12px;font-size:13px"><span>配送费 ¥${fee}</span><b>合计 ¥${cart.reduce((n,x)=>n+x.price,0)+fee}</b></div><div style="font-size:11px;margin-top:10px;opacity:.58">送至：${location.address}</div></div>`;
+    const { html, textPreview } = buildTakeoutOrderCard(order);
     const recipientId = targetChar?.id || activeCharacterId;
-    if (recipientId) await DB.saveMessage({ charId: recipientId, role: 'user', type: 'html_card', content: '[HTML卡片] 外卖订单已提交', metadata: { htmlSource: html, htmlTextPreview: `外卖订单：${cardTarget}；商品：${cart.map(x => x.name).join('、')}；预计 ${arrivalText} 送达（${deliveryMinutes}分钟后），当前尚未送达。配送费${fee}元。`, source: 'takeout', order } });
+    if (recipientId) await DB.saveMessage({ charId: recipientId, role: 'user', type: 'html_card', content: '[HTML卡片] 外卖订单已提交', metadata: { htmlSource: html, htmlTextPreview: textPreview, source: 'takeout', order } });
     if (targetChar) await scheduleTakeoutArrival(targetChar, order);
     setCart([]); setSelectedCartIds([]); setCheckout(false);
     addToast(target === '自己' ? `订单已创建，约 ${deliveryMinutes} 分钟送达` : `订单已创建，角色会在预计送达时提醒取餐`, 'success');
