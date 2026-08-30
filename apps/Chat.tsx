@@ -171,6 +171,7 @@ const Chat: React.FC = () => {
     const [input, setInput] = useState('');
     const [showPanel, setShowPanel] = useState<'none' | 'actions' | 'emojis' | 'chars'>('none');
     const [collaborationOpen, setCollaborationOpen] = useState(false);
+    const [collaborationPreviewAssetId, setCollaborationPreviewAssetId] = useState<string | null>(null);
     const [memoryRepairOpen, setMemoryRepairOpen] = useState(false);
     const [favoritesOpen, setFavoritesOpen] = useState(false);
     
@@ -3228,6 +3229,13 @@ const Chat: React.FC = () => {
             addToast('这条文件消息缺少原始文件引用', 'error');
             return;
         }
+        const isInstallable = msg.metadata?.collaborationAttachmentKind === 'installable'
+            || String(msg.metadata?.mimeType || '').includes('vnd.sullyos.installable');
+        if (isInstallable) {
+            setCollaborationPreviewAssetId(assetId);
+            setCollaborationOpen(true);
+            return;
+        }
         try {
             const blob = await CollaborationStore.getAsset(assetId);
             if (!blob) {
@@ -3246,6 +3254,10 @@ const Chat: React.FC = () => {
             addToast(error?.message || '文件打开失败', 'error');
         }
     }, [addToast, char?.name]);
+
+    const handleCollaborationPreviewHandled = useCallback(() => {
+        setCollaborationPreviewAssetId(null);
+    }, []);
 
     // 协同工作是独立 sidecar：只有用户点「发送给 ChatApp」时才通过这个窄桥写入主消息表。
     // 其它协同会话、提示词、API 与文件都留在独立数据库，不进入主聊天 pipeline。
@@ -4782,7 +4794,9 @@ const Chat: React.FC = () => {
                         recentChatMessages={messages}
                         realtimeConfig={realtimeConfig}
                         chatCollaborationEnabled={!!char.chatCollaborationEnabled}
-                        onClose={() => setCollaborationOpen(false)}
+                        requestedPreviewAssetId={collaborationPreviewAssetId}
+                        onRequestedPreviewHandled={handleCollaborationPreviewHandled}
+                        onClose={() => { setCollaborationOpen(false); setCollaborationPreviewAssetId(null); }}
                         onSendToChat={handleCollaborationTransfer}
                         onInstallArtifact={handleCollaborationInstall}
                         onArchiveToMemory={handleCollaborationArchiveToMemory}
