@@ -3035,19 +3035,7 @@ const MessageItem = React.memo(({
                 </div>
             );
         }
-        const order = meta.order as { fulfillment?: string; items?: Array<{ name?: string }>; address?: string; deliveryDetail?: string; deliveryNote?: string } | undefined;
-        // 旧卡片/角色预设生成的卡片可能没有 source、fulfillment 两个新字段。
-        // 外卖 App 的订单卡有稳定的正文指纹，因此角色消息只要是外卖订单，就统一给入口；
-        // 不再让一段可丢失的元数据决定按钮是否存在。
-        const roleTakeoutHtml = m.role === 'assistant' && (meta.source === 'takeout' || /外卖订单|角色为你下单|美团外卖/.test(html));
-        const orderText = order
-            ? `美团外卖下单参考\n搜索词：${(order.items || []).map(item => item.name).filter(Boolean).join('、')}\n已选商品：${(order.items || []).map(item => item.name).filter(Boolean).join('、')}\n收货地址：${[order.address, order.deliveryDetail].filter(Boolean).join(' ')}${order.deliveryNote ? `\n配送备注：${order.deliveryNote}` : ''}`
-            : String(meta.meituanSearchText || '美团外卖下单参考');
-        const meituanAction = roleTakeoutHtml
-            ? { label: '去美团外卖 App 下单', url: /Android/i.test(navigator.userAgent) ? 'intent://waimai.meituan.com/#Intent;scheme=meituanwaimai;package=com.sankuai.meituan.takeoutnew;end' : 'meituanwaimai://', copyText: orderText }
-            : undefined;
-        // 外链按钮放在 sandbox iframe 外，仅在角色给用户的外卖卡上按需显示。
-        return commonLayout(<HtmlCard html={html} action={meituanAction} />);
+        return commonLayout(<HtmlCard html={html} />);
     }
 
     if (m.type === 'social_card' && m.metadata?.post) {
