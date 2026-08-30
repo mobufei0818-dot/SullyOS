@@ -2192,6 +2192,9 @@ export async function applyAssistantPostProcessing(
     // 地址确认可以发生在“下单前的一轮”对话里；即使这轮还没有订单，也必须剥掉结构标记并保留已确认的新地址。
     if (roleTakeout.cleanedContent !== aiContent) aiContent = roleTakeout.cleanedContent;
     if (roleTakeout.orders.length > 0) {
+        // 外卖订单只允许使用统一电子小票。角色偶尔会同时手写 [html] 卡片，
+        // 那张会与系统小票重复且内容不可靠，因此订单已被识别时直接丢弃。
+        aiContent = aiContent.replace(/\[html\][\s\S]*?\[\/html\]/gi, '').replace(/\n{3,}/g, '\n\n').trim();
         for (const order of roleTakeout.orders) {
             saveTakeoutOrder(order);
             const card = buildTakeoutOrderCard(order);
