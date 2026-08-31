@@ -5,6 +5,7 @@ interface RelationshipHeartCardProps {
   char: CharacterProfile;
   pulse: RelationshipPulse;
   onClose: () => void;
+  onManualUpdate: (values: { longing: number; nextThreshold: number }) => Promise<RelationshipPulse | null>;
 }
 
 const Metric: React.FC<{ label: string; value: number; color: string }> = ({ label, value, color }) => (
@@ -18,10 +19,41 @@ const formatTime = (value?: number) => value
   ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', month: 'numeric', day: 'numeric', hour12: false }).format(new Date(value))
   : '—';
 
-const RelationshipHeartCard: React.FC<RelationshipHeartCardProps> = ({ char, pulse, onClose }) => {
+const RelationshipHeartCard: React.FC<RelationshipHeartCardProps> = ({ char, pulse, onClose, onManualUpdate }) => {
   const [voiceExpanded, setVoiceExpanded] = React.useState(false);
   const [diagnosticsOpen, setDiagnosticsOpen] = React.useState(false);
+  const [manualOpen, setManualOpen] = React.useState(false);
+  const [manualLonging, setManualLonging] = React.useState(String(pulse.baselineLonging));
+  const [manualThreshold, setManualThreshold] = React.useState(String(pulse.nextThreshold ?? 30));
+  const [manualSaving, setManualSaving] = React.useState(false);
+  const [manualMessage, setManualMessage] = React.useState('');
   const voice = pulse.innerVoice || '把想说的话先悄悄留在心里。';
+  React.useEffect(() => {
+    if (manualOpen) return;
+    setManualLonging(String(pulse.baselineLonging));
+    setManualThreshold(String(pulse.nextThreshold ?? 30));
+  }, [pulse.baselineLonging, pulse.nextThreshold, manualOpen]);
+  const saveManualValues = async () => {
+    const longing = Number(manualLonging);
+    const nextThreshold = Number(manualThreshold);
+    if (!Number.isFinite(longing) || !Number.isFinite(nextThreshold) || longing < 0 || longing > 100 || nextThreshold < 0 || nextThreshold > 100) {
+      setManualMessage('请输入 0–100 之间的数字。');
+      return;
+    }
+    setManualSaving(true);
+    setManualMessage('');
+    try {
+      const next = await onManualUpdate({ longing, nextThreshold });
+      if (!next) throw new Error('后端没有返回校正后的状态。');
+      setManualLonging(String(next.baselineLonging));
+      setManualThreshold(String(next.nextThreshold ?? nextThreshold));
+      setManualMessage('已同步到后端。');
+    } catch (error) {
+      setManualMessage(error instanceof Error ? error.message : '校正失败，请稍后重试。');
+    } finally {
+      setManualSaving(false);
+    }
+  };
   return (
   <div className="fixed inset-0 z-[120] flex items-end justify-center bg-slate-900/20 px-4 pb-[calc(env(safe-area-inset-bottom)+18px)] backdrop-blur-[1px]" onClick={onClose}>
     <section
@@ -69,6 +101,29 @@ const RelationshipHeartCard: React.FC<RelationshipHeartCardProps> = ({ char, pul
           )}
         </div>
       )}
+      <div className="mx-5 mb-4 rounded-2xl border border-violet-100 bg-violet-50/45 px-3.5 py-2.5">
+        <button type="button" className="flex w-full items-center justify-between text-left" onClick={() => { setManualOpen(value => !value); setManualMessage(''); }}>
+          <span className="text-[11px] font-bold text-slate-500">手动校正</span>
+          <span className="text-[11px] font-bold text-violet-500">{manualOpen ? '收起' : '修改数值'}</span>
+        </button>
+        {manualOpen && (
+          <div className="mt-2.5">
+            <p className="mb-2 text-[10px] leading-relaxed text-slate-500">直接写入后端关系账本；思念值和下一阈值均限制为 0–100。</p>
+            <div className="grid grid-cols-2 gap-2">
+              <label className="text-[10px] font-bold text-slate-500">思念值
+                <input inputMode="numeric" type="number" min="0" max="100" value={manualLonging} onChange={event => setManualLonging(event.target.value)} className="mt-1 block w-full rounded-xl border border-violet-100 bg-white px-2.5 py-2 text-sm font-bold text-slate-700 outline-none focus:border-violet-300" />
+              </label>
+              <label className="text-[10px] font-bold text-slate-500">下一阈值
+                <input inputMode="numeric" type="number" min="0" max="100" value={manualThreshold} onChange={event => setManualThreshold(event.target.value)} className="mt-1 block w-full rounded-xl border border-violet-100 bg-white px-2.5 py-2 text-sm font-bold text-slate-700 outline-none focus:border-violet-300" />
+              </label>
+            </div>
+            <button type="button" disabled={manualSaving} onClick={() => void saveManualValues()} className="mt-2.5 w-full rounded-xl bg-violet-500 px-3 py-2 text-[11px] font-bold text-white disabled:opacity-50 active:scale-[0.99]">
+              {manualSaving ? '正在同步…' : '保存到后端'}
+            </button>
+            {manualMessage && <p className={`mt-2 text-[10px] ${manualMessage === '已同步到后端。' ? 'text-emerald-600' : 'text-rose-500'}`}>{manualMessage}</p>}
+          </div>
+        )}
+      </div>
       <div className="border-t border-white/80 bg-white/40 px-5 py-2.5 text-center text-[10px] text-slate-400">
         仅供查看 · {pulse.nextThreshold ? `下一次阈值 ${pulse.nextThreshold}` : '数值会随聊天与时间自然变化'}
       </div>
