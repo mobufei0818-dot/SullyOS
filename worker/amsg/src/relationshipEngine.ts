@@ -69,6 +69,8 @@ export interface RelationshipSyncInput {
   jealousy?: number;
   innerVoice?: string;
   promise?: { dueAt: number; kind: string };
+  /** 用户从关系卡主动校正的数值；只改关系账本，不写进聊天正文或角色设定。 */
+  manual?: { longing?: number; nextThreshold?: number };
 }
 
 export interface RelationshipEngineEnv { DB: unknown; AMSG_MASTER_KEY: string; AMSG_SERVER_TOKEN?: string; }
@@ -240,6 +242,11 @@ export const syncRelationshipState = async (env: RelationshipEngineEnv, userId: 
       state.promiseKind = input.promise.kind;
     }
   }
+  // 手动校正是 D1 账本的正式写入，不是前端展示覆写。两项都严格限制在 0–100。
+  if (Number.isFinite(input.manual?.longing)) state.longing = clamp(Number(input.manual?.longing));
+  if (Number.isFinite(input.manual?.nextThreshold)) state.nextThreshold = clamp(Math.round(Number(input.manual?.nextThreshold)));
+  // 兼容修复前可能已超过 100 的旧阈值，后续任意同步都会自然收敛。
+  state.nextThreshold = clamp(state.nextThreshold);
   await save(env, state);
   return publicState(state);
 };
@@ -296,6 +303,7 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
     // 反而会让检查永远达不到 10 分钟。Cron 专用的 lastTickAt 只在本循环成功检查后更新。
     if (state.lastTickAt && now - state.lastTickAt < 10 * 60_000) continue;
     advance(state, now);
+    state.nextThreshold = clamp(state.nextThreshold);
     state.lastTickAt = now;
     const target = Math.max(0, state.config.dailyLimit || 0);
     const minGap = minimumGapMs(state);
@@ -312,7 +320,7 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
         state.lastDispatchAt = now;
         state.lastScheduleError = undefined;
         state.lastScheduleErrorAt = undefined;
-        state.nextThreshold = Math.max(state.nextThreshold + 30, state.longing + 30);
+        state.nextThreshold = clamp(Math.max(state.nextThreshold + 30, state.longing + 30));
         state.promiseDueAt = undefined;
         state.promiseKind = undefined;
         scheduled += 1;
