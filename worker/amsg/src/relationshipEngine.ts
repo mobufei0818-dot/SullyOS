@@ -41,6 +41,11 @@ interface RelationshipRecord {
   dailyDate: string;
   dailySent: number;
   pendingTaskUuid?: string;
+  /** 保存在加密 payload 内的实际下次扫描时间，供同步时避免把既有 tick 往后推。 */
+  nextTickAt?: number;
+  /** 最近一次尝试创建原版 AMSG 任务的失败摘要；不写入聊天正文或凭据。 */
+  lastScheduleError?: string;
+  lastScheduleErrorAt?: number;
   /** 最近一次带现实后续含义的话，到了合理时间窗后仅提供一次联系机会。 */
   promiseDueAt?: number;
   promiseKind?: string;
@@ -132,18 +137,43 @@ const save = async (env: RelationshipEngineEnv, record: RelationshipRecord) => {
   // 原版 Cron 仍是一分钟一次；关系层每十分钟才需要结算，关闭时则一天后再看。
   const normalTickAt = record.config.enabled ? now + 10 * 60_000 : now + 24 * HOUR;
   // 外卖/承诺事件需要在明确 ETA 到达时被 Cron 取到，不能被 10 分钟轮询额外拖后。
-  const nextTickAt = record.promiseDueAt && record.promiseDueAt > now
+  const requestedTickAt = record.promiseDueAt && record.promiseDueAt > now
     ? Math.min(normalTickAt, record.promiseDueAt)
     : normalTickAt;
+  // 关键：聊天页面的同步可每分钟发生一次，不能把已经安排好的 10 分钟检查反复推迟。
+  // 仅保留「仍在未来的更早时刻」；已到期的时刻由本次保存重新排下一轮。
+  const nextTickAt = record.nextTickAt && record.nextTickAt > now
+    ? Math.min(record.nextTickAt, requestedTickAt)
+    : requestedTickAt;
+  record.nextTickAt = nextTickAt;
   await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at, next_tick_at)
     VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, next_tick_at = excluded.next_tick_at`)
     .bind(record.userId, record.charId, payload, now, nextTickAt).run();
+};
+
+const dispatchStatus = (state: RelationshipRecord, now = Date.now()) => {
+  if (!state.config.enabled) return '关系主动消息已关闭。';
+  if (state.pendingTaskUuid) return '已有一条关系任务正在等待原版主动消息 2.0 结算。';
+  const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 60_000;
+  if (now - state.lastDispatchAt < minGap) return '距离上一次关系任务创建尚未达到最短间隔。';
+  if (inQuietHours(now, state.config, state.tzId)) return '当前处于该角色的免打扰时段。';
+  if (state.longing >= state.nextThreshold && state.nextTickAt && state.nextTickAt > now) return '阈值已达到，等待 Worker 的下一次关系检查。';
+  if (state.longing >= state.nextThreshold) return '阈值已达到，等待 Worker Cron 执行。';
+  return '尚未达到下一次思念阈值。';
 };
 
 const publicState = (state: RelationshipRecord) => ({
   longing: Math.round(state.longing), nextThreshold: Math.round(state.nextThreshold), affection: Math.round(state.affection),
   jealousy: Math.round(state.jealousy), innerVoice: state.innerVoice, dailySent: state.dailySent,
   updatedAt: state.lastCalculatedAt,
+  diagnostics: {
+    pendingTaskUuid: state.pendingTaskUuid,
+    lastDispatchAt: state.lastDispatchAt || undefined,
+    nextTickAt: state.nextTickAt,
+    lastScheduleError: state.lastScheduleError,
+    lastScheduleErrorAt: state.lastScheduleErrorAt,
+    status: dispatchStatus(state),
+  },
 });
 
 const advance = (state: RelationshipRecord, now: number) => {
@@ -236,7 +266,7 @@ export const handleRelationshipRequest = async (request: Request, env: Relations
 /**
  * Cron 只推进分数并挑出可派发对象。真正的原版任务由 index.ts 注入的 schedule 回调创建。
  */
-export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: (state: RelationshipRecord) => Promise<string | null>) => {
+export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: (state: RelationshipRecord) => Promise<{ uuid?: string; error?: string }>) => {
   await ensureTable(env);
   const rows = await dbOf(env).prepare('SELECT user_id, char_id, payload FROM sully_relationship_state WHERE next_tick_at <= ? LIMIT 200').bind(Date.now()).all<{ user_id?: string; char_id?: string; payload?: string }>();
   const now = Date.now();
@@ -263,14 +293,19 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
     const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
     const canDispatch = !state.pendingTaskUuid && now - state.lastDispatchAt >= minGap && !inQuietHours(now, state.config, state.tzId);
     if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
-      const uuid = await schedule(state);
-      if (uuid) {
-        state.pendingTaskUuid = uuid;
+      const result = await schedule(state);
+      if (result.uuid) {
+        state.pendingTaskUuid = result.uuid;
         state.lastDispatchAt = now;
+        state.lastScheduleError = undefined;
+        state.lastScheduleErrorAt = undefined;
         state.nextThreshold = Math.max(state.nextThreshold + 30, state.longing + 30);
         state.promiseDueAt = undefined;
         state.promiseKind = undefined;
         scheduled += 1;
+      } else {
+        state.lastScheduleError = (result.error || '原版主动消息任务创建没有返回任务 ID。').slice(0, 400);
+        state.lastScheduleErrorAt = now;
       }
     }
     await save(env, state);
