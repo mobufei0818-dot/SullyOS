@@ -73,7 +73,7 @@ import { normalizeTranslationLangLabel, isTranslationLangPreset } from '../utils
 import { CharacterGroupFilterBar, filterCharactersByGroup, GROUP_FILTER_ALL } from '../components/character/CharacterGroupFilter';
 import { trackEvent, noteMessageSent, presetOrCustom } from '../utils/analytics';
 import { markAmsgStateDirty, markAmsgStateDirtyForAll } from '../utils/amsgStateSync';
-import { AMSG_INSTANT_CHAT_PENDING_EVENT, AMSG_INSTANT_CHAT_PENDING_LS_KEY, getInstantChatPending } from '../utils/amsgInstantChat';
+import { abandonInstantChatPending, AMSG_INSTANT_CHAT_PENDING_EVENT, AMSG_INSTANT_CHAT_PENDING_LS_KEY, getInstantChatPending } from '../utils/amsgInstantChat';
 import { formatAmsgToolTrace } from '../utils/amsgToolTrace';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
 import { applyScheduledTask, resolveExpirePolicy } from '../utils/amsg2Tasks';
@@ -172,6 +172,7 @@ const Chat: React.FC = () => {
     // 即时对话：这一轮已经交给云端、还没等到回复。它跟 isTyping 不一样——生成不在这台
     // 设备上跑，所以要扛得住关页面重开（记录落在 localStorage，见 amsgInstantChat）。
     const [instantChatPending, setInstantChatPending] = useState(false);
+    const [isStoppingInstantChat, setIsStoppingInstantChat] = useState(false);
     const [instantToolStatus, setInstantToolStatus] = useState<InstantToolUiStatus | null>(null);
     const [totalMsgCount, setTotalMsgCount] = useState(0);
     const [visibleCount, setVisibleCount] = useState(30);
@@ -468,6 +469,30 @@ const Chat: React.FC = () => {
         window.addEventListener(AMSG_INSTANT_CHAT_PENDING_EVENT, sync);
         return () => window.removeEventListener(AMSG_INSTANT_CHAT_PENDING_EVENT, sync);
     }, [activeCharacterId]);
+
+    const handleStopInstantChat = useCallback(async () => {
+        const pending = getInstantChatPending(activeCharacterId);
+        if (!pending || isStoppingInstantChat) return;
+        setIsStoppingInstantChat(true);
+        try {
+            const cancelled = await ActiveMsgClient.cancelTask(pending.uuid);
+            // 即使远端刚完成并已删行（alreadyGone），用户的停止意图仍然优先：迟到的
+            // push/outbox 回复会由 abandonInstantChatPending 的 UUID 标记拦住。
+            abandonInstantChatPending(activeCharacterId, pending.uuid);
+            addToast(
+                cancelled.alreadyGone
+                    ? '已停止等待；若旧回复已在路上，也不会显示。'
+                    : '已停止本次云端生成。',
+                'success',
+            );
+        } catch (error: any) {
+            const reason = error?.message || '取消请求没有成功送达云端。';
+            if (showError) showError('停止生成失败', `${reason}\n\n原任务仍在继续等待，避免误吞可能成功的回复。`);
+            else addToast(`停止生成失败：${reason}`, 'error');
+        } finally {
+            setIsStoppingInstantChat(false);
+        }
+    }, [activeCharacterId, addToast, isStoppingInstantChat, showError]);
 
     // --- Initialize Hook ---
     const { isTyping, streamingBubbles, streamingThinking, recallStatus, searchStatus, diaryStatus, emotionStatus, memoryPalaceStatus, memoryPalaceResult, setMemoryPalaceResult, lastDigestResult, setLastDigestResult, lastTokenUsage, tokenBreakdown, setLastTokenUsage, triggerAI, startProactiveChat, stopProactiveChat, isProactiveActive } = useChatAI({
@@ -4523,6 +4548,19 @@ const Chat: React.FC = () => {
                                 <div className="flex items-center gap-2 text-xs text-amber-600 font-medium">
                                     <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
                                     📖 {diaryStatus}
+                                </div>
+                            ) : instantChatPending ? (
+                                <div className="flex items-center gap-2 text-xs text-slate-500 font-medium">
+                                    <svg className="animate-spin h-3 w-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                    <span>云端生成中</span>
+                                    <button
+                                        type="button"
+                                        onClick={() => void handleStopInstantChat()}
+                                        disabled={isStoppingInstantChat}
+                                        className="ml-1 rounded-full border border-slate-300 bg-white px-2 py-0.5 text-[11px] font-semibold text-slate-600 transition-colors active:scale-95 disabled:opacity-45"
+                                    >
+                                        {isStoppingInstantChat ? '停止中…' : '停止生成'}
+                                    </button>
                                 </div>
                             ) : (
                                 <div className="flex gap-1"><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce"></div><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce delay-75"></div><div className="w-1.5 h-1.5 bg-slate-400 rounded-full animate-bounce delay-150"></div></div>
