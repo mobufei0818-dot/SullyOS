@@ -103,3 +103,29 @@ export const fetchRelationshipBackend = async (char: CharacterProfile) => {
   if (!response.ok || !body?.success) return null;
   return asPulse(body.data);
 };
+
+/** 用户从关系卡校正数值：请求直接写入 Worker/D1，刷新页面后仍以此状态为准。 */
+export const updateRelationshipManualValues = async (
+  char: CharacterProfile,
+  values: { longing: number; nextThreshold: number },
+) => {
+  const global = await ActiveMsgStore.getGlobalConfig();
+  if (!global?.workerUrl || !global?.userId || !char.activeMsg2Config?.enabled) {
+    throw new Error('请先为该角色连接并启用主动消息 2.0。');
+  }
+  const response = await fetch(endpoint(global.workerUrl), {
+    method: 'POST', headers: headers(global.userId, global.serverToken),
+    body: JSON.stringify({
+      charId: char.id, charName: char.name,
+      tzId: resolveCharTimeZone(char) || Intl.DateTimeFormat().resolvedOptions().timeZone,
+      credRef: `char:${char.id}/chat`, config: getRelationshipConfig(char),
+      manual: {
+        longing: Math.max(0, Math.min(100, Math.round(values.longing))),
+        nextThreshold: Math.max(0, Math.min(100, Math.round(values.nextThreshold))),
+      },
+    }),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body?.success) throw new Error(body?.error?.message || '思念值校正同步失败。');
+  return asPulse(body.data);
+};
