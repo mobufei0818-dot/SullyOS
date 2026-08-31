@@ -37,6 +37,7 @@ interface RelationshipRecord {
   lastCalculatedAt: number;
   lastUserAt: number;
   lastAssistantAt: number;
+  /** 最近一次关系主动消息真正发送成功的时间；排上但跳过/失败不计入。 */
   lastDispatchAt: number;
   /** 仅由 Cron 在完成一轮关系检查后更新；绝不能复用 lastCalculatedAt。 */
   lastTickAt?: number;
@@ -105,9 +106,15 @@ const inQuietHours = (time: number, config: RelationshipConfigWire, tzId: string
 };
 
 const minimumGapMs = (state: RelationshipRecord) => Math.max(30, state.config.minimumIntervalMinutes || 60) * 60_000;
+const hasReachedDailyLimit = (state: RelationshipRecord) => {
+  const limit = Math.max(0, state.config.dailyLimit || 0);
+  return limit > 0 && state.dailySent >= limit;
+};
 const canDispatchNow = (state: RelationshipRecord, now: number) => !state.pendingTaskUuid
+  && !hasReachedDailyLimit(state)
   && now - state.lastDispatchAt >= minimumGapMs(state)
   && !inQuietHours(now, state.config, state.tzId);
+const sentRelief = (style: Style) => style === 'clingy' ? 6 : style === 'reserved' ? 10 : 8;
 
 const dbOf = (env: RelationshipEngineEnv): D1Like => env.DB as D1Like;
 
@@ -168,6 +175,7 @@ const save = async (env: RelationshipEngineEnv, record: RelationshipRecord) => {
 const dispatchStatus = (state: RelationshipRecord, now = Date.now()) => {
   if (!state.config.enabled) return '关系主动消息已关闭。';
   if (state.pendingTaskUuid) return '已有一条关系任务正在等待原版主动消息 2.0 结算。';
+  if (hasReachedDailyLimit(state)) return '已达到该角色设置的每日主动消息上限。';
   if (now - state.lastDispatchAt < minimumGapMs(state)) return '距离上一次关系任务创建尚未达到最短间隔。';
   if (inQuietHours(now, state.config, state.tzId)) return '当前处于该角色的免打扰时段。';
   if (state.longing >= state.nextThreshold && state.nextTickAt && state.nextTickAt > now) return '阈值已达到，等待 Worker 的下一次关系检查。';
@@ -317,10 +325,8 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
       const result = await schedule(state);
       if (result.uuid) {
         state.pendingTaskUuid = result.uuid;
-        state.lastDispatchAt = now;
         state.lastScheduleError = undefined;
         state.lastScheduleErrorAt = undefined;
-        state.nextThreshold = clamp(Math.max(state.nextThreshold + 30, state.longing + 30));
         state.promiseDueAt = undefined;
         state.promiseKind = undefined;
         scheduled += 1;
@@ -340,8 +346,16 @@ export const settleRelationshipTask = async (args: { userId: string; charId: str
   if (!env || !args.userId || !args.charId || !args.taskUuid) return;
   const state = await load(env, args.userId, args.charId);
   if (!state || state.pendingTaskUuid !== args.taskUuid) return;
-  advance(state, Date.now());
+  const now = Date.now();
+  advance(state, now);
   state.pendingTaskUuid = undefined;
-  if (args.sent) state.dailySent += 1;
+  if (args.sent) {
+    // 只有用户实际收到了角色消息，才视为角色获得一次情绪释放。
+    // 以回落后的实时思念值重新设定下一个 +30 阈值，而不是沿用旧阈值累加。
+    state.longing = clamp(state.longing - sentRelief(state.config.initiativeStyle));
+    state.nextThreshold = clamp(state.longing + 30);
+    state.lastDispatchAt = now;
+    state.dailySent += 1;
+  }
   await save(env, state);
 };
