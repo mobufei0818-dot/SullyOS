@@ -3121,11 +3121,48 @@ const Chat: React.FC = () => {
         try {
             await DB.updateMessageMetadata(message.id, () => generatingMetadata);
             const generated = await generateChatImage({ prompt, config: apiConfig, char, includeCharacter: message.metadata?.imageGeneration?.includeCharacter === true });
+            // 聊天生图和用户发图一样共用 blob 令牌：聊天记录、相册和收藏只引用同一份图片，
+            // 不再把 base64 分别复制三遍。
+            const storedImageUrl = generated.dataUrl.startsWith('data:')
+                ? await migrateDataUrlToRef(generated.dataUrl)
+                : generated.dataUrl;
             const metadata = { ...generatingMetadata, imageGeneration: { ...generatingMetadata.imageGeneration, status: 'ready', referenceApplied: generated.referenceApplied } };
-            await DB.updateMessageContentAndMetadata(message.id, generated.dataUrl, metadata);
+            await DB.updateMessageContentAndMetadata(message.id, storedImageUrl, metadata);
             messageMutationRevisionRef.current += 1;
-            setMessages(prev => prev.map(m => m.id === message.id ? { ...m, content: generated.dataUrl, metadata } : m));
-            addToast('照片已合成', 'success');
+            setMessages(prev => prev.map(m => m.id === message.id ? { ...m, content: storedImageUrl, metadata } : m));
+
+            // 一张聊天照片卡只对应相册中的一张图。无论原样重抽还是改过描述后重抽，
+            // 都按来源消息更新同一条相册记录，始终只留下最新一张。
+            try {
+                const existingImage = await DB.findGalleryImageBySourceMessageId(char.id, message.id);
+                const chatContext = messages
+                    .filter(item => item.id !== message.id)
+                    .slice(-10)
+                    .map(item => {
+                        const sender = item.role === 'user' ? userProfile.name : char.name;
+                        const isMedia = item.type === 'image' || item.type === 'emoji' || isImageValue(item.content);
+                        const preview = isMedia ? buildReplySnapshotContent(item) : item.content.substring(0, 100);
+                        return `${sender}: ${preview}`;
+                    });
+                await DB.saveGalleryImage({
+                    // 旧版本若已经存过这张卡，沿用旧 id；否则使用消息 id 作为稳定键。
+                    id: existingImage?.id || `generated-photo-${message.id}`,
+                    charId: char.id,
+                    url: storedImageUrl,
+                    timestamp: Date.now(),
+                    sourceMessageId: message.id,
+                    savedDate: existingImage?.savedDate || localDateKey,
+                    chatContext: chatContext.length ? chatContext : existingImage?.chatContext,
+                    // 图已经换了，旧图的点评不能继续挂在新图上。
+                    review: undefined,
+                    reviewTimestamp: undefined,
+                });
+                addToast('照片已合成，并已存入相册', 'success');
+            } catch (galleryError) {
+                // 相册是附带功能，写入失败不能把已成功的生图回滚或误报为生图失败。
+                console.warn('[Chat] 聊天生图存相册失败，聊天图片照常保留', galleryError);
+                addToast('照片已合成，但没能存进相册', 'error');
+            }
         } catch (error: any) {
             const metadata = { ...(message.metadata || {}), imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'failed', prompt } };
             await DB.updateMessageMetadata(message.id, () => metadata);
@@ -3134,7 +3171,7 @@ const Chat: React.FC = () => {
             const details = error instanceof Error ? error.message : String(error || '未知错误');
             showError('生图失败', details || '未知错误，请检查 API 配置与 API 调用记录。');
         } finally { imageGenerationInFlightRef.current.delete(message.id); }
-    }, [apiConfig, char, addToast, showError]);
+    }, [apiConfig, char, addToast, showError, localDateKey, messages, userProfile.name]);
 
     const handleQuickReply = useCallback((message: Message) => {
         setReplyTarget({
