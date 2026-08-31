@@ -29,6 +29,7 @@ import { shareOrDownloadFile } from '../utils/shareExport';
 import { confirmExportSafety } from '../utils/exportGuard';
 import { trackEvent } from '../utils/analytics';
 import { sortCharacterGroups, GROUP_FILTER_UNGROUPED } from '../components/character/CharacterGroupFilter';
+import { extractCharacterIdentityProfile, isVisionApiReady } from '../utils/visionApi';
 import {
     EXTERNAL_MEMORY_MAX_CHARS,
     extractExternalMemoryText,
@@ -116,6 +117,7 @@ const Character: React.FC = () => {
   const [showChibiStudio, setShowChibiStudio] = useState(() => !!launchIntent?.openChibiStudio);
   const [editingId, setEditingId] = useState<string | null>(() => launchIntent?.charId || null);
   const [formData, setFormData] = useState<CharacterProfile | null>(null);
+  const [isExtractingIdentity, setIsExtractingIdentity] = useState(false);
   const [isCompressing, setIsCompressing] = useState(false);
   // 头像 URL 输入的 draft, 不逐字 commit 到 formData.avatar —— 否则每输入一个字符,
   // 所有引用 char.avatar 的 <img> 都会拿到不完整字符串当相对路径请求根目录,
@@ -490,10 +492,27 @@ const Character: React.FC = () => {
       if (!file) return;
       try {
           const dataUrl = await processImage(file);
-          handleChange('imageProfile', { ...(formData?.imageProfile || {}), faceReferenceImage: dataUrl });
-          addToast('角色参考图已保存', 'success');
+          handleChange('imageProfile', { ...(formData?.imageProfile || {}), faceReferenceImage: dataUrl, referenceMode: 'identity', identityProfile: undefined });
+          addToast('角色参考图已保存，请提取身份特征', 'success');
       } catch (error: any) { addToast(error?.message || '图片处理失败', 'error'); }
       finally { e.target.value = ''; }
+  };
+
+  const handleExtractIdentityProfile = async () => {
+      const image = formData?.imageProfile?.faceReferenceImage;
+      if (!image) { addToast('请先上传角色面部照片', 'error'); return; }
+      if (!isVisionApiReady(apiConfig.visionApi)) {
+          addToast('请先在设置中配置并启用识图 API', 'error');
+          return;
+      }
+      try {
+          setIsExtractingIdentity(true);
+          const identityProfile = await extractCharacterIdentityProfile(image, apiConfig.visionApi);
+          handleChange('imageProfile', { ...(formData?.imageProfile || {}), identityProfile, referenceMode: 'identity' });
+          addToast('身份特征已提取，可自行校正', 'success');
+      } catch (error: any) {
+          addToast(error?.message || '身份特征提取失败', 'error');
+      } finally { setIsExtractingIdentity(false); }
   };
   
   const handleRefineMonth = async (year: string, month: string, rawText: string, formattedPrompt?: string) => {
@@ -1711,16 +1730,31 @@ ${isInitialGeneration ? `
                            <div className="bg-white rounded-3xl p-4 shadow-sm border border-violet-100 space-y-3">
                                <div>
                                    <label className="text-[10px] font-bold text-violet-600 uppercase tracking-widest">聊天生图 · 外貌参考</label>
-                                   <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">参考图只用于稳定五官和发型，不会替代外貌提示词。仅对支持图片输入的模型生效；部分 OpenAI 兼容中转站不支持。</p>
+                                   <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">默认将参考照转为“身份特征”，生图时只保持五官与发型，不复刻原照的角度和表情。你可以随时校正提取结果。</p>
                                </div>
                                <div className="flex gap-3 items-start">
                                    <label className="w-20 h-20 shrink-0 rounded-2xl overflow-hidden border border-dashed border-violet-200 bg-violet-50 flex items-center justify-center cursor-pointer text-[10px] text-violet-500 text-center p-1">
                                        {formData.imageProfile?.faceReferenceImage ? <img src={formData.imageProfile.faceReferenceImage} className="w-full h-full object-cover" /> : '上传角色\n面部照片'}
                                        <input type="file" accept="image/*" className="hidden" onChange={handleFaceReferenceChange} />
                                    </label>
-                                   <textarea value={formData.imageProfile?.appearancePrompt || ''} onChange={e => handleChange('imageProfile', { ...(formData.imageProfile || {}), appearancePrompt: e.target.value })} placeholder="手写角色外貌特征，例如：黑色微卷短发、琥珀色眼睛、左眼下有很浅的小痣……" className="flex-1 min-h-20 bg-slate-50 rounded-2xl p-3 text-xs border border-slate-200 resize-y" />
+                                   <textarea value={formData.imageProfile?.appearancePrompt || ''} onChange={e => handleChange('imageProfile', { ...(formData.imageProfile || {}), appearancePrompt: e.target.value })} placeholder="用户补充外貌（可简写），例如：黑色微卷短发、琥珀色眼睛……" className="flex-1 min-h-20 bg-slate-50 rounded-2xl p-3 text-xs border border-slate-200 resize-y" />
                                </div>
-                               {formData.imageProfile?.faceReferenceImage && <button type="button" onClick={() => handleChange('imageProfile', { ...(formData.imageProfile || {}), faceReferenceImage: undefined })} className="text-[10px] text-rose-500">移除参考图</button>}
+                               {formData.imageProfile?.faceReferenceImage && <>
+                                   <div className="flex flex-wrap gap-2">
+                                       <button type="button" disabled={isExtractingIdentity} onClick={handleExtractIdentityProfile} className="px-3 py-2 rounded-xl text-[11px] font-bold bg-violet-600 text-white disabled:opacity-50">
+                                           {isExtractingIdentity ? '正在提取…' : '从参考图提取身份特征'}
+                                       </button>
+                                       <button type="button" onClick={() => handleChange('imageProfile', { ...(formData.imageProfile || {}), referenceMode: 'identity' })} className={`px-3 py-2 rounded-xl text-[11px] font-bold border ${(formData.imageProfile?.referenceMode || 'identity') === 'identity' ? 'border-violet-500 bg-violet-50 text-violet-700' : 'border-slate-200 text-slate-500'}`}>
+                                           身份参考（推荐）
+                                       </button>
+                                       <button type="button" onClick={() => handleChange('imageProfile', { ...(formData.imageProfile || {}), referenceMode: 'strong' })} className={`px-3 py-2 rounded-xl text-[11px] font-bold border ${formData.imageProfile?.referenceMode === 'strong' ? 'border-amber-500 bg-amber-50 text-amber-700' : 'border-slate-200 text-slate-500'}`}>
+                                           强参考复刻
+                                       </button>
+                                   </div>
+                                   <textarea value={formData.imageProfile?.identityProfile || ''} onChange={e => handleChange('imageProfile', { ...(formData.imageProfile || {}), identityProfile: e.target.value })} placeholder="系统提取的身份特征会显示在这里；可直接修改。它只应描述脸型、五官、发型、肤色和稳定标记。" className="w-full min-h-24 bg-violet-50/50 rounded-2xl p-3 text-xs border border-violet-100 resize-y" />
+                                   <p className="text-[10px] text-slate-400 leading-relaxed">{formData.imageProfile?.referenceMode === 'strong' ? '强参考复刻会将原照作为图片编辑底图发送，因此更容易沿用同一表情与构图，且需要你的生图接口支持图片编辑。' : '身份参考不会在每次生图时发送原照；请先提取或补充上方身份特征，以获得更稳定的人物连续性。'}</p>
+                                   <button type="button" onClick={() => handleChange('imageProfile', { ...(formData.imageProfile || {}), faceReferenceImage: undefined, identityProfile: undefined, referenceMode: 'identity' })} className="text-[10px] text-rose-500">移除参考图与身份特征</button>
+                               </>}
                            </div>
 
                            {/* Worldbook Section */}

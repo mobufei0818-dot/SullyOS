@@ -1428,6 +1428,9 @@ interface MessageItemProps {
     onOpenImage?: (m: Message) => void;
     /** 打开协同文件柜里的原始 Blob；消息本身只保存 assetId 引用。 */
     onOpenCollaborationFile?: (m: Message) => void | Promise<void>;
+    /** 仅在最新一条角色文字消息末尾显示的关系状态入口。 */
+    showRelationshipHeart?: boolean;
+    onOpenRelationshipCard?: () => void;
     /** 思考链卡片视觉与交互 */
     thinkingChainOptions?: {
         styleId?: ThinkingChainStyleId;
@@ -1480,6 +1483,8 @@ const MessageItem = React.memo(({
     onGeneratePhoto,
     onOpenImage,
     onOpenCollaborationFile,
+    showRelationshipHeart = false,
+    onOpenRelationshipCard,
     thinkingChainOptions,
 }: MessageItemProps) => {
     const isUser = m.role === 'user';
@@ -3372,7 +3377,12 @@ const MessageItem = React.memo(({
             const generating = photo.status === 'generating';
             const failed = photo.status === 'failed';
             return commonLayout(
-                <button type="button" onClick={() => !generating && onGeneratePhoto?.(m)} className="w-64 text-left overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm active:scale-[0.98] transition-transform disabled:opacity-70" disabled={generating}>
+                <button type="button" onClick={() => !generating && onGeneratePhoto?.(m)} className="relative w-64 text-left overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm active:scale-[0.98] transition-transform disabled:opacity-70" disabled={generating}>
+                    {generating && (
+                        <span className="absolute right-3 top-3 z-10 grid h-7 w-7 place-items-center rounded-full bg-white/90 shadow-sm" aria-label="正在合成照片">
+                            <span className="h-4 w-4 animate-spin rounded-full border-2 border-violet-200 border-t-violet-500" />
+                        </span>
+                    )}
                     <div className="h-40 bg-gradient-to-br from-slate-100 via-violet-50 to-rose-50 flex items-center justify-center p-5">
                         <div className="w-full h-full rounded-xl border border-white/80 bg-white/55 flex items-center justify-center text-center text-xs leading-relaxed text-slate-500">{photo.prompt || '一张照片'}</div>
                     </div>
@@ -3664,6 +3674,17 @@ const MessageItem = React.memo(({
             </div>
             )}
 
+            {showRelationshipHeart && !isUser && !selectionMode && (
+                <div className="relative z-10 mt-1.5 flex justify-end">
+                    <button
+                        type="button"
+                        onClick={(event) => { event.preventDefault(); event.stopPropagation(); onOpenRelationshipCard?.(); }}
+                        className="grid h-6 w-6 place-items-center rounded-full bg-rose-50 text-[13px] text-rose-400 shadow-sm ring-1 ring-rose-100 transition-transform active:scale-90"
+                        aria-label="查看关系状态"
+                    >♥</button>
+                </div>
+            )}
+
             {/* Layer 5: 双语「翻译/原文」切换 —— 气泡内右下角，细分隔线压层级，小灰字克制易找 */}
             {showTranslateButton && displayContent && !isForeignVoiceMsg && (
                 <div
@@ -3882,6 +3903,11 @@ const MessageItem = React.memo(({
            prev.msg.metadata?.reviewStatus === next.msg.metadata?.reviewStatus &&
            prev.msg.metadata?.status === next.msg.metadata?.status &&
            prev.msg.metadata?.receipt === next.msg.metadata?.receipt &&
+           // 聊天照片卡的 pending / generating / ready / failed 都在 imageGeneration 内；
+           // 漏掉它会导致实际已开始合成，卡片却仍显示“点击合成”。
+           prev.msg.metadata?.imageGeneration?.status === next.msg.metadata?.imageGeneration?.status &&
+           prev.msg.metadata?.imageGeneration?.prompt === next.msg.metadata?.imageGeneration?.prompt &&
+           prev.msg.metadata?.imageGeneration?.includeCharacter === next.msg.metadata?.imageGeneration?.includeCharacter &&
            prev.isFirstInGroup === next.isFirstInGroup &&
            prev.isLastInGroup === next.isLastInGroup &&
            prev.activeTheme === next.activeTheme &&
@@ -3889,6 +3915,8 @@ const MessageItem = React.memo(({
            prev.charName === next.charName &&
            prev.userAvatar === next.userAvatar &&
            prev.isLatestMessage === next.isLatestMessage &&
+           prev.showRelationshipHeart === next.showRelationshipHeart &&
+           prev.onOpenRelationshipCard === next.onOpenRelationshipCard &&
            prev.onMediaLoad === next.onMediaLoad &&
            prev.selectionMode === next.selectionMode &&
            prev.isSelected === next.isSelected &&

@@ -38,7 +38,6 @@ export enum AppID {
   VRWorld = 'vrworld', // 彼方 — 角色自主登入的虚拟世界（定时驱动，房间里看小说/听歌/留言，产出活动卡注入聊天+记忆）
   CharCreatorDev = 'char_creator_dev', // 捏脸系统开发模式 — 仅开发模式可见，向捏人器指定类目追加自定义部件
   WorldHome = 'world_home', // 家园 — 同世界观多角色共同生活的大世界（观测驱动演绎，每角色独立 LLM 调用 + NPC 世界引擎）
-  Takeout = 'takeout', // 外卖 — 本地生活模拟，支持角色共同下单
 }
 
 export interface SystemLog {
@@ -402,7 +401,12 @@ export interface ActiveMsg2GlobalConfig {
 }
 
 export type ActiveMsg2ExpirePolicy = 'expire' | 'force';
-export type ActiveMsg2TaskSource = 'user' | 'character';
+/**
+ * relationship 是聊天设置里的「关系主动消息层」创建的受控一次性任务。
+ * 它和用户手动排程、角色自行调用工具排程共存；用户回复时只会撤销这一类，
+ * 绝不误删原有主动消息 2.0 的任务。
+ */
+export type ActiveMsg2TaskSource = 'user' | 'character' | 'relationship';
 /** scheduled=待触发/循环中；cancelled 仅短暂存在（取消即从清单移除）。到点后的
  *  一次性任务不改 status——「已发送/已作废」由消息历史现场推导，避免 React 外写角色数据。 */
 export type ActiveMsg2TaskStatus = 'scheduled' | 'cancelled';
@@ -453,6 +457,35 @@ export interface ActiveMsg2CharacterConfig {
   secondaryApi?: ActiveMsg2ApiConfig;
   lastSyncedAt?: number;
   lastError?: string;
+}
+
+export type RelationshipInitiativeStyle = 'reserved' | 'natural' | 'clingy';
+
+/** 聊天设置中的关系主动消息层。它复用主动消息 2.0 的 Worker，不另建发送通道。 */
+export interface RelationshipProactiveConfig {
+  enabled: boolean;
+  initiativeStyle: RelationshipInitiativeStyle;
+  /** 角色当地的免打扰时段；例如 23:30 → 08:00。 */
+  quietHoursEnabled: boolean;
+  quietHoursStart: string;
+  quietHoursEnd: string;
+  /** 关系层每日最多创建/送达的联系机会，1–5。 */
+  dailyLimit: number;
+  /** 角色说了“忙完/到家后再来”等具有后续含义的话时，优先按合理时间窗跟进。 */
+  followUpPromises: boolean;
+  /** 最新一条角色消息末尾显示爱心入口。 */
+  showHeartCard: boolean;
+}
+
+/** 关系卡的本地只读快照。数值会随真实消息间隔实时重新计算，不会写进提示词要求角色表演。 */
+export interface RelationshipPulse {
+  version: 1;
+  affection: number;
+  jealousy: number;
+  baselineLonging: number;
+  updatedAt: number;
+  lastUserReplyAt?: number;
+  innerVoice?: string;
 }
 
 /** 任务「没了」的回执台账（amsg-local IDB kv，按角色一条数组）。 */
@@ -2919,9 +2952,13 @@ export interface CharacterProfile {
       pitch?: number;
   };
 
-  /** 聊天照片：参考图只作为五官/发型辅助约束，不替代角色外貌文字。 */
+  /** 聊天照片：把「身份锚点」与当次画面的构图分开保存，避免参考照反复复制同一角度。 */
   imageProfile?: {
       faceReferenceImage?: string;
+      /** 从面部参考图提取、且可由用户校正的稳定身份特征。 */
+      identityProfile?: string;
+      /** 默认身份参考仅传文字；强参考才会将原图作为图片编辑底图发送。 */
+      referenceMode?: 'identity' | 'strong';
       appearancePrompt?: string;
   };
 
@@ -2958,8 +2995,6 @@ export interface CharacterProfile {
   chatVoiceLang?: string;
   /** 允许角色在聊天中发送照片占位卡。 */
   chatImageEnabled?: boolean;
-  /** 收到照片占位卡后立刻合成；失败只提示一次，不自动重试。 */
-  chatImageAutoGenerate?: boolean;
   dateVoiceEnabled?: boolean;
   dateVoiceLang?: string;
   // Call (voice phone) — remembered translation language for this character
@@ -2982,6 +3017,8 @@ export interface CharacterProfile {
 
   // 情绪Buff系统
   activeMsg2Config?: ActiveMsg2CharacterConfig;
+  relationshipProactiveConfig?: RelationshipProactiveConfig;
+  relationshipPulse?: RelationshipPulse;
   activeBuffs?: CharacterBuff[];
   buffInjection?: string;   // 注入到systemPrompt的叙事型情绪底色描述
   emotionConfig?: {

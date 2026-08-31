@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useLayoutEffect, useMemo, useCallba
 import { createPortal } from 'react-dom';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
-import { Message, MessageType, MemoryFragment, Emoji, EmojiCategory, DailySchedule, ScheduleSlot } from '../types';
+import { Message, MessageType, MemoryFragment, Emoji, EmojiCategory, DailySchedule, ScheduleSlot, ActiveMsg2TaskRecord, RelationshipPulse } from '../types';
 import { processImage, processImageToBlob } from '../utils/file';
 import { safeResponseJson, extractContent } from '../utils/safeApi';
 import { buildChatFineTuneCss, mergeChatFineTune } from '../utils/chatFineTuneCss';
@@ -12,7 +12,7 @@ import { FadersHorizontal } from '@phosphor-icons/react';
 import { generateDailyScheduleForChar, isScheduleFeatureOn } from '../utils/scheduleGenerator';
 import { getDailyScheduleForChar } from '../utils/dailySchedule';
 import { useLocalDateKey } from '../hooks/useLocalDateKey';
-import { resolveCharTimeZone } from '../utils/timezone';
+import { nowInTimeZone, resolveCharTimeZone } from '../utils/timezone';
 import { generateSlotTheater } from '../utils/theaterGenerator';
 import TheaterPlayer from '../components/schedule/TheaterPlayer';
 import { formatMessageWithTime, normalizeMessageContent } from '../utils/messageFormat';
@@ -46,6 +46,7 @@ import ChatModals from '../components/chat/ChatModals';
 import Modal from '../components/os/Modal';
 import ProactiveSettingsModal from '../components/chat/ProactiveSettingsModal';
 import ActiveMsg2SettingsModal from '../components/chat/ActiveMsg2SettingsModal';
+import RelationshipHeartCard from '../components/chat/RelationshipHeartCard';
 import ThinkingChainSettingsModal from '../components/chat/ThinkingChainSettingsModal';
 import ScheduleChangeNotice from '../components/chat/ScheduleChangeNotice';
 import { useChatAI } from '../hooks/useChatAI';
@@ -74,6 +75,20 @@ import { trackEvent, noteMessageSent, presetOrCustom } from '../utils/analytics'
 import { markAmsgStateDirty, markAmsgStateDirtyForAll } from '../utils/amsgStateSync';
 import { AMSG_INSTANT_CHAT_PENDING_EVENT, AMSG_INSTANT_CHAT_PENDING_LS_KEY, getInstantChatPending } from '../utils/amsgInstantChat';
 import { formatAmsgToolTrace } from '../utils/amsgToolTrace';
+import { ActiveMsgClient } from '../utils/activeMsgClient';
+import { applyScheduledTask, resolveExpirePolicy } from '../utils/amsg2Tasks';
+import {
+    buildRelationshipPromptHint,
+    calculateRelationshipPulse,
+    connectionDelayMs,
+    followUpDelayMs,
+    getRelationshipConfig,
+    inferFollowUpKind,
+    markRelationshipTaskToday,
+    moveOutOfQuietHours,
+    relationshipTaskCountToday,
+} from '../utils/relationshipProactive';
+import { getLastInnerState } from '../utils/emotionApply';
 import { formatHours } from '../utils/format';
 import {
     VOICE_FAVORITES_CHANGED_EVENT,
@@ -151,7 +166,14 @@ const Chat: React.FC = () => {
         } catch { return 0; }
     }, []);
     const [messages, setMessages] = useState<Message[]>([]);
+    const [relationshipCardOpen, setRelationshipCardOpen] = useState(false);
+    const [relationshipNow, setRelationshipNow] = useState(() => Date.now());
+    const relationshipLastAssistantRef = useRef<number | null>(null);
+    const relationshipLastUserRef = useRef<number | null>(null);
+    const relationshipSchedulingRef = useRef<Set<number>>(new Set());
     const imageGenerationInFlightRef = useRef<Set<number>>(new Set());
+    // 本地刚改完照片卡时，忽略更早发起的 IndexedDB 读取结果，避免旧 pending 数据反盖回去。
+    const messageMutationRevisionRef = useRef(0);
     // Instant Push 路径："准备中"三个点 = 消息正在拼接+发送; 消失 = SSE POST 已排进
     // 浏览器网络栈. 页面关闭时会主动 abort SSE, 让 worker 尽量走 Web Push fallback。
     const [instantSendingActive, setInstantSendingActive] = useState(false);
@@ -331,6 +353,143 @@ const Chat: React.FC = () => {
     }, [messages]);
     const charDateKey = useLocalDateKey(resolveCharTimeZone(char));
     charRef.current = char; // Keep ref in sync for async callbacks
+
+    useEffect(() => {
+        relationshipLastAssistantRef.current = null;
+        relationshipLastUserRef.current = null;
+        relationshipSchedulingRef.current.clear();
+        setRelationshipCardOpen(false);
+    }, [char?.id]);
+
+    // 关系卡是只读实时展示，不应为了数字走一次 API；每分钟重新按真实间隔计算即可。
+    useEffect(() => {
+        const timer = window.setInterval(() => setRelationshipNow(Date.now()), 60_000);
+        return () => window.clearInterval(timer);
+    }, []);
+
+    const relationshipPulse = useMemo<RelationshipPulse | null>(() => {
+        if (!char) return null;
+        const pulse = calculateRelationshipPulse(char, messages, relationshipNow);
+        const innerState = getLastInnerState(char.id).replace(/\s+/g, ' ').trim();
+        return innerState ? { ...pulse, innerVoice: innerState.slice(0, 30) } : pulse;
+    }, [char, messages, relationshipNow]);
+
+    const latestAssistantMessageId = useMemo(() => {
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+            if (messages[index].role === 'assistant') return messages[index].id;
+        }
+        return null;
+    }, [messages]);
+
+    /** 用户一回复就让关系层之前的“联系机会”失效；其它 2.0 任务完全不动。 */
+    const cancelRelationshipTasks = useCallback(async (targetChar = char) => {
+        if (!targetChar) return;
+        const relationTasks = (targetChar.activeMsg2Config?.tasks || [])
+            .filter(task => task.source === 'relationship');
+        if (!relationTasks.length) return;
+        const results = await Promise.allSettled(relationTasks.map(task => ActiveMsgClient.cancelTask(task.taskUuid)));
+        const cancelled = new Set(
+            relationTasks.filter((_, index) => results[index].status === 'fulfilled').map(task => task.taskUuid),
+        );
+        if (!cancelled.size) return;
+        updateCharacter(targetChar.id, previous => ({
+            activeMsg2Config: {
+                ...(previous.activeMsg2Config || { enabled: false }),
+                tasks: (previous.activeMsg2Config?.tasks || []).filter(task => !cancelled.has(task.taskUuid)),
+                lastSyncedAt: Date.now(),
+            },
+        }));
+    }, [char, updateCharacter]);
+
+    // 所有用户消息入口（手打、图片、小程序卡片）最后都会落入 messages；统一在这里取消，
+    // 才不会因为某个入口漏接导致角色仍按旧的“等会来找你”继续推送。
+    useEffect(() => {
+        if (!char) return;
+        const latestUser = [...messages].reverse().find(message => message.role === 'user');
+        if (!latestUser || relationshipLastUserRef.current === latestUser.id) return;
+        relationshipLastUserRef.current = latestUser.id;
+        if (Date.now() - latestUser.timestamp > 5 * 60_000) return;
+        void cancelRelationshipTasks(char);
+        const pulse = calculateRelationshipPulse(char, messages);
+        const innerState = getLastInnerState(char.id).replace(/\s+/g, ' ').trim();
+        updateCharacter(char.id, { relationshipPulse: { ...pulse, innerVoice: innerState.slice(0, 30) || pulse.innerVoice } });
+    }, [cancelRelationshipTasks, char, messages, updateCharacter]);
+
+    /**
+     * 关系层只在一轮正常聊天结束后补一条可撤销的未来联系机会。
+     * 到点时仍由原版 Worker 读取最新 fire pack 决定要不要说、说什么；前端不伪造消息。
+     */
+    useEffect(() => {
+        if (!char || !relationshipPulse) return;
+        const config = getRelationshipConfig(char);
+        const latest = [...messages].reverse().find(message => message.role === 'assistant');
+        if (!config.enabled || !char.activeMsg2Config?.enabled || !latest) return;
+        if ((latest.metadata as any)?.activeMsg2) return; // 收到定时消息本身不再套娃排下一条。
+        if (Date.now() - latest.timestamp > 15 * 60_000) return; // 进入旧聊天不会重新补排历史任务。
+        if (relationshipLastAssistantRef.current === latest.id || relationshipSchedulingRef.current.has(latest.id)) return;
+        relationshipLastAssistantRef.current = latest.id;
+        if (relationshipTaskCountToday(char.id) >= config.dailyLimit) return;
+        if ((char.activeMsg2Config.tasks || []).some(task => task.source === 'relationship')) return;
+
+        const kind = config.followUpPromises ? inferFollowUpKind(latest) : null;
+        const delay = kind
+            ? followUpDelayMs(kind, config.initiativeStyle)
+            : connectionDelayMs(config.initiativeStyle, relationshipPulse.baselineLonging);
+        if (!delay) return;
+        relationshipSchedulingRef.current.add(latest.id);
+        const rawTargetMs = Date.now() + delay;
+        // 免打扰读角色当地墙钟；再把“墙钟被推后了多少”映回真实时间，异国角色不会按设备时区被打扰。
+        const charTargetWall = nowInTimeZone(resolveCharTimeZone(char), new Date(rawTargetMs));
+        const movedWallMs = moveOutOfQuietHours(charTargetWall.getTime(), config);
+        const targetMs = rawTargetMs + (movedWallMs - charTargetWall.getTime());
+        const activeConfig = char.activeMsg2Config!;
+        ActiveMsgClient.scheduleCharacterTask({
+            char,
+            config: activeConfig,
+            task: {
+                mode: 'prompted',
+                firstSendTime: new Date(targetMs).toISOString(),
+                recurrenceType: 'none',
+                promptHint: buildRelationshipPromptHint(kind, char.name),
+                expirePolicy: 'expire',
+                selfScheduled: false,
+            },
+            userProfile,
+            groups,
+            realtimeConfig,
+            apiConfig,
+        }).then(result => {
+            const record: ActiveMsg2TaskRecord = {
+                taskUuid: result.uuid,
+                clientTaskId: result.clientTaskId,
+                mode: 'prompted',
+                firstSendTime: result.firstSendAt,
+                recurrenceType: 'none',
+                promptHint: buildRelationshipPromptHint(kind, char.name),
+                expirePolicy: resolveExpirePolicy('prompted', 'expire'),
+                source: 'relationship',
+                status: 'scheduled',
+                createdAt: Date.now(),
+            };
+            updateCharacter(char.id, previous => ({
+                activeMsg2Config: {
+                    ...(previous.activeMsg2Config || activeConfig),
+                    tasks: applyScheduledTask(previous.activeMsg2Config?.tasks || [], record, {}, Date.now()),
+                    lastSyncedAt: Date.now(),
+                    lastError: undefined,
+                },
+            }));
+            markRelationshipTaskToday(char.id);
+        }).catch(error => {
+            console.warn('[关系主动消息] 创建联系机会失败', error);
+            updateCharacter(char.id, previous => ({
+                activeMsg2Config: {
+                    ...(previous.activeMsg2Config || activeConfig),
+                    lastError: error instanceof Error ? error.message : '关系主动消息创建失败',
+                },
+            }));
+        }).finally(() => relationshipSchedulingRef.current.delete(latest.id));
+    }, [apiConfig, char, groups, messages, realtimeConfig, relationshipPulse, updateCharacter, userProfile]);
     const historyContextRange = useMemo(() => {
         if (!char) return undefined;
         return computeContextRangeSnapshot(
@@ -954,6 +1113,7 @@ const Chat: React.FC = () => {
         if (!activeCharacterId) return;
 
         const charIdAtStart = activeCharacterId;
+        const mutationRevisionAtStart = messageMutationRevisionRef.current;
         // 只用倒序游标取「最近 N 条」（含少量缓冲，抵消 date/call/系统消息被过滤后条数变少），
         // 不再 getAll 全量反序列化 —— 图片多/消息多的账号原本要把整段历史（含内联图片）一次性读进
         // 内存才显示 30 条，首次打开会卡好几秒。totalCount 走 index.count，不反序列化、极廉价。
@@ -978,7 +1138,7 @@ const Chat: React.FC = () => {
             const { messages: recent, totalCount } = await DB.getRecentMessagesWithCount(activeCharacterId, fetchLimit);
             // Guard against stale async results: if the user switched characters
             // while the DB query was in flight, discard this result.
-            if (activeCharIdRef.current !== charIdAtStart) return;
+            if (activeCharIdRef.current !== charIdAtStart || messageMutationRevisionRef.current !== mutationRevisionAtStart) return;
             applyResult(recent, totalCount);
         } catch (e) {
             // DB read failed — retry once after a short delay
@@ -987,7 +1147,7 @@ const Chat: React.FC = () => {
             if (activeCharIdRef.current !== charIdAtStart) return;
             try {
                 const { messages: recent, totalCount } = await DB.getRecentMessagesWithCount(activeCharacterId, fetchLimit);
-                if (activeCharIdRef.current !== charIdAtStart) return;
+                if (activeCharIdRef.current !== charIdAtStart || messageMutationRevisionRef.current !== mutationRevisionAtStart) return;
                 applyResult(recent, totalCount);
             } catch { /* give up silently */ }
         }
@@ -2941,30 +3101,40 @@ const Chat: React.FC = () => {
     const handleGeneratePhoto = useCallback(async (message: Message) => {
         if (message.type !== 'image' || message.metadata?.imageGeneration?.status === 'ready') return;
         if (imageGenerationInFlightRef.current.has(message.id)) return;
-        if (!isImageGenerationConfigured(apiConfig)) { showError('请先到 设置 → 其他 API 配置生图 API、Key 和模型'); return; }
+        if (!isImageGenerationConfigured(apiConfig)) {
+            showError('生图配置不完整', '请先到 设置 → 其他 API 配置生图 API、Key 和模型。');
+            return;
+        }
         const prompt = String(message.metadata?.imageGeneration?.prompt || message.content || '').trim();
-        if (!prompt) { showError('这张照片缺少描述，无法合成'); return; }
+        if (!prompt) {
+            showError('无法合成照片', '这张照片缺少描述。');
+            return;
+        }
         imageGenerationInFlightRef.current.add(message.id);
-        setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata: { ...(m.metadata || {}), imageGeneration: { ...(m.metadata?.imageGeneration || {}), status: 'generating' } } } : m));
+        messageMutationRevisionRef.current += 1;
+        const generatingMetadata = {
+            ...(message.metadata || {}),
+            imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'generating', prompt },
+        };
+        // 先落库再请求：聊天后台刷新或切换页面时不能把刚点下去的“正在合成”覆盖回待点击状态。
+        setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata: generatingMetadata } : m));
         try {
-            const generated = await generateChatImage({ prompt, config: apiConfig, char });
-            const metadata = { ...(message.metadata || {}), imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'ready', prompt, referenceApplied: generated.referenceApplied } };
-            await DB.updateMessage(message.id, generated.dataUrl);
-            await DB.updateMessageMetadata(message.id, () => metadata);
+            await DB.updateMessageMetadata(message.id, () => generatingMetadata);
+            const generated = await generateChatImage({ prompt, config: apiConfig, char, includeCharacter: message.metadata?.imageGeneration?.includeCharacter === true });
+            const metadata = { ...generatingMetadata, imageGeneration: { ...generatingMetadata.imageGeneration, status: 'ready', referenceApplied: generated.referenceApplied } };
+            await DB.updateMessageContentAndMetadata(message.id, generated.dataUrl, metadata);
+            messageMutationRevisionRef.current += 1;
             setMessages(prev => prev.map(m => m.id === message.id ? { ...m, content: generated.dataUrl, metadata } : m));
             addToast('照片已合成', 'success');
         } catch (error: any) {
             const metadata = { ...(message.metadata || {}), imageGeneration: { ...(message.metadata?.imageGeneration || {}), status: 'failed', prompt } };
             await DB.updateMessageMetadata(message.id, () => metadata);
+            messageMutationRevisionRef.current += 1;
             setMessages(prev => prev.map(m => m.id === message.id ? { ...m, metadata } : m));
-            showError(error?.message || '生图失败，请检查 API 配置');
+            const details = error instanceof Error ? error.message : String(error || '未知错误');
+            showError('生图失败', details || '未知错误，请检查 API 配置与 API 调用记录。');
         } finally { imageGenerationInFlightRef.current.delete(message.id); }
     }, [apiConfig, char, addToast, showError]);
-
-    useEffect(() => {
-        if (!char?.chatImageEnabled || !char.chatImageAutoGenerate || !isImageGenerationConfigured(apiConfig)) return;
-        messages.filter(m => m.role === 'assistant' && m.type === 'image' && m.metadata?.imageGeneration?.status === 'pending' && Date.now() - Number(m.metadata?.imageGeneration?.createdAt || 0) < 60_000).forEach(m => { void handleGeneratePhoto(m); });
-    }, [messages, char?.id, char?.chatImageEnabled, char?.chatImageAutoGenerate, apiConfig, handleGeneratePhoto]);
 
     const handleQuickReply = useCallback((message: Message) => {
         setReplyTarget({
@@ -3861,6 +4031,14 @@ const Chat: React.FC = () => {
                  </div>
              )}
 
+             {relationshipCardOpen && relationshipPulse && (
+                <RelationshipHeartCard
+                    char={char}
+                    pulse={relationshipPulse}
+                    onClose={() => setRelationshipCardOpen(false)}
+                />
+             )}
+
              <ChatModals
                 modalType={modalType} setModalType={setModalType}
                 transferAmt={transferAmt} setTransferAmt={setTransferAmt}
@@ -3872,6 +4050,10 @@ const Chat: React.FC = () => {
                 contextSuiteAnyEnabled={contextSuiteAnyEnabled}
                 contextSuiteAllEnabled={contextSuiteAllEnabled}
                 onToggleContextSuite={handleToggleContextSuite}
+                relationshipProactiveConfig={getRelationshipConfig(char)}
+                onUpdateRelationshipProactiveConfig={(patch) => updateCharacter(char.id, previous => ({
+                    relationshipProactiveConfig: { ...getRelationshipConfig(previous), ...patch },
+                }))}
                 preserveContext={preserveContext} setPreserveContext={setPreserveContext}
                 editContent={editContent} setEditContent={setEditContent}
                 archivePrompts={archivePrompts} selectedPromptId={selectedPromptId} setSelectedPromptId={(id: string) => {
@@ -3896,11 +4078,8 @@ const Chat: React.FC = () => {
                 onSetHistoryStart={handleSetHistoryStart} onRestoreAdaptiveContext={restoreAdaptiveContext} onJumpToMessageInChat={handleJumpToMessageInChat} onEnterSelectionMode={handleEnterSelectionMode}
                 onReplyMessage={handleReplyMessage} onEditMessageStart={() => { if (selectedMessage) { setEditContent(selectedMessage.metadata?.imageGeneration?.prompt || selectedMessage.content); setModalType('edit-message'); } }}
                 onConfirmEditMessage={confirmEditMessage} onDeleteMessage={handleDeleteMessage} onCopyMessage={handleCopyMessage} onDeleteEmoji={handleDeleteEmoji} onDeleteCategory={handleDeleteCategory}
-                onReplyMessage={handleReplyMessage} onEditMessageStart={() => { if (selectedMessage) { setEditContent(selectedMessage.metadata?.imageGeneration?.prompt || selectedMessage.content); setModalType('edit-message'); } }}
-                onConfirmEditMessage={confirmEditMessage} onDeleteMessage={handleDeleteMessage} onCopyMessage={handleCopyMessage}
                 messageFavorited={!!(selectedMessage && contentFavoriteIds.has(contentFavoriteIdForMessage(selectedMessage)))}
                 onToggleMessageFavorite={selectedMessage ? () => handleToggleContentFavorite(selectedMessage) : undefined}
-                onDeleteEmoji={handleDeleteEmoji} onDeleteCategory={handleDeleteCategory}
                 allCharacters={characters} onSaveCategoryVisibility={handleSaveCategoryVisibility}
                 translationEnabled={translationEnabled}
                 onToggleTranslation={() => { const next = !translationEnabled; setTranslationEnabled(next); localStorage.setItem(`chat_translate_enabled_${activeCharacterId}`, JSON.stringify(next)); if (next) { trackEvent('开启聊天翻译', { targetLang: isTranslationLangPreset(translateTargetLang) ? translateTargetLang : 'custom' }); } if (!next) { setShowingTargetIds(new Set()); } }}
@@ -3933,8 +4112,6 @@ const Chat: React.FC = () => {
                 }}
                 chatImageEnabled={!!char.chatImageEnabled}
                 onToggleChatImage={() => updateCharacter(char.id, { chatImageEnabled: !char.chatImageEnabled })}
-                chatImageAutoGenerate={!!char.chatImageAutoGenerate}
-                onToggleChatImageAutoGenerate={() => updateCharacter(char.id, { chatImageAutoGenerate: !char.chatImageAutoGenerate })}
                 voiceAvailable={characterHasVoice(char, apiConfig)}
                 onGenerateVoice={selectedMessage ? () => handleManualTts(selectedMessage) : undefined}
                 voiceDownloadable={!!(selectedMessage?.id && voiceDataMap[selectedMessage.id])}
@@ -4260,6 +4437,14 @@ const Chat: React.FC = () => {
                             onGeneratePhoto={handleGeneratePhoto}
                             onOpenImage={handleOpenImage}
                             onOpenCollaborationFile={handleOpenCollaborationFile}
+                            showRelationshipHeart={!!(
+                                relationshipPulse
+                                && getRelationshipConfig(char).showHeartCard
+                                && m.id === latestAssistantMessageId
+                                && m.role === 'assistant'
+                                && m.type === 'text'
+                            )}
+                            onOpenRelationshipCard={() => setRelationshipCardOpen(true)}
                             thinkingChainOptions={thinkingChainOptions}
                         />
                         {showToolTrace && (

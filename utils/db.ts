@@ -868,12 +868,37 @@ export const DB = {
             if (data) {
                 (data as any).metadata = updater((data as any).metadata);
                 store.put(data);
-                resolve();
             } else {
                 reject(new Error('Message not found'));
             }
         };
         req.onerror = () => reject(req.error);
+        // IndexedDB 的 put() 入队不等于已经落盘。必须等 transaction 完成，
+        // 否则紧接着的聊天重载可能读回更新前的照片状态。
+        transaction.oncomplete = () => resolve();
+        transaction.onerror = () => reject(transaction.error);
+        transaction.onabort = () => reject(transaction.error || new Error('updateMessageMetadata transaction aborted'));
+    });
+  },
+
+  /** 图片合成完成时将正文和 metadata 放在同一个事务写入，避免两次更新互相覆盖。 */
+  updateMessageContentAndMetadata: async (id: number, content: string, metadata: any): Promise<void> => {
+    const db = await openDB();
+    const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
+    const store = transaction.objectStore(STORE_MESSAGES);
+    return new Promise((resolve, reject) => {
+      const req = store.get(id);
+      req.onsuccess = () => {
+        const data = req.result as Message | undefined;
+        if (!data) { reject(new Error('Message not found')); return; }
+        data.content = content;
+        (data as any).metadata = metadata;
+        store.put(data);
+      };
+      req.onerror = () => reject(req.error);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error('updateMessageContentAndMetadata transaction aborted'));
     });
   },
 

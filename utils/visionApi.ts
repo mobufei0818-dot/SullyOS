@@ -12,6 +12,12 @@ export const VISION_API_TEST_IMAGE_DATA_URL = 'data:image/png;base64,iVBORw0KGgo
 const VISION_PROMPT = `请准确、具体地描述图片中实际可见的内容，供另一个无法看图的对话模型理解。
 请覆盖主体、动作、场景、重要物品、画面中的文字或界面信息；不要猜测画面外的信息，不要寒暄，只输出描述正文。`;
 
+const CHARACTER_IDENTITY_PROMPT = `你正在为角色生图提取“稳定身份特征”。只依据照片中实际可见的信息，输出简洁、具体、可直接放进生图提示词的中文描述。
+
+只记录相对稳定、能帮助同一角色跨不同照片保持一致的特征：脸型与轮廓、眉形、眼型/瞳色、鼻唇特征、肤色、发色、发型结构与刘海、明显且不易变化的痣/雀斑/胎记、稳定佩戴的特征性饰品，以及大致的成年感。
+
+绝对不要记录或暗示这张参考照的表情、视线、头部角度、姿势、手势、服装、背景、光线、镜头、滤镜、构图或情绪。不要猜测姓名、身份、职业、种族或照片外信息。不要寒暄、不要标题、不要项目符号；只输出一段身份特征描述。`;
+
 /**
  * 这个值还能拿去识图吗。三种形态都算数：内嵌的 data URL、网络地址，以及本机存的
  * 图片令牌（`blobref:`，二进制在 blob_assets 里，见 utils/blobRef.ts）——令牌发出去
@@ -101,6 +107,48 @@ export async function describeImageWithVisionApi(
   } finally {
     inFlightDescriptions.delete(imageUrl);
   }
+}
+
+/**
+ * 将角色面部参考图转成“身份锚点”：它只用于五官/发型连贯性，刻意排除构图与表情。
+ * 结果仍由用户在角色设定中确认和编辑，避免视觉模型的一次误判被静默固化。
+ */
+export async function extractCharacterIdentityProfile(
+  imageUrl: string,
+  config: VisionApiConfig,
+): Promise<string> {
+  if (!isVisionApiReady(config)) {
+    throw new Error('请先在 设置 → 其他 API 配置可用的识图 API，再提取身份特征');
+  }
+  if (!canDescribeImage(imageUrl)) {
+    throw new Error('参考图数据不可用，无法提取身份特征');
+  }
+
+  const baseUrl = config.baseUrl.trim().replace(/\/+$/, '');
+  const data = await safeFetchJson(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.apiKey.trim()}`,
+    },
+    body: JSON.stringify({
+      model: config.model.trim(),
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'text', text: CHARACTER_IDENTITY_PROMPT },
+          { type: 'image_url', image_url: { url: imageUrl } },
+        ],
+      }],
+      temperature: 0,
+      stream: false,
+    }),
+  }, 1, 60_000, { appName: '角色设定', purpose: '提取生图身份特征' });
+
+  // 身份锚点会被用户复核和编辑，不在前端二次截断；避免长发细节等刚好落在截断点后丢失。
+  const profile = extractContent(data).replace(/\s+/g, ' ').trim();
+  if (!profile) throw new Error('识图 API 没有返回可用的身份特征');
+  return profile;
 }
 
 /**

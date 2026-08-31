@@ -19,17 +19,25 @@ export function isImageGenerationConfigured(config: APIConfig): boolean {
   return !!(c?.apiKey && (c.provider === 'novelai' || (c.baseUrl && c.model)));
 }
 
-export function buildImagePrompt(description: string, config: APIConfig, char?: CharacterProfile): string {
+export function buildImagePrompt(description: string, config: APIConfig, char?: CharacterProfile, includeCharacter = false): string {
   const style = config.imageGeneration?.baseStylePrompt?.trim() || DEFAULT_IMAGE_STYLE_PROMPT;
-  const appearance = char?.imageProfile?.appearancePrompt?.trim();
-  return [style, appearance ? `角色外貌辅助约束：${appearance}` : '', `本次照片内容：${description.trim()}`].filter(Boolean).join('\n\n');
+  const appearance = includeCharacter ? char?.imageProfile?.appearancePrompt?.trim() : '';
+  const identity = includeCharacter ? char?.imageProfile?.identityProfile?.trim() : '';
+  return [
+    style,
+    identity ? `角色身份锚点（必须保持为同一人，只约束五官与发型）：${identity}` : '',
+    appearance ? `用户补充的角色外貌：${appearance}` : '',
+    identity ? '构图独立要求：保持上述身份锚点，但不要复刻参考照的表情、视线、姿势、服装、背景、光线或镜头角度；本次画面应严格遵从下面的照片内容。' : '',
+    includeCharacter ? '' : '这是一张纯场景、物品或生活记录照片：不要额外生成角色、自拍者或任何未在照片内容中明确提到的人物。',
+    `本次照片内容：${description.trim()}`,
+  ].filter(Boolean).join('\n\n');
 }
 
-export async function generateChatImage(input: { prompt: string; config: APIConfig; char: CharacterProfile; }): Promise<{ dataUrl: string; referenceApplied: boolean }> {
+export async function generateChatImage(input: { prompt: string; config: APIConfig; char: CharacterProfile; includeCharacter?: boolean; }): Promise<{ dataUrl: string; referenceApplied: boolean }> {
   const { config, char } = input;
   const c = config.imageGeneration;
   if (!c?.apiKey) throw new Error('请先在设置 → 其他 API 配置生图 Key');
-  const prompt = buildImagePrompt(input.prompt, config, char);
+  const prompt = buildImagePrompt(input.prompt, config, char, input.includeCharacter === true);
   if (c.provider === 'novelai') {
     const url = 'https://image.novelai.net/ai/generate-image';
     const body = { input: prompt, model: c.model || 'nai-diffusion-4-5-full', action: 'generate', parameters: { width: 832, height: 1216, scale: 5, sampler: 'k_euler_ancestral', steps: 28, n_samples: 1, ucPreset: 0, qualityToggle: true, negative_prompt: 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality' } };
@@ -53,7 +61,7 @@ export async function generateChatImage(input: { prompt: string; config: APIConf
   const payload: any = { model: c.model, prompt, n: 1, size: c.size || '1024x1024', response_format: 'b64_json' };
   if (c.quality) payload.quality = c.quality;
   if (c.outputFormat) payload.output_format = c.outputFormat;
-  const reference = char.imageProfile?.faceReferenceImage;
+  const reference = input.includeCharacter === true && char.imageProfile?.referenceMode === 'strong' ? char.imageProfile?.faceReferenceImage : undefined;
   let url = `${base}/images/generations`;
   let options: RequestInit = { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` }, body: JSON.stringify(payload) };
   if (reference) {

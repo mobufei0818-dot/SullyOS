@@ -576,7 +576,7 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
                         <div className="text-slate-400 mt-0.5 truncate">
                           {describeTaskProgress(t, knownRemoteUuids, now, remoteInfo?.status)} · {describeTaskMode(t)}
                           · {describeExpirePolicy(t.expirePolicy)}
-                          · {t.source === 'character' ? '角色创建' : '手动创建'}
+                          · {t.source === 'character' ? '角色创建' : t.source === 'relationship' ? '关系层创建' : '手动创建'}
                         </div>
                         {missingRemote ? (
                           <div className="text-slate-400 mt-1 text-[11px]">⚠ 远端不存在（可能已发送或在别处取消）</div>

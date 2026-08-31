@@ -2,7 +2,7 @@
 import React, { useRef, useState } from 'react';
 import Modal from '../os/Modal';
 import TokenImg from '../os/TokenImg';
-import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot, ApiPreset, APIConfig } from '../../types';
+import { CharacterProfile, Message, EmojiCategory, DailySchedule, ScheduleSlot, ApiPreset, APIConfig, RelationshipProactiveConfig } from '../../types';
 import ScheduleCard from '../schedule/ScheduleCard';
 import EmotionSettingsPanel from './EmotionSettingsPanel';
 import { isTranslationLangPreset, normalizeTranslationLangLabel, TRANSLATION_LANG_MAX_LENGTH, TRANSLATION_LANG_PRESETS } from '../../utils/translationLang';
@@ -30,6 +30,9 @@ interface ChatModalsProps {
     contextSuiteAnyEnabled: boolean;
     contextSuiteAllEnabled: boolean;
     onToggleContextSuite: () => void;
+    relationshipProactiveConfig?: RelationshipProactiveConfig;
+    /** 关系主动消息的设置即时写入角色资料；底部“保存设置”仍负责其它聊天项。 */
+    onUpdateRelationshipProactiveConfig?: (patch: Partial<RelationshipProactiveConfig>) => void;
     preserveContext: boolean;
     setPreserveContext: (v: boolean) => void;
     editContent: string;
@@ -117,8 +120,6 @@ interface ChatModalsProps {
     onSetChatVoiceLang?: (lang: string) => void;
     chatImageEnabled?: boolean;
     onToggleChatImage?: () => void;
-    chatImageAutoGenerate?: boolean;
-    onToggleChatImageAutoGenerate?: () => void;
     // Voice generation from long-press
     onGenerateVoice?: () => void;
     voiceAvailable?: boolean; // true if char has voiceProfile configured
@@ -251,6 +252,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     settingsContextRangeMode, setSettingsContextRangeMode,
     settingsHideSysLogs, setSettingsHideSysLogs,
     contextSuiteAnyEnabled, contextSuiteAllEnabled, onToggleContextSuite,
+    relationshipProactiveConfig, onUpdateRelationshipProactiveConfig,
     preserveContext, setPreserveContext,
     editContent, setEditContent,
     newCategoryName, setNewCategoryName, onAddCategory,
@@ -269,7 +271,7 @@ const ChatModals: React.FC<ChatModalsProps> = ({
     xhsEnabled, onToggleXhs,
     htmlModeEnabled, onToggleHtmlMode, htmlModeCustomPrompt, setHtmlModeCustomPrompt,
     chatVoiceEnabled, onToggleChatVoice, chatVoiceAutoPlay, onToggleChatVoiceAutoPlay, chatVoiceLang, onSetChatVoiceLang,
-    chatImageEnabled, onToggleChatImage, chatImageAutoGenerate, onToggleChatImageAutoGenerate,
+    chatImageEnabled, onToggleChatImage,
     onGenerateVoice, voiceAvailable, onDownloadVoice, voiceDownloadable, onDownloadImage, imageDownloadable, voiceCollectable, onToggleVoiceFavorite, voiceFavorited,
     scheduleData, isScheduleGenerating, onScheduleEdit, onScheduleDelete, onScheduleReroll, onScheduleCoverChange,
     onScheduleStyleChange, onPlayTheater,
@@ -422,6 +424,51 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                              </button>
                          </div>
                      </div>
+
+                     {relationshipProactiveConfig && (
+                        <div className="rounded-2xl border border-rose-200 bg-gradient-to-br from-rose-50 to-violet-50 p-3.5">
+                            <div className="flex items-start justify-between gap-3">
+                                <div>
+                                    <div className="text-xs font-bold text-rose-700">关系主动消息</div>
+                                    <p className="mt-1 text-[10px] leading-relaxed text-rose-600/90">复用主动消息 2.0 的云端排程。角色回复后的联系机会会随你的回复取消并重算。</p>
+                                </div>
+                                <button type="button" onClick={() => onUpdateRelationshipProactiveConfig?.({ enabled: !relationshipProactiveConfig.enabled })} className={`relative h-6 w-11 shrink-0 rounded-full p-1 transition-colors ${relationshipProactiveConfig.enabled ? 'bg-rose-400' : 'bg-slate-200'}`} aria-pressed={relationshipProactiveConfig.enabled}>
+                                    <span className={`block h-4 w-4 rounded-full bg-white shadow transition-transform ${relationshipProactiveConfig.enabled ? 'translate-x-5' : ''}`} />
+                                </button>
+                            </div>
+                            {relationshipProactiveConfig.enabled && (
+                                <div className="mt-3 space-y-3 border-t border-rose-100 pt-3">
+                                    <div>
+                                        <div className="mb-1.5 text-[10px] font-bold text-slate-400">主动程度</div>
+                                        <div className="grid grid-cols-3 gap-1.5">
+                                            {([['reserved', '克制'], ['natural', '自然'], ['clingy', '黏人']] as const).map(([value, label]) => (
+                                                <button key={value} type="button" onClick={() => onUpdateRelationshipProactiveConfig?.({ initiativeStyle: value })} className={`rounded-xl py-2 text-[11px] font-bold transition-colors ${relationshipProactiveConfig.initiativeStyle === value ? 'bg-rose-400 text-white' : 'bg-white/75 text-slate-500'}`}>{label}</button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                    <div className="flex items-center justify-between gap-3">
+                                        <span className="text-[11px] font-bold text-slate-500">承诺后的自然跟进</span>
+                                        <button type="button" onClick={() => onUpdateRelationshipProactiveConfig?.({ followUpPromises: !relationshipProactiveConfig.followUpPromises })} className={`relative h-5 w-9 rounded-full p-0.5 ${relationshipProactiveConfig.followUpPromises ? 'bg-rose-400' : 'bg-slate-200'}`}><span className={`block h-4 w-4 rounded-full bg-white transition-transform ${relationshipProactiveConfig.followUpPromises ? 'translate-x-4' : ''}`} /></button>
+                                    </div>
+                                    <div className="flex items-center justify-between gap-3">
+                                        <span className="text-[11px] font-bold text-slate-500">显示消息末尾爱心卡</span>
+                                        <button type="button" onClick={() => onUpdateRelationshipProactiveConfig?.({ showHeartCard: !relationshipProactiveConfig.showHeartCard })} className={`relative h-5 w-9 rounded-full p-0.5 ${relationshipProactiveConfig.showHeartCard ? 'bg-rose-400' : 'bg-slate-200'}`}><span className={`block h-4 w-4 rounded-full bg-white transition-transform ${relationshipProactiveConfig.showHeartCard ? 'translate-x-4' : ''}`} /></button>
+                                    </div>
+                                    <div className="grid grid-cols-[1fr_auto] items-center gap-3">
+                                        <span className="text-[11px] font-bold text-slate-500">每天最多联系机会</span>
+                                        <select value={relationshipProactiveConfig.dailyLimit} onChange={event => onUpdateRelationshipProactiveConfig?.({ dailyLimit: Number(event.target.value) })} className="rounded-lg border border-rose-100 bg-white px-2 py-1 text-[11px] font-bold text-slate-600">
+                                            {[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>{value} 次</option>)}
+                                        </select>
+                                    </div>
+                                    <div className="flex items-center justify-between gap-3">
+                                        <span className="text-[11px] font-bold text-slate-500">免打扰时段</span>
+                                        <button type="button" onClick={() => onUpdateRelationshipProactiveConfig?.({ quietHoursEnabled: !relationshipProactiveConfig.quietHoursEnabled })} className={`relative h-5 w-9 rounded-full p-0.5 ${relationshipProactiveConfig.quietHoursEnabled ? 'bg-rose-400' : 'bg-slate-200'}`}><span className={`block h-4 w-4 rounded-full bg-white transition-transform ${relationshipProactiveConfig.quietHoursEnabled ? 'translate-x-4' : ''}`} /></button>
+                                    </div>
+                                    {relationshipProactiveConfig.quietHoursEnabled && <div className="flex items-center gap-2 text-[11px] text-slate-500"><input type="time" value={relationshipProactiveConfig.quietHoursStart} onChange={event => onUpdateRelationshipProactiveConfig?.({ quietHoursStart: event.target.value })} className="min-w-0 rounded-lg border border-rose-100 bg-white px-2 py-1" /><span>至</span><input type="time" value={relationshipProactiveConfig.quietHoursEnd} onChange={event => onUpdateRelationshipProactiveConfig?.({ quietHoursEnd: event.target.value })} className="min-w-0 rounded-lg border border-rose-100 bg-white px-2 py-1" /></div>}
+                                </div>
+                            )}
+                        </div>
+                     )}
 
                      <div>
                          <label className="text-xs font-bold text-slate-400 uppercase mb-2 block">聊天背景</label>
@@ -652,13 +699,6 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                              <div className={`w-10 h-6 rounded-full p-1 transition-colors flex items-center ${chatImageEnabled ? 'bg-violet-500' : 'bg-slate-200'}`}><div className={`w-4 h-4 bg-white rounded-full shadow-sm transition-transform ${chatImageEnabled ? 'translate-x-4' : ''}`} /></div>
                          </div>
                          <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">开启后，角色可在合适的时候发送照片描述卡；需要先在设置中配置生图 API。</p>
-                         {chatImageEnabled && <div className="mt-3 pt-3 border-t border-slate-100">
-                             <div className="flex justify-between items-center cursor-pointer" onClick={onToggleChatImageAutoGenerate}>
-                                 <label className="text-[10px] font-bold text-slate-400 uppercase pointer-events-none">收到就自动生图</label>
-                                 <div className={`w-9 h-5 rounded-full p-1 transition-colors flex items-center ${chatImageAutoGenerate ? 'bg-violet-500' : 'bg-slate-200'}`}><div className={`w-3 h-3 bg-white rounded-full shadow-sm transition-transform ${chatImageAutoGenerate ? 'translate-x-4' : ''}`} /></div>
-                             </div>
-                             <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">关闭时点击照片卡才会合成。自动合成失败只提示一次，不会反复扣费重试。</p>
-                         </div>}
                      </div>
 
                      <div className="pt-2 border-t border-slate-100">

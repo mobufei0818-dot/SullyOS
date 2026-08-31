@@ -1240,7 +1240,6 @@ const Settings: React.FC = () => {
       fishAudioApiKey: localFishKey,
       fishAudioModel: localFishModel,
       imageGeneration: { provider: imageProvider, baseUrl: imageUrl.trim(), apiKey: imageKey.trim(), model: imageModel.trim(), size: imageSize, quality: imageQuality, outputFormat: imageFormat, baseStylePrompt: imageStylePrompt.trim() },
-      imageGeneration: { provider: imageProvider, baseUrl: imageUrl.trim(), apiKey: imageKey.trim(), model: imageModel.trim(), size: imageSize, quality: imageQuality, outputFormat: imageFormat, baseStylePrompt: imageStylePrompt.trim() },
       elevenLabsApiKey: localElevenLabsKey,
       elevenLabsModel: localElevenLabsModel,
       elevenLabsStability: localElevenLabsStability,
