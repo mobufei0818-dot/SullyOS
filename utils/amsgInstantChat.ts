@@ -40,6 +40,57 @@ export const AMSG_INSTANT_CHAT_PENDING_LS_KEY = 'amsg2_instant_chat_pending';
 /** 待收记录变动时广播；Chat 界面据此点亮/熄灭「正在输入…」。detail 只带 charId。 */
 export const AMSG_INSTANT_CHAT_PENDING_EVENT = 'amsg-instant-chat-pending';
 
+/**
+ * 用户明确按下「停止生成」后的本地终态账本。
+ *
+ * `cancel-message` 能取消尚未开始的云端任务；若上游模型已经在运行，网络层无法保证把它的
+ * 推理即时掐断。该账本确保无论回复经 Web Push 还是 outbox 补收迟到，都不会再写进聊天。
+ * 仅保留一天，既覆盖云端重试/网络延迟，也不会把本地存储无限积累。
+ */
+export const AMSG_INSTANT_CHAT_CANCELLED_LS_KEY = 'amsg2_instant_chat_cancelled';
+const CANCELLED_INSTANT_CHAT_TTL_MS = 24 * 60 * 60 * 1000;
+
+interface CancelledInstantChat {
+  charId: string;
+  uuid: string;
+  cancelledAt: number;
+}
+
+type CancelledInstantChatMap = Record<string, CancelledInstantChat>;
+
+const readCancelledMap = (): CancelledInstantChatMap => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(AMSG_INSTANT_CHAT_CANCELLED_LS_KEY) || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const now = Date.now();
+    const next: CancelledInstantChatMap = {};
+    for (const [uuid, raw] of Object.entries(parsed as Record<string, unknown>)) {
+      const entry = raw as Partial<CancelledInstantChat> | null;
+      if (!entry || entry.uuid !== uuid || typeof entry.charId !== 'string' || typeof entry.cancelledAt !== 'number') continue;
+      if (now - entry.cancelledAt <= CANCELLED_INSTANT_CHAT_TTL_MS) next[uuid] = { charId: entry.charId, uuid, cancelledAt: entry.cancelledAt };
+    }
+    return next;
+  } catch {
+    return {};
+  }
+};
+
+const writeCancelledMap = (map: CancelledInstantChatMap): void => {
+  try {
+    if (Object.keys(map).length === 0) localStorage.removeItem(AMSG_INSTANT_CHAT_CANCELLED_LS_KEY);
+    else localStorage.setItem(AMSG_INSTANT_CHAT_CANCELLED_LS_KEY, JSON.stringify(map));
+  } catch { /* 本地存储不可写时，远端取消仍然照常执行。 */ }
+};
+
+export const isInstantChatCancelled = (charId: string, uuid: string | undefined): boolean => {
+  if (!uuid) return false;
+  const map = readCancelledMap();
+  const entry = map[uuid];
+  // 顺手清掉过期项；不影响本次判断。
+  writeCancelledMap(map);
+  return !!entry && entry.charId === charId;
+};
+
 export interface AmsgInstantChatPending {
   charId: string;
   /** 这一轮在云端那条任务的 uuid；连发下一条时用它顶掉未认领的这条。 */
@@ -116,6 +167,25 @@ export const clearInstantChatPending = (charId: string): boolean => {
   delete map[charId];
   writePendingMap(map);
   announcePendingChanged(charId);
+  return true;
+};
+
+/**
+ * 云端取消已确认后，完成客户端这一半的收尾。
+ *
+ * 不能在 `cancel-message` 之前调用：网络/鉴权失败时用户仍应继续等原任务，不能把仍会成功
+ * 的回复静默吞掉。调用方仅在取消接口成功（包括远端已不存在）后调用本函数。
+ */
+export const abandonInstantChatPending = (charId: string, uuid: string): boolean => {
+  if (getInstantChatPending(charId)?.uuid !== uuid) return false;
+  const cancelled = readCancelledMap();
+  cancelled[uuid] = { charId, uuid, cancelledAt: Date.now() };
+  writeCancelledMap(cancelled);
+  if (!clearInstantChatPending(charId)) return false;
+  discardInstantChatExpiredNotices(charId, uuid);
+  announceEmotionDone(charId);
+  settleCloudApiCall({ id: cloudApiCallLogId(uuid), ok: false });
+  trackEvent('即时对话用户停止生成');
   return true;
 };
 
