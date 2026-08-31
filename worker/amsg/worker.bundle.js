@@ -8981,7 +8981,8 @@ var configureRelationshipEngine = (env) => {
   configuredEnv = env;
 };
 var HOUR = 60 * 6e4;
-var clamp = (value, min = 0, max = 100) => Math.round(Math.max(min, Math.min(max, value)));
+var clamp = (value, min = 0, max = 100) => Math.max(min, Math.min(max, value));
+var isTakeoutPromise = (kind) => kind === "takeout_to_user" || kind === "takeout_to_character";
 var ratePerMs = (style) => style === "clingy" ? 30 / HOUR : style === "reserved" ? 6 / HOUR : 9 / HOUR;
 var dayKey = (time, tzId) => {
   try {
@@ -9036,15 +9037,16 @@ var save = async (env, record) => {
   const key = await deriveUserEncryptionKey(record.userId, env.AMSG_MASTER_KEY);
   const payload = await encryptForStorage(JSON.stringify(record), key);
   const now = Date.now();
-  const nextTickAt = record.config.enabled ? now + 10 * 6e4 : now + 24 * HOUR;
+  const normalTickAt = record.config.enabled ? now + 10 * 6e4 : now + 24 * HOUR;
+  const nextTickAt = record.promiseDueAt && record.promiseDueAt > now ? Math.min(normalTickAt, record.promiseDueAt) : normalTickAt;
   await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at, next_tick_at)
     VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, next_tick_at = excluded.next_tick_at`).bind(record.userId, record.charId, payload, now, nextTickAt).run();
 };
 var publicState = (state) => ({
-  longing: state.longing,
-  nextThreshold: state.nextThreshold,
-  affection: state.affection,
-  jealousy: state.jealousy,
+  longing: Math.round(state.longing),
+  nextThreshold: Math.round(state.nextThreshold),
+  affection: Math.round(state.affection),
+  jealousy: Math.round(state.jealousy),
   innerVoice: state.innerVoice,
   dailySent: state.dailySent,
   updatedAt: state.lastCalculatedAt
@@ -9059,7 +9061,11 @@ var advance = (state, now) => {
   state.longing = clamp(state.longing + elapsed * ratePerMs(state.config.initiativeStyle));
   state.lastCalculatedAt = now;
 };
-var signalDelta = (signal) => signal === "affectionate" ? 2 : signal === "distant" ? 1 : -4;
+var replyDelta = (gapMs, signal) => {
+  const gapMinutes = Math.max(0, gapMs) / 6e4;
+  const relief = gapMinutes >= 180 ? -8 : gapMinutes >= 60 ? -4 : gapMinutes >= 20 ? -1.5 : -0.35;
+  return relief + (signal === "affectionate" ? 2 : signal === "distant" ? 1 : 0);
+};
 var syncRelationshipState = async (env, userId, input) => {
   const now = Date.now();
   let state = await load(env, userId, input.charId);
@@ -9083,12 +9089,12 @@ var syncRelationshipState = async (env, userId, input) => {
       lastDispatchAt: 0,
       dailyDate: dayKey(now, input.tzId || "UTC"),
       dailySent: 0,
-      ...input.config.followUpPromises && input.promise && input.promise.dueAt > now ? { promiseDueAt: input.promise.dueAt, promiseKind: input.promise.kind } : {}
+      ...(input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now ? { promiseDueAt: input.promise.dueAt, promiseKind: input.promise.kind } : {}
     };
   } else {
     advance(state, now);
     const receivedNewUserMessage = (input.lastUserAt || 0) > state.lastUserAt;
-    if (receivedNewUserMessage) state.longing = clamp(state.longing + signalDelta(input.userSignal));
+    if (receivedNewUserMessage) state.longing = clamp(state.longing + replyDelta((input.lastUserAt || now) - state.lastUserAt, input.userSignal));
     state.lastUserAt = Math.max(state.lastUserAt, input.lastUserAt || 0);
     state.lastAssistantAt = Math.max(state.lastAssistantAt, input.lastAssistantAt || 0);
     state.charName = input.charName || state.charName;
@@ -9098,7 +9104,7 @@ var syncRelationshipState = async (env, userId, input) => {
     if (typeof input.affection === "number") state.affection = clamp(input.affection);
     if (typeof input.jealousy === "number") state.jealousy = clamp(input.jealousy);
     if (typeof input.innerVoice === "string" && input.innerVoice.trim()) state.innerVoice = input.innerVoice.trim();
-    if (input.config.followUpPromises && input.promise && input.promise.dueAt > now && input.promise.dueAt - now < 3 * 60 * 6e4) {
+    if ((input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now && input.promise.dueAt - now < 3 * 60 * 6e4) {
       state.promiseDueAt = input.promise.dueAt;
       state.promiseKind = input.promise.kind;
     }
@@ -9155,7 +9161,7 @@ var runRelationshipTick = async (env, schedule) => {
     const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 6e4;
     const inactiveEnough = now - Math.max(state.lastUserAt, state.lastAssistantAt) >= minGap;
     const thresholdDue = state.longing >= state.nextThreshold;
-    const promiseDue = Boolean(state.config.followUpPromises && state.promiseDueAt && now >= state.promiseDueAt);
+    const promiseDue = Boolean((state.config.followUpPromises || isTakeoutPromise(state.promiseKind)) && state.promiseDueAt && now >= state.promiseDueAt);
     const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
     const canDispatch = !state.pendingTaskUuid && now - state.lastDispatchAt >= minGap && !inQuietHours(now, state.config, state.tzId);
     if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
@@ -14068,6 +14074,7 @@ var scheduleRelationshipTask = async (env, state) => {
   try {
     const userKey = await deriveUserEncryptionKey(state.userId, env.AMSG_MASTER_KEY);
     const clientTaskId = crypto.randomUUID();
+    const takeoutInstruction = state.promiseKind === "takeout_to_user" ? "\u6B64\u524D\u89D2\u8272\u5DF2\u5728\u804A\u5929\u4E2D\u660E\u786E\u4E3A\u7528\u6237\u70B9\u8FC7\u5916\u5356\uFF1B\u6B64\u523B\u6B63\u662F\u9884\u8BA1\u9001\u8FBE\u65F6\u6BB5\u3002\u8BF7\u4EE5\u89D2\u8272\u8BED\u6C14\u81EA\u7136\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6536\u5230\u3001\u662F\u5426\u65B9\u4FBF\u4E0B\u697C\u62FF\u9910\u3002\u4E0D\u5F97\u5047\u5B9A\u7528\u6237\u5DF2\u6536\u5230\uFF0C\u4E5F\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u6216\u6A21\u578B\u3002" : state.promiseKind === "takeout_to_character" ? "\u6B64\u524D\u7528\u6237\u5DF2\u5728\u804A\u5929\u4E2D\u660E\u786E\u4E3A\u89D2\u8272\u70B9\u8FC7\u5916\u5356\uFF1B\u6B64\u523B\u6B63\u662F\u9884\u8BA1\u9001\u8FBE\u65F6\u6BB5\u3002\u8BF7\u4EE5\u89D2\u8272\u8BED\u6C14\u81EA\u7136\u544A\u8BC9\u7528\u6237\u81EA\u5DF1\u521A\u62FF\u5230\u5916\u5356\u6216\u6B63\u51C6\u5907\u53BB\u53D6\uFF0C\u5E76\u8868\u8FBE\u76F8\u5E94\u60C5\u7EEA\u3002\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u6216\u6A21\u578B\u3002" : "\u5173\u7CFB\u5C42\u8054\u7CFB\u673A\u4F1A\uFF1A\u7ED3\u5408\u89D2\u8272\u8BBE\u5B9A\u3001\u8FD1\u671F\u804A\u5929\u3001\u771F\u5B9E\u7ECF\u8FC7\u65F6\u95F4\u4E0E\u5F53\u524D\u65E5\u7A0B\uFF0C\u81EA\u7136\u5730\u51B3\u5B9A\u662F\u5426\u8054\u7CFB\u7528\u6237\u3002\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u3001\u601D\u5FF5\u503C\u6216\u4EFB\u52A1\uFF1B\u82E5\u7528\u6237\u521A\u5F00\u59CB\u804A\u5929\u6216\u4E0D\u9002\u5408\u6253\u6270\uFF0C\u8BF7\u8DF3\u8FC7\u3002";
     const payload = {
       contactName: state.charName,
       messageType: "prompted",
@@ -14086,7 +14093,7 @@ var scheduleRelationshipTask = async (env, state) => {
         amsgClientTaskId: clientTaskId,
         amsgExpirePolicy: "expire",
         amsgRelationship: true,
-        amsgTaskInstruction: buildTaskInstruction("prompted", "\u5173\u7CFB\u5C42\u8054\u7CFB\u673A\u4F1A\uFF1A\u7ED3\u5408\u89D2\u8272\u8BBE\u5B9A\u3001\u8FD1\u671F\u804A\u5929\u3001\u771F\u5B9E\u7ECF\u8FC7\u65F6\u95F4\u4E0E\u5F53\u524D\u65E5\u7A0B\uFF0C\u81EA\u7136\u5730\u51B3\u5B9A\u662F\u5426\u8054\u7CFB\u7528\u6237\u3002\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u3001\u601D\u5FF5\u503C\u6216\u4EFB\u52A1\uFF1B\u82E5\u7528\u6237\u521A\u5F00\u59CB\u804A\u5929\u6216\u4E0D\u9002\u5408\u6253\u6270\uFF0C\u8BF7\u8DF3\u8FC7\u3002")
+        amsgTaskInstruction: buildTaskInstruction("prompted", takeoutInstruction)
       }
     };
     const encrypted = await encryptRelationshipPayload(payload, userKey);
