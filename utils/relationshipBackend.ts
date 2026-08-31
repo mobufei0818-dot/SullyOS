@@ -53,6 +53,14 @@ const asPulse = (data: any): RelationshipPulse | null => {
     dailySent: Number(data.dailySent) || 0,
     updatedAt: Number(data.updatedAt) || Date.now(),
     innerVoice: typeof data.innerVoice === 'string' ? data.innerVoice : '',
+    diagnostics: data.diagnostics && typeof data.diagnostics === 'object' ? {
+      pendingTaskUuid: typeof data.diagnostics.pendingTaskUuid === 'string' ? data.diagnostics.pendingTaskUuid : undefined,
+      lastDispatchAt: Number(data.diagnostics.lastDispatchAt) || undefined,
+      nextTickAt: Number(data.diagnostics.nextTickAt) || undefined,
+      lastScheduleError: typeof data.diagnostics.lastScheduleError === 'string' ? data.diagnostics.lastScheduleError : undefined,
+      lastScheduleErrorAt: Number(data.diagnostics.lastScheduleErrorAt) || undefined,
+      status: typeof data.diagnostics.status === 'string' ? data.diagnostics.status : undefined,
+    } : undefined,
   };
 };
 
