@@ -2904,7 +2904,7 @@ const encryptRelationshipPayload = async (payload: Record<string, unknown>, keyH
 
 const scheduleRelationshipTask = async (env: Env, state: {
   userId: string; charId: string; charName: string; tzId: string; credRef: string; promiseKind?: string;
-}): Promise<string | null> => {
+}): Promise<{ uuid?: string; error?: string }> => {
   try {
     const userKey = await deriveUserEncryptionKey(state.userId, env.AMSG_MASTER_KEY);
     const clientTaskId = crypto.randomUUID();
@@ -2937,13 +2937,14 @@ const scheduleRelationshipTask = async (env: Env, state: {
     }), env);
     const body = await result.json() as { success?: boolean; data?: { uuid?: string }; error?: { message?: string } };
     if (!result.ok || !body.success || !body.data?.uuid) {
-      console.warn('[relationship] 原版任务创建失败', body.error?.message || result.status);
-      return null;
+      const error = body.error?.message || `原版任务创建接口返回 HTTP ${result.status}。`;
+      console.warn('[relationship] 原版任务创建失败', error);
+      return { error };
     }
-    return body.data.uuid;
+    return { uuid: body.data.uuid };
   } catch (error) {
     console.warn('[relationship] 原版任务创建异常', error);
-    return null;
+    return { error: error instanceof Error ? error.message : '原版任务创建时发生未知异常。' };
   }
 };
 
