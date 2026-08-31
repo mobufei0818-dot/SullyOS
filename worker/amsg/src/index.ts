@@ -2903,11 +2903,16 @@ const encryptRelationshipPayload = async (payload: Record<string, unknown>, keyH
 };
 
 const scheduleRelationshipTask = async (env: Env, state: {
-  userId: string; charId: string; charName: string; tzId: string; credRef: string;
+  userId: string; charId: string; charName: string; tzId: string; credRef: string; promiseKind?: string;
 }): Promise<string | null> => {
   try {
     const userKey = await deriveUserEncryptionKey(state.userId, env.AMSG_MASTER_KEY);
     const clientTaskId = crypto.randomUUID();
+    const takeoutInstruction = state.promiseKind === 'takeout_to_user'
+      ? '此前角色已在聊天中明确为用户点过外卖；此刻正是预计送达时段。请以角色语气自然询问用户是否收到、是否方便下楼拿餐。不得假定用户已收到，也不要提及系统、排程或模型。'
+      : state.promiseKind === 'takeout_to_character'
+        ? '此前用户已在聊天中明确为角色点过外卖；此刻正是预计送达时段。请以角色语气自然告诉用户自己刚拿到外卖或正准备去取，并表达相应情绪。不要提及系统、排程或模型。'
+        : '关系层联系机会：结合角色设定、近期聊天、真实经过时间与当前日程，自然地决定是否联系用户。不要提及系统、排程、思念值或任务；若用户刚开始聊天或不适合打扰，请跳过。';
     const payload = {
       contactName: state.charName,
       messageType: 'prompted', messageSubtype: 'chat',
@@ -2919,7 +2924,7 @@ const scheduleRelationshipTask = async (env: Env, state: {
         charId: state.charId, charName: state.charName, source: 'active_msg_2',
         amsgMode: 'prompted', amsgClientTaskId: clientTaskId, amsgExpirePolicy: 'expire',
         amsgRelationship: true,
-        amsgTaskInstruction: buildTaskInstruction('prompted', '关系层联系机会：结合角色设定、近期聊天、真实经过时间与当前日程，自然地决定是否联系用户。不要提及系统、排程、思念值或任务；若用户刚开始聊天或不适合打扰，请跳过。'),
+        amsgTaskInstruction: buildTaskInstruction('prompted', takeoutInstruction),
       },
     };
     const encrypted = await encryptRelationshipPayload(payload, userKey);
