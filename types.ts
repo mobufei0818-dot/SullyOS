@@ -469,11 +469,16 @@ export interface RelationshipProactiveConfig {
   quietHoursEnabled: boolean;
   quietHoursStart: string;
   quietHoursEnd: string;
-  /** 关系层每日最多创建/送达的联系机会，1–5。 */
+  /**
+   * 每日主动消息目标；0 表示不做每日补足，只按思念阈值触发。
+   * 这不是硬性的「最多」：存在自然空档时，关系层会尽量补足目标。
+   */
   dailyLimit: number;
+  /** 两次关系层主动消息之间的最短自然间隔（分钟）。 */
+  minimumIntervalMinutes?: number;
   /** 角色说了“忙完/到家后再来”等具有后续含义的话时，优先按合理时间窗跟进。 */
   followUpPromises: boolean;
-  /** 最新一条角色消息末尾显示爱心入口。 */
+  /** 点击角色头像打开关系卡。 */
   showHeartCard: boolean;
 }
 
@@ -486,6 +491,10 @@ export interface RelationshipPulse {
   updatedAt: number;
   lastUserReplyAt?: number;
   innerVoice?: string;
+  /** 下一次需要达到的思念值触发线；由 Worker 持久化并返回。 */
+  nextThreshold?: number;
+  /** 当地当天已实际送达的关系主动消息数。 */
+  dailySent?: number;
 }
 
 /** 任务「没了」的回执台账（amsg-local IDB kv，按角色一条数组）。 */

@@ -103,6 +103,7 @@ import {
 } from '../../../utils/amsgToolPack';
 import { buildRealtimeWorldBlock } from './realtimeWorld';
 import { handleSelfUpdate } from './selfUpdate';
+import { handleRelationshipRequest, runRelationshipTick, type RelationshipEngineEnv } from './relationshipEngine';
 import {
   buildMcpDirectHeaders,
   buildMcpFireBlock,
@@ -2867,6 +2868,60 @@ const upstream = createSingleUserCloudflareWorker(buildWorkerConfig, {
   },
 });
 
+/** 关系层在 Cron 内创建的仍是原版加密 prompted 任务；不另开消息/推送通道。 */
+const bytesFromHex = (value: string) => {
+  const bytes = new Uint8Array(value.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+  return bytes;
+};
+const base64 = (bytes: Uint8Array) => btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join(''));
+const encryptRelationshipPayload = async (payload: Record<string, unknown>, keyHex: string) => {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.importKey('raw', bytesFromHex(keyHex), { name: 'AES-GCM' }, false, ['encrypt']);
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(JSON.stringify(payload))));
+  return { iv: base64(iv), authTag: base64(cipher.slice(-16)), encryptedData: base64(cipher.slice(0, -16)) };
+};
+
+const scheduleRelationshipTask = async (env: Env, state: {
+  userId: string; charId: string; charName: string; tzId: string; credRef: string;
+}): Promise<string | null> => {
+  try {
+    const userKey = await deriveUserEncryptionKey(state.userId, env.AMSG_MASTER_KEY);
+    const clientTaskId = crypto.randomUUID();
+    const payload = {
+      contactName: state.charName,
+      messageType: 'prompted', messageSubtype: 'chat',
+      // amsg-server 对即将到点的任务有护栏；留出一分半钟给下一跳 Cron。
+      firstSendTime: new Date(Date.now() + 90_000).toISOString(), recurrenceType: 'none', tzId: state.tzId,
+      messages: [{ role: 'user', content: '关系主动消息任务由 fire-time hook 现场生成。' }],
+      credRefs: { chat: state.credRef },
+      metadata: {
+        charId: state.charId, charName: state.charName, source: 'active_msg_2',
+        amsgMode: 'prompted', amsgClientTaskId: clientTaskId, amsgExpirePolicy: 'expire',
+        amsgRelationship: true,
+        amsgTaskInstruction: buildTaskInstruction('prompted', '关系层联系机会：结合角色设定、近期聊天、真实经过时间与当前日程，自然地决定是否联系用户。不要提及系统、排程、思念值或任务；若用户刚开始聊天或不适合打扰，请跳过。'),
+      },
+    };
+    const encrypted = await encryptRelationshipPayload(payload, userKey);
+    const result = await upstream.fetch(new Request('https://sullyos-relationship.internal/schedule-message', {
+      method: 'POST', headers: {
+        'Content-Type': 'application/json', 'X-User-Id': state.userId,
+        'X-Payload-Encrypted': 'true', 'X-Encryption-Version': '1',
+        ...(env.AMSG_SERVER_TOKEN?.trim() ? { 'X-Client-Token': env.AMSG_SERVER_TOKEN.trim() } : {}),
+      }, body: JSON.stringify(encrypted),
+    }), env);
+    const body = await result.json() as { success?: boolean; data?: { uuid?: string }; error?: { message?: string } };
+    if (!result.ok || !body.success || !body.data?.uuid) {
+      console.warn('[relationship] 原版任务创建失败', body.error?.message || result.status);
+      return null;
+    }
+    return body.data.uuid;
+  } catch (error) {
+    console.warn('[relationship] 原版任务创建异常', error);
+    return null;
+  }
+};
+
 /**
  * 库的表结构跟当前这版代码对不对得上。
  *
@@ -3063,6 +3118,9 @@ export default {
       });
     }
 
+    const relationshipResponse = await handleRelationshipRequest(request, env as RelationshipEngineEnv);
+    if (relationshipResponse) return relationshipResponse;
+
     // 即时对话：一个请求把「传云端状态 + 建任务」串完，回 202 之后立刻起一跳。
     // 排在配置门之后，所以走到这里 D1 和密钥必然都在。
     if (pathname.endsWith('/instant-chat')) {
@@ -3086,6 +3144,15 @@ export default {
     if (!report.ok) {
       console.error(`[amsg] 定时任务整轮跳过：${report.message}`);
       return;
+    }
+    // 关系层先按 10 分钟量级的时间差推进状态。Cron 仍每分钟运行以保留原版 AMSG
+    // 的准时投递；关系层自己只会在差值累计到 10 分钟时产生可见变化。
+    try {
+      const relation = await runRelationshipTick(env as RelationshipEngineEnv, (state) => scheduleRelationshipTask(env, state));
+      if (relation.scheduled) console.log(`[relationship] scheduled=${relation.scheduled}`);
+    } catch (error) {
+      // 关系层故障不能阻断原版主动消息 2.0 的整轮投递。
+      console.warn('[relationship] tick failed', error);
     }
     // 整轮出错时上游把原因放在返回值里（同一份也会经 onError 记一行）。这里不再重复
     // 打印，但要把它咽掉——CF 不看 scheduled 的返回值，往外抛只会变成一条没上下文的堆栈。

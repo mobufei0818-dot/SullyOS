@@ -15,6 +15,7 @@ export const DEFAULT_RELATIONSHIP_PROACTIVE_CONFIG: RelationshipProactiveConfig 
   quietHoursStart: '23:30',
   quietHoursEnd: '08:00',
   dailyLimit: 2,
+  minimumIntervalMinutes: 60,
   followUpPromises: true,
   showHeartCard: true,
 };
@@ -65,11 +66,13 @@ export const followUpDelayMs = (kind: RelationshipFollowUpKind, style: Relations
 };
 
 /** 没有明确承诺时，关系层也只留一个克制的未来联系机会，避免沉默被永久遗漏。 */
-export const connectionDelayMs = (style: RelationshipInitiativeStyle, longing: number): number => {
-  const base = style === 'clingy' ? 3.5 * HOUR : style === 'reserved' ? 8 * HOUR : 5.5 * HOUR;
-  // 思念越高，间隔最多收短约 45%；不使用分钟级高频打扰。
-  return Math.round(base * (1 - Math.max(0, longing - 35) / 150));
-};
+/**
+ * 旧的前端临时排程间隔已废弃。关系层改为 Worker/D1 的「统一阈值 30 + 不同增长速率」：
+ * 粘人 5 / 10min（约 1h），自然 1.5 / 10min（约 3h20m），克制 1 / 10min（约 5h）。
+ * 仍保留这个导出给旧记录兼容；新逻辑不应再拿它创建任务。
+ */
+export const connectionDelayMs = (style: RelationshipInitiativeStyle, _longing: number): number =>
+  style === 'clingy' ? HOUR : style === 'reserved' ? 5 * HOUR : Math.round((10 / 3) * HOUR);
 
 export const relationshipDailyKey = (charId: string, timestamp = Date.now()) => {
   const d = new Date(timestamp);
@@ -116,7 +119,7 @@ export const calculateRelationshipPulse = (
     baselineLonging: longing,
     updatedAt: now,
     lastUserReplyAt: lastUser?.timestamp,
-    innerVoice: (previous?.innerVoice || fallbackVoice).slice(0, 30),
+    innerVoice: previous?.innerVoice || fallbackVoice,
   };
 };
 

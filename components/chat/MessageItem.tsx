@@ -1428,7 +1428,7 @@ interface MessageItemProps {
     onOpenImage?: (m: Message) => void;
     /** 打开协同文件柜里的原始 Blob；消息本身只保存 assetId 引用。 */
     onOpenCollaborationFile?: (m: Message) => void | Promise<void>;
-    /** 仅在最新一条角色文字消息末尾显示的关系状态入口。 */
+    /** 角色头像作为关系状态入口。 */
     showRelationshipHeart?: boolean;
     onOpenRelationshipCard?: () => void;
     /** 思考链卡片视觉与交互 */
@@ -1635,7 +1635,7 @@ const MessageItem = React.memo(({
         options?: { visible?: boolean; className?: string },
     ) => {
         const visible = options?.visible ?? shouldShowAvatar;
-        return (
+        const content = (
             <div className={`relative ${avatarSizeClass} z-0 ${options?.className || ''}`}>
                 {visible && (
                     <>
@@ -1663,6 +1663,20 @@ const MessageItem = React.memo(({
                 )}
             </div>
         );
+        if (showRelationshipHeart && !isUser && !selectionMode && visible) {
+            return (
+                <button
+                    type="button"
+                    className="relative z-10 rounded-full transition-transform active:scale-90"
+                    onClick={(event) => { event.preventDefault(); event.stopPropagation(); onOpenRelationshipCard?.(); }}
+                    aria-label="查看关系状态"
+                >
+                    {content}
+                    <span className="absolute -right-0.5 -top-0.5 grid h-3.5 w-3.5 place-items-center rounded-full bg-rose-400 text-[8px] leading-none text-white shadow-sm">♥</span>
+                </button>
+            );
+        }
+        return content;
     };
 
     // --- SYSTEM MESSAGE RENDERING ---
@@ -3672,17 +3686,6 @@ const MessageItem = React.memo(({
                     </div>
                 )}
             </div>
-            )}
-
-            {showRelationshipHeart && !isUser && !selectionMode && (
-                <div className="relative z-10 mt-1.5 flex justify-end">
-                    <button
-                        type="button"
-                        onClick={(event) => { event.preventDefault(); event.stopPropagation(); onOpenRelationshipCard?.(); }}
-                        className="grid h-6 w-6 place-items-center rounded-full bg-rose-50 text-[13px] text-rose-400 shadow-sm ring-1 ring-rose-100 transition-transform active:scale-90"
-                        aria-label="查看关系状态"
-                    >♥</button>
-                </div>
             )}
 
             {/* Layer 5: 双语「翻译/原文」切换 —— 气泡内右下角，细分隔线压层级，小灰字克制易找 */}

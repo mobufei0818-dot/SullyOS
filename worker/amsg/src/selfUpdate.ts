@@ -23,7 +23,7 @@ const CF_API = 'https://api.cloudflare.com/client/v4';
 
 /** 官方成品代码。跟代配脚本、手册附录指的是同一份。 */
 const BUNDLE_URL =
-  'https://raw.githubusercontent.com/Tosd0/sullyos-workers/main/amsg/worker.bundle.js';
+  'https://raw.githubusercontent.com/mobufei0818-dot/SullyOS/master/worker/amsg/worker.bundle.js';
 
 /** 上传时用的模块名，同时也是 metadata.main_module，两处必须一致。 */
 const MAIN_MODULE = 'worker.bundle.js';

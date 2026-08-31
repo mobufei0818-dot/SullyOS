@@ -451,15 +451,17 @@ const ChatModals: React.FC<ChatModalsProps> = ({
                                         <button type="button" onClick={() => onUpdateRelationshipProactiveConfig?.({ followUpPromises: !relationshipProactiveConfig.followUpPromises })} className={`relative h-5 w-9 rounded-full p-0.5 ${relationshipProactiveConfig.followUpPromises ? 'bg-rose-400' : 'bg-slate-200'}`}><span className={`block h-4 w-4 rounded-full bg-white transition-transform ${relationshipProactiveConfig.followUpPromises ? 'translate-x-4' : ''}`} /></button>
                                     </div>
                                     <div className="flex items-center justify-between gap-3">
-                                        <span className="text-[11px] font-bold text-slate-500">显示消息末尾爱心卡</span>
+                                        <span className="text-[11px] font-bold text-slate-500">点击角色头像查看关系卡</span>
                                         <button type="button" onClick={() => onUpdateRelationshipProactiveConfig?.({ showHeartCard: !relationshipProactiveConfig.showHeartCard })} className={`relative h-5 w-9 rounded-full p-0.5 ${relationshipProactiveConfig.showHeartCard ? 'bg-rose-400' : 'bg-slate-200'}`}><span className={`block h-4 w-4 rounded-full bg-white transition-transform ${relationshipProactiveConfig.showHeartCard ? 'translate-x-4' : ''}`} /></button>
                                     </div>
                                     <div className="grid grid-cols-[1fr_auto] items-center gap-3">
-                                        <span className="text-[11px] font-bold text-slate-500">每天最多联系机会</span>
+                                        <span className="text-[11px] font-bold text-slate-500">每日主动消息目标</span>
                                         <select value={relationshipProactiveConfig.dailyLimit} onChange={event => onUpdateRelationshipProactiveConfig?.({ dailyLimit: Number(event.target.value) })} className="rounded-lg border border-rose-100 bg-white px-2 py-1 text-[11px] font-bold text-slate-600">
-                                            {[1, 2, 3, 4, 5].map(value => <option key={value} value={value}>{value} 次</option>)}
+                                            <option value={0}>无限</option>
+                                            {[1, 2, 3, 4, 5, 6, 8, 10].map(value => <option key={value} value={value}>{value} 次</option>)}
                                         </select>
                                     </div>
+                                    <p className="-mt-1 text-[10px] leading-relaxed text-slate-400">设为次数时会在自然空档尽量补足；设为无限时完全按思念值每增长 30 点触发。</p>
                                     <div className="flex items-center justify-between gap-3">
                                         <span className="text-[11px] font-bold text-slate-500">免打扰时段</span>
                                         <button type="button" onClick={() => onUpdateRelationshipProactiveConfig?.({ quietHoursEnabled: !relationshipProactiveConfig.quietHoursEnabled })} className={`relative h-5 w-9 rounded-full p-0.5 ${relationshipProactiveConfig.quietHoursEnabled ? 'bg-rose-400' : 'bg-slate-200'}`}><span className={`block h-4 w-4 rounded-full bg-white transition-transform ${relationshipProactiveConfig.quietHoursEnabled ? 'translate-x-4' : ''}`} /></button>

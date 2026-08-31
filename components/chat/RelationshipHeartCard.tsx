@@ -14,7 +14,10 @@ const Metric: React.FC<{ label: string; value: number; color: string }> = ({ lab
   </div>
 );
 
-const RelationshipHeartCard: React.FC<RelationshipHeartCardProps> = ({ char, pulse, onClose }) => (
+const RelationshipHeartCard: React.FC<RelationshipHeartCardProps> = ({ char, pulse, onClose }) => {
+  const [voiceExpanded, setVoiceExpanded] = React.useState(false);
+  const voice = pulse.innerVoice || '把想说的话先悄悄留在心里。';
+  return (
   <div className="fixed inset-0 z-[120] flex items-end justify-center bg-slate-900/20 px-4 pb-[calc(env(safe-area-inset-bottom)+18px)] backdrop-blur-[1px]" onClick={onClose}>
     <section
       className="w-full max-w-md overflow-hidden rounded-[28px] border border-white/80 bg-gradient-to-br from-rose-50 via-white to-violet-50 shadow-2xl"
@@ -36,11 +39,19 @@ const RelationshipHeartCard: React.FC<RelationshipHeartCardProps> = ({ char, pul
       </div>
       <div className="mx-5 mb-5 mt-4 rounded-2xl border border-rose-100 bg-white/65 px-4 py-3">
         <div className="text-[10px] font-bold tracking-[0.12em] text-rose-400">TA 的心声</div>
-        <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">{(pulse.innerVoice || '把想说的话先悄悄留在心里。').slice(0, 30)}</p>
+        <p className={`mt-1.5 whitespace-pre-wrap text-[13px] leading-relaxed text-slate-600 ${voiceExpanded ? '' : 'line-clamp-3'}`}>{voice}</p>
+        {voice.length > 72 && (
+          <button type="button" onClick={() => setVoiceExpanded(value => !value)} className="mt-2 text-[11px] font-bold text-rose-400">
+            {voiceExpanded ? '收起心声' : '展开完整心声'}
+          </button>
+        )}
       </div>
-      <div className="border-t border-white/80 bg-white/40 px-5 py-2.5 text-center text-[10px] text-slate-400">仅供查看 · 数值会随聊天与时间自然变化</div>
+      <div className="border-t border-white/80 bg-white/40 px-5 py-2.5 text-center text-[10px] text-slate-400">
+        仅供查看 · {pulse.nextThreshold ? `下一次阈值 ${pulse.nextThreshold}` : '数值会随聊天与时间自然变化'}
+      </div>
     </section>
   </div>
-);
+  );
+};
 
 export default RelationshipHeartCard;

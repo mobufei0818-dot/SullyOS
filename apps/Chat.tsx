@@ -78,16 +78,10 @@ import { formatAmsgToolTrace } from '../utils/amsgToolTrace';
 import { ActiveMsgClient } from '../utils/activeMsgClient';
 import { applyScheduledTask, resolveExpirePolicy } from '../utils/amsg2Tasks';
 import {
-    buildRelationshipPromptHint,
     calculateRelationshipPulse,
-    connectionDelayMs,
-    followUpDelayMs,
     getRelationshipConfig,
-    inferFollowUpKind,
-    markRelationshipTaskToday,
-    moveOutOfQuietHours,
-    relationshipTaskCountToday,
 } from '../utils/relationshipProactive';
+import { fetchRelationshipBackend, syncRelationshipBackend } from '../utils/relationshipBackend';
 import { getLastInnerState } from '../utils/emotionApply';
 import { formatHours } from '../utils/format';
 import {
@@ -168,9 +162,7 @@ const Chat: React.FC = () => {
     const [messages, setMessages] = useState<Message[]>([]);
     const [relationshipCardOpen, setRelationshipCardOpen] = useState(false);
     const [relationshipNow, setRelationshipNow] = useState(() => Date.now());
-    const relationshipLastAssistantRef = useRef<number | null>(null);
-    const relationshipLastUserRef = useRef<number | null>(null);
-    const relationshipSchedulingRef = useRef<Set<number>>(new Set());
+    const [relationshipBackendPulse, setRelationshipBackendPulse] = useState<RelationshipPulse | null>(null);
     const imageGenerationInFlightRef = useRef<Set<number>>(new Set());
     // 本地刚改完照片卡时，忽略更早发起的 IndexedDB 读取结果，避免旧 pending 数据反盖回去。
     const messageMutationRevisionRef = useRef(0);
@@ -355,141 +347,45 @@ const Chat: React.FC = () => {
     charRef.current = char; // Keep ref in sync for async callbacks
 
     useEffect(() => {
-        relationshipLastAssistantRef.current = null;
-        relationshipLastUserRef.current = null;
-        relationshipSchedulingRef.current.clear();
         setRelationshipCardOpen(false);
+        setRelationshipBackendPulse(null);
     }, [char?.id]);
 
-    // 关系卡是只读实时展示，不应为了数字走一次 API；每分钟重新按真实间隔计算即可。
+    // 卡片在 Worker 不可用时仍显示本地只读兜底；后端连接成功后显示 D1 的真实离线状态。
     useEffect(() => {
         const timer = window.setInterval(() => setRelationshipNow(Date.now()), 60_000);
         return () => window.clearInterval(timer);
     }, []);
 
-    const relationshipPulse = useMemo<RelationshipPulse | null>(() => {
+    const relationshipFallbackPulse = useMemo<RelationshipPulse | null>(() => {
         if (!char) return null;
         const pulse = calculateRelationshipPulse(char, messages, relationshipNow);
         const innerState = getLastInnerState(char.id).replace(/\s+/g, ' ').trim();
-        return innerState ? { ...pulse, innerVoice: innerState.slice(0, 30) } : pulse;
+        return innerState ? { ...pulse, innerVoice: innerState } : pulse;
     }, [char, messages, relationshipNow]);
+    const relationshipPulse = relationshipBackendPulse || relationshipFallbackPulse;
 
-    const latestAssistantMessageId = useMemo(() => {
-        for (let index = messages.length - 1; index >= 0; index -= 1) {
-            if (messages[index].role === 'assistant') return messages[index].id;
-        }
-        return null;
-    }, [messages]);
-
-    /** 用户一回复就让关系层之前的“联系机会”失效；其它 2.0 任务完全不动。 */
-    const cancelRelationshipTasks = useCallback(async (targetChar = char) => {
-        if (!targetChar) return;
-        const relationTasks = (targetChar.activeMsg2Config?.tasks || [])
-            .filter(task => task.source === 'relationship');
-        if (!relationTasks.length) return;
-        const results = await Promise.allSettled(relationTasks.map(task => ActiveMsgClient.cancelTask(task.taskUuid)));
-        const cancelled = new Set(
-            relationTasks.filter((_, index) => results[index].status === 'fulfilled').map(task => task.taskUuid),
-        );
-        if (!cancelled.size) return;
-        updateCharacter(targetChar.id, previous => ({
-            activeMsg2Config: {
-                ...(previous.activeMsg2Config || { enabled: false }),
-                tasks: (previous.activeMsg2Config?.tasks || []).filter(task => !cancelled.has(task.taskUuid)),
-                lastSyncedAt: Date.now(),
-            },
-        }));
-    }, [char, updateCharacter]);
-
-    // 所有用户消息入口（手打、图片、小程序卡片）最后都会落入 messages；统一在这里取消，
-    // 才不会因为某个入口漏接导致角色仍按旧的“等会来找你”继续推送。
+    // 每次正常互动或设置变化，把「不含正文」的关系摘要同步到 Worker。
+    // Worker/D1 才是离线增长和阈值判断的唯一来源，前端不再自行创建关系任务，避免双发。
     useEffect(() => {
-        if (!char) return;
-        const latestUser = [...messages].reverse().find(message => message.role === 'user');
-        if (!latestUser || relationshipLastUserRef.current === latestUser.id) return;
-        relationshipLastUserRef.current = latestUser.id;
-        if (Date.now() - latestUser.timestamp > 5 * 60_000) return;
-        void cancelRelationshipTasks(char);
-        const pulse = calculateRelationshipPulse(char, messages);
-        const innerState = getLastInnerState(char.id).replace(/\s+/g, ' ').trim();
-        updateCharacter(char.id, { relationshipPulse: { ...pulse, innerVoice: innerState.slice(0, 30) || pulse.innerVoice } });
-    }, [cancelRelationshipTasks, char, messages, updateCharacter]);
+        if (!char || !relationshipFallbackPulse || !getRelationshipConfig(char).enabled) return;
+        let cancelled = false;
+        const timer = window.setTimeout(() => {
+            void syncRelationshipBackend(char, messages, relationshipFallbackPulse)
+                .then(pulse => { if (!cancelled && pulse) setRelationshipBackendPulse(pulse); })
+                .catch(error => console.warn('[relationship] 后端状态同步失败', error));
+        }, 350);
+        return () => { cancelled = true; window.clearTimeout(timer); };
+    }, [char, messages, relationshipFallbackPulse]);
 
-    /**
-     * 关系层只在一轮正常聊天结束后补一条可撤销的未来联系机会。
-     * 到点时仍由原版 Worker 读取最新 fire pack 决定要不要说、说什么；前端不伪造消息。
-     */
     useEffect(() => {
-        if (!char || !relationshipPulse) return;
-        const config = getRelationshipConfig(char);
-        const latest = [...messages].reverse().find(message => message.role === 'assistant');
-        if (!config.enabled || !char.activeMsg2Config?.enabled || !latest) return;
-        if ((latest.metadata as any)?.activeMsg2) return; // 收到定时消息本身不再套娃排下一条。
-        if (Date.now() - latest.timestamp > 15 * 60_000) return; // 进入旧聊天不会重新补排历史任务。
-        if (relationshipLastAssistantRef.current === latest.id || relationshipSchedulingRef.current.has(latest.id)) return;
-        relationshipLastAssistantRef.current = latest.id;
-        if (relationshipTaskCountToday(char.id) >= config.dailyLimit) return;
-        if ((char.activeMsg2Config.tasks || []).some(task => task.source === 'relationship')) return;
-
-        const kind = config.followUpPromises ? inferFollowUpKind(latest) : null;
-        const delay = kind
-            ? followUpDelayMs(kind, config.initiativeStyle)
-            : connectionDelayMs(config.initiativeStyle, relationshipPulse.baselineLonging);
-        if (!delay) return;
-        relationshipSchedulingRef.current.add(latest.id);
-        const rawTargetMs = Date.now() + delay;
-        // 免打扰读角色当地墙钟；再把“墙钟被推后了多少”映回真实时间，异国角色不会按设备时区被打扰。
-        const charTargetWall = nowInTimeZone(resolveCharTimeZone(char), new Date(rawTargetMs));
-        const movedWallMs = moveOutOfQuietHours(charTargetWall.getTime(), config);
-        const targetMs = rawTargetMs + (movedWallMs - charTargetWall.getTime());
-        const activeConfig = char.activeMsg2Config!;
-        ActiveMsgClient.scheduleCharacterTask({
-            char,
-            config: activeConfig,
-            task: {
-                mode: 'prompted',
-                firstSendTime: new Date(targetMs).toISOString(),
-                recurrenceType: 'none',
-                promptHint: buildRelationshipPromptHint(kind, char.name),
-                expirePolicy: 'expire',
-                selfScheduled: false,
-            },
-            userProfile,
-            groups,
-            realtimeConfig,
-            apiConfig,
-        }).then(result => {
-            const record: ActiveMsg2TaskRecord = {
-                taskUuid: result.uuid,
-                clientTaskId: result.clientTaskId,
-                mode: 'prompted',
-                firstSendTime: result.firstSendAt,
-                recurrenceType: 'none',
-                promptHint: buildRelationshipPromptHint(kind, char.name),
-                expirePolicy: resolveExpirePolicy('prompted', 'expire'),
-                source: 'relationship',
-                status: 'scheduled',
-                createdAt: Date.now(),
-            };
-            updateCharacter(char.id, previous => ({
-                activeMsg2Config: {
-                    ...(previous.activeMsg2Config || activeConfig),
-                    tasks: applyScheduledTask(previous.activeMsg2Config?.tasks || [], record, {}, Date.now()),
-                    lastSyncedAt: Date.now(),
-                    lastError: undefined,
-                },
-            }));
-            markRelationshipTaskToday(char.id);
-        }).catch(error => {
-            console.warn('[关系主动消息] 创建联系机会失败', error);
-            updateCharacter(char.id, previous => ({
-                activeMsg2Config: {
-                    ...(previous.activeMsg2Config || activeConfig),
-                    lastError: error instanceof Error ? error.message : '关系主动消息创建失败',
-                },
-            }));
-        }).finally(() => relationshipSchedulingRef.current.delete(latest.id));
-    }, [apiConfig, char, groups, messages, realtimeConfig, relationshipPulse, updateCharacter, userProfile]);
+        if (!char || !getRelationshipConfig(char).enabled) return;
+        let cancelled = false;
+        const timer = window.setInterval(() => {
+            void fetchRelationshipBackend(char).then(pulse => { if (!cancelled && pulse) setRelationshipBackendPulse(pulse); });
+        }, 60_000);
+        return () => { cancelled = true; window.clearInterval(timer); };
+    }, [char]);
     const historyContextRange = useMemo(() => {
         if (!char) return undefined;
         return computeContextRangeSnapshot(
@@ -4477,9 +4373,7 @@ const Chat: React.FC = () => {
                             showRelationshipHeart={!!(
                                 relationshipPulse
                                 && getRelationshipConfig(char).showHeartCard
-                                && m.id === latestAssistantMessageId
                                 && m.role === 'assistant'
-                                && m.type === 'text'
                             )}
                             onOpenRelationshipCard={() => setRelationshipCardOpen(true)}
                             thinkingChainOptions={thinkingChainOptions}

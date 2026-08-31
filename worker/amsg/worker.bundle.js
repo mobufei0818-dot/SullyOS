@@ -3,7 +3,7 @@
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2_c57770165a8a2256e4acaa4bae2ba803/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.23_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -268,11 +268,11 @@ function buildUpstreamError(summary, status, detail) {
   if (detail.code) error.providerCode = detail.code;
   return error;
 }
-async function readUpstreamErrorDetail(response) {
+async function readUpstreamErrorDetail(response2) {
   let raw;
   let truncated = false;
   try {
-    ({ text: raw, truncated } = await readBoundedBody(response));
+    ({ text: raw, truncated } = await readBoundedBody(response2));
   } catch {
     return { message: "", code: "" };
   }
@@ -313,10 +313,10 @@ async function readUpstreamErrorDetail(response) {
   );
   return { message: clampDetail(message), code: clampCode(code) };
 }
-async function readBoundedBody(response) {
-  const body = response && response.body;
+async function readBoundedBody(response2) {
+  const body = response2 && response2.body;
   if (!body || typeof body.getReader !== "function") {
-    const text = typeof response.text === "function" ? await response.text() : "";
+    const text = typeof response2.text === "function" ? await response2.text() : "";
     return { text, truncated: false };
   }
   const reader = body.getReader();
@@ -1121,7 +1121,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2_c57770165a8a2256e4acaa4bae2ba803/node_modules/@rei-standard/amsg-server/dist/chunk-3JEWYDM4.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.23_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-3JEWYDM4.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -6770,7 +6770,7 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-08-19";
+var AMSG_BUNDLE_VERSION = "2026-08-30.relationship-1";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -7258,8 +7258,8 @@ var amsgXhsSessionKey = (clientTaskId) => `xhs_session:${clientTaskId}`;
 var AMSG2_INSTANT_STUB_TEMPLATE = "AMSG2_INSTANT_STUB_TEMPLATE\uFF08\u5373\u65F6\u5BF9\u8BDD\u8F7B\u91CF\u5305\uFF1A\u8BE5\u89D2\u8272\u65E0\u5B9A\u65F6\u4EFB\u52A1\uFF0C\u6A21\u677F\u672A\u968F\u53D1\u9001\u91CD\u5EFA\uFF1B\u770B\u5230\u8FD9\u6761\u6B63\u6587\u8BF4\u660E\u6709\u672C\u4E0D\u8BE5\u6E32\u67D3\u6A21\u677F\u7684 fire \u5728\u6E32\u67D3\u5B83\uFF09";
 var AMSG_CHAT_FAIL_KEY = "chat_fail";
 var GZIP_VALUE_PREFIX = "gz1:";
-var base64ToBytes2 = (base64) => {
-  const binary = atob(base64);
+var base64ToBytes2 = (base642) => {
+  const binary = atob(base642);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
   return bytes;
@@ -8046,11 +8046,11 @@ var WMO_WEATHER_CODES = {
 };
 var fetchOwmWeather = async (city, apiKey) => {
   const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${apiKey}&units=metric&lang=zh_cn`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`OpenWeatherMap HTTP ${response.status}`);
+  const response2 = await fetch(url);
+  if (!response2.ok) {
+    throw new Error(`OpenWeatherMap HTTP ${response2.status}`);
   }
-  const data = await readJson(response);
+  const data = await readJson(response2);
   return {
     temp: Math.round(data.main.temp),
     feelsLike: Math.round(data.main.feels_like),
@@ -8077,11 +8077,11 @@ var fetchOpenMeteoWeather = async (city) => {
     geocodeCache.set(city, geo);
   }
   const url = `https://api.open-meteo.com/v1/forecast?latitude=${geo.latitude}&longitude=${geo.longitude}&current=temperature_2m,apparent_temperature,relative_humidity_2m,weather_code&timezone=auto`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Open-Meteo HTTP ${response.status}`);
+  const response2 = await fetch(url);
+  if (!response2.ok) {
+    throw new Error(`Open-Meteo HTTP ${response2.status}`);
   }
-  const data = await readJson(response);
+  const data = await readJson(response2);
   const current = data.current;
   const wmo = WMO_WEATHER_CODES[current.weather_code] || { description: "\u672A\u77E5", icon: "01d" };
   return {
@@ -8652,9 +8652,9 @@ var handleInstantChat = async (args) => {
     "X-Encryption-Version": "1",
     ...clientToken ? { "X-Client-Token": clientToken } : {}
   };
-  const readBody = async (response) => {
+  const readBody = async (response2) => {
     try {
-      return await response.json();
+      return await response2.json();
     } catch {
       return null;
     }
@@ -8751,7 +8751,7 @@ var handleInstantChat = async (args) => {
 
 // worker/amsg/src/selfUpdate.ts
 var CF_API = "https://api.cloudflare.com/client/v4";
-var BUNDLE_URL = "https://raw.githubusercontent.com/Tosd0/sullyos-workers/main/amsg/worker.bundle.js";
+var BUNDLE_URL = "https://raw.githubusercontent.com/mobufei0818-dot/SullyOS/master/worker/amsg/worker.bundle.js";
 var MAIN_MODULE = "worker.bundle.js";
 var FALLBACK_COMPATIBILITY_DATE = "2026-01-01";
 var FALLBACK_COMPATIBILITY_FLAGS = ["global_fetch_strictly_public"];
@@ -8973,6 +8973,185 @@ async function handleSelfUpdate(request, env) {
     scriptName
   };
 }
+
+// worker/amsg/src/relationshipEngine.ts
+var HOUR = 60 * 6e4;
+var clamp = (value, min = 0, max = 100) => Math.round(Math.max(min, Math.min(max, value)));
+var ratePerMs = (style) => style === "clingy" ? 30 / HOUR : style === "reserved" ? 6 / HOUR : 9 / HOUR;
+var dayKey = (time, tzId) => {
+  try {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: tzId, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(time));
+  } catch {
+    return new Date(time).toISOString().slice(0, 10);
+  }
+};
+var inQuietHours = (time, config, tzId) => {
+  if (!config.quietHoursEnabled) return false;
+  try {
+    const part = new Intl.DateTimeFormat("en-US", { timeZone: tzId, hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(time));
+    const hour = Number(part.find((item) => item.type === "hour")?.value || 0);
+    const minute = Number(part.find((item) => item.type === "minute")?.value || 0);
+    const [sh = "0", sm = "0"] = config.quietHoursStart.split(":");
+    const [eh = "0", em = "0"] = config.quietHoursEnd.split(":");
+    const now = hour * 60 + minute;
+    const start = Number(sh) * 60 + Number(sm);
+    const end = Number(eh) * 60 + Number(em);
+    return start < end ? now >= start && now < end : now >= start || now < end;
+  } catch {
+    return false;
+  }
+};
+var dbOf = (env) => env.DB;
+var ensureTable = async (env) => {
+  await dbOf(env).prepare(`CREATE TABLE IF NOT EXISTS sully_relationship_state (
+    user_id TEXT NOT NULL, char_id TEXT NOT NULL, payload TEXT NOT NULL, updated_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, char_id)
+  )`).run();
+};
+var load = async (env, userId, charId) => {
+  await ensureTable(env);
+  const row = await dbOf(env).prepare("SELECT payload FROM sully_relationship_state WHERE user_id = ? AND char_id = ?").bind(userId, charId).first();
+  if (!row?.payload) return null;
+  try {
+    const key = await deriveUserEncryptionKey(userId, env.AMSG_MASTER_KEY);
+    return JSON.parse(await decryptFromStorage(row.payload, key));
+  } catch (error) {
+    console.warn("[relationship] state decrypt failed", charId, error);
+    return null;
+  }
+};
+var save = async (env, record) => {
+  const key = await deriveUserEncryptionKey(record.userId, env.AMSG_MASTER_KEY);
+  const payload = await encryptForStorage(JSON.stringify(record), key);
+  await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at)
+    VALUES (?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`).bind(record.userId, record.charId, payload, Date.now()).run();
+};
+var publicState = (state) => ({
+  longing: state.longing,
+  nextThreshold: state.nextThreshold,
+  affection: state.affection,
+  jealousy: state.jealousy,
+  innerVoice: state.innerVoice,
+  dailySent: state.dailySent,
+  updatedAt: state.lastCalculatedAt
+});
+var advance = (state, now) => {
+  const date = dayKey(now, state.tzId);
+  if (state.dailyDate !== date) {
+    state.dailyDate = date;
+    state.dailySent = 0;
+  }
+  const elapsed = Math.max(0, now - state.lastCalculatedAt);
+  state.longing = clamp(state.longing + elapsed * ratePerMs(state.config.initiativeStyle));
+  state.lastCalculatedAt = now;
+};
+var signalDelta = (signal) => signal === "affectionate" ? 2 : signal === "distant" ? 1 : -4;
+var syncRelationshipState = async (env, userId, input) => {
+  const now = Date.now();
+  let state = await load(env, userId, input.charId);
+  if (!state) {
+    state = {
+      v: 1,
+      userId,
+      charId: input.charId,
+      charName: input.charName,
+      tzId: input.tzId || "UTC",
+      credRef: input.credRef || `char:${input.charId}/chat`,
+      config: input.config,
+      longing: clamp(input.initialLonging ?? 20),
+      nextThreshold: 30,
+      affection: clamp(input.affection ?? 58),
+      jealousy: clamp(input.jealousy ?? 8),
+      innerVoice: String(input.innerVoice || "\u628A\u60F3\u8BF4\u7684\u8BDD\u5148\u6084\u6084\u7559\u5728\u5FC3\u91CC\u3002"),
+      lastCalculatedAt: now,
+      lastUserAt: input.lastUserAt || 0,
+      lastAssistantAt: input.lastAssistantAt || 0,
+      lastDispatchAt: 0,
+      dailyDate: dayKey(now, input.tzId || "UTC"),
+      dailySent: 0
+    };
+  } else {
+    advance(state, now);
+    const receivedNewUserMessage = (input.lastUserAt || 0) > state.lastUserAt;
+    if (receivedNewUserMessage) state.longing = clamp(state.longing + signalDelta(input.userSignal));
+    state.lastUserAt = Math.max(state.lastUserAt, input.lastUserAt || 0);
+    state.lastAssistantAt = Math.max(state.lastAssistantAt, input.lastAssistantAt || 0);
+    state.charName = input.charName || state.charName;
+    state.tzId = input.tzId || state.tzId;
+    state.credRef = input.credRef || state.credRef;
+    state.config = input.config;
+    if (typeof input.affection === "number") state.affection = clamp(input.affection);
+    if (typeof input.jealousy === "number") state.jealousy = clamp(input.jealousy);
+    if (typeof input.innerVoice === "string" && input.innerVoice.trim()) state.innerVoice = input.innerVoice.trim();
+  }
+  await save(env, state);
+  return publicState(state);
+};
+var verify = async (request, env) => {
+  const token = (env.AMSG_SERVER_TOKEN || "").trim();
+  if (token && !await constantTimeEqual2(request.headers.get("X-Client-Token") || "", token)) return null;
+  const userId = request.headers.get("X-User-Id") || "";
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(userId) ? userId : null;
+};
+var response = (status, body) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type, X-User-Id, X-Client-Token" } });
+var handleRelationshipRequest = async (request, env) => {
+  const url = new URL(request.url);
+  if (!url.pathname.endsWith("/relationship/state")) return null;
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type, X-User-Id, X-Client-Token" } });
+  const userId = await verify(request, env);
+  if (!userId) return response(401, { success: false, error: { code: "RELATIONSHIP_AUTH_REQUIRED", message: "\u5173\u7CFB\u5C42\u9700\u8981\u6709\u6548\u7684\u7528\u6237\u6807\u8BC6\u548C\u5171\u4EAB\u5BC6\u94A5\u3002" } });
+  if (request.method === "GET") {
+    const charId = url.searchParams.get("charId") || "";
+    const state = charId ? await load(env, userId, charId) : null;
+    return response(200, { success: true, data: state ? publicState(state) : null });
+  }
+  if (request.method !== "POST") return response(405, { success: false, error: { code: "METHOD_NOT_ALLOWED", message: "\u53EA\u652F\u6301 GET \u6216 POST" } });
+  try {
+    const input = await request.json();
+    if (!input?.charId || !input?.config) return response(400, { success: false, error: { code: "INVALID_RELATIONSHIP_STATE", message: "\u7F3A\u5C11\u89D2\u8272\u6216\u5173\u7CFB\u914D\u7F6E\u3002" } });
+    return response(200, { success: true, data: await syncRelationshipState(env, userId, input) });
+  } catch (error) {
+    return response(400, { success: false, error: { code: "RELATIONSHIP_STATE_FAILED", message: error instanceof Error ? error.message : "\u5173\u7CFB\u72B6\u6001\u4FDD\u5B58\u5931\u8D25\u3002" } });
+  }
+};
+var runRelationshipTick = async (env, schedule) => {
+  await ensureTable(env);
+  const rows = await dbOf(env).prepare("SELECT payload FROM sully_relationship_state LIMIT 200").all();
+  const now = Date.now();
+  let scheduled = 0;
+  for (const row of rows.results || []) {
+    if (!row.payload) continue;
+    let state = null;
+    try {
+      const probe = await dbOf(env).prepare("SELECT user_id, char_id FROM sully_relationship_state WHERE payload = ? LIMIT 1").bind(row.payload).first();
+      if (!probe?.user_id || !probe.char_id) continue;
+      const key = await deriveUserEncryptionKey(probe.user_id, env.AMSG_MASTER_KEY);
+      state = JSON.parse(await decryptFromStorage(row.payload, key));
+    } catch {
+      continue;
+    }
+    if (!state.config.enabled) continue;
+    if (now - state.lastCalculatedAt < 10 * 6e4) continue;
+    advance(state, now);
+    const target = Math.max(0, state.config.dailyLimit || 0);
+    const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 6e4;
+    const inactiveEnough = now - Math.max(state.lastUserAt, state.lastAssistantAt) >= minGap;
+    const thresholdDue = state.longing >= state.nextThreshold;
+    const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
+    const canDispatch = !state.pendingTaskUuid && now - state.lastDispatchAt >= minGap && !inQuietHours(now, state.config, state.tzId);
+    if (canDispatch && (thresholdDue || targetDue)) {
+      const uuid = await schedule(state);
+      if (uuid) {
+        state.pendingTaskUuid = uuid;
+        state.lastDispatchAt = now;
+        state.nextThreshold = Math.max(state.nextThreshold + 30, state.longing + 30);
+        scheduled += 1;
+      }
+    }
+    await save(env, state);
+  }
+  return { scheduled };
+};
 
 // utils/mcpFireCore.ts
 var DEFAULT_MAX_TOOL_NAME_LEN = 64;
@@ -9288,8 +9467,8 @@ var initializeCore = async (target, session, timeoutMs) => {
     capabilities: {},
     clientInfo: { name: "SullyOS-MCP", version: "1.0.0" }
   });
-  const { response } = await postCore(target, session, initReq, timeoutMs);
-  if (response?.error) throw new Error(`Initialize \u5931\u8D25: ${response.error.message}`);
+  const { response: response2 } = await postCore(target, session, initReq, timeoutMs);
+  if (response2?.error) throw new Error(`Initialize \u5931\u8D25: ${response2.error.message}`);
   const notif = buildRpcRequest(session, "notifications/initialized", {}, true);
   await postCore(target, session, notif, timeoutMs, false).catch(() => {
   });
@@ -9404,14 +9583,14 @@ var callMcpToolCore = async (target, session, toolName, args = {}, opts = {}) =>
   try {
     await ensureInitializedCore(target, session, timeoutMs);
     const body = buildRpcRequest(session, "tools/call", { name: toolName, arguments: normalizedArgs });
-    let response;
+    let response2;
     try {
-      ({ response } = await postCore(target, session, body, timeoutMs));
+      ({ response: response2 } = await postCore(target, session, body, timeoutMs));
     } catch (e) {
       if (/HTTP (400|404)/.test(e?.message || "")) {
         Object.assign(session, createMcpSessionState());
         await ensureInitializedCore(target, session, timeoutMs);
-        ({ response } = await postCore(
+        ({ response: response2 } = await postCore(
           target,
           session,
           buildRpcRequest(session, "tools/call", { name: toolName, arguments: normalizedArgs }),
@@ -9421,9 +9600,9 @@ var callMcpToolCore = async (target, session, toolName, args = {}, opts = {}) =>
         throw e;
       }
     }
-    if (!response) return finish({ success: false, error: "\u7A7A\u54CD\u5E94" });
-    if (response.error) return finish({ success: false, error: `MCP \u9519\u8BEF [${response.error.code}]: ${response.error.message}` });
-    const result = response.result;
+    if (!response2) return finish({ success: false, error: "\u7A7A\u54CD\u5E94" });
+    if (response2.error) return finish({ success: false, error: `MCP \u9519\u8BEF [${response2.error.code}]: ${response2.error.message}` });
+    const result = response2.result;
     if (result?.content && Array.isArray(result.content)) {
       const textParts = result.content.filter((c) => c?.type === "text").map((c) => c.text || "");
       const fullText = textParts.join("\n").trim();
@@ -9510,21 +9689,21 @@ var performSearch = async (query, apiKey) => {
   }
   try {
     const workerUrl = `${getProxyWorkerUrl()}/search?q=${encodeURIComponent(query)}&count=5`;
-    const response = await fetch(workerUrl, {
+    const response2 = await fetch(workerUrl, {
       method: "GET",
       headers: {
         "Accept": "application/json",
         "X-Brave-API-Key": apiKey
       }
     });
-    const text = await response.text();
-    if (!response.ok) {
-      console.error("Search API error:", response.status, text);
+    const text = await response2.text();
+    if (!response2.ok) {
+      console.error("Search API error:", response2.status, text);
       try {
         const errJson = JSON.parse(text);
-        return { success: false, results: [], message: `\u641C\u7D22\u5931\u8D25: ${errJson.error || response.status}`, reached: false };
+        return { success: false, results: [], message: `\u641C\u7D22\u5931\u8D25: ${errJson.error || response2.status}`, reached: false };
       } catch {
-        return { success: false, results: [], message: `\u641C\u7D22\u5931\u8D25: ${response.status}`, reached: false };
+        return { success: false, results: [], message: `\u641C\u7D22\u5931\u8D25: ${response2.status}`, reached: false };
       }
     }
     let data;
@@ -9550,7 +9729,7 @@ var performSearch = async (query, apiKey) => {
 };
 var notionGetDiaryByDate = async (apiKey, databaseId, characterName, date) => {
   try {
-    const response = await fetch(`${getProxyWorkerUrl()}/notion/query`, {
+    const response2 = await fetch(`${getProxyWorkerUrl()}/notion/query`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -9574,10 +9753,10 @@ var notionGetDiaryByDate = async (apiKey, databaseId, characterName, date) => {
         page_size: 10
       })
     });
-    const text = await response.text();
-    if (!response.ok) {
-      console.error("Query diary by date failed:", response.status, text);
-      return { success: false, entries: [], message: `\u67E5\u8BE2\u5931\u8D25: ${response.status}` };
+    const text = await response2.text();
+    if (!response2.ok) {
+      console.error("Query diary by date failed:", response2.status, text);
+      return { success: false, entries: [], message: `\u67E5\u8BE2\u5931\u8D25: ${response2.status}` };
     }
     const data = JSON.parse(text);
     if (!data.results || data.results.length === 0) {
@@ -9601,16 +9780,16 @@ var notionGetDiaryByDate = async (apiKey, databaseId, characterName, date) => {
 };
 var notionReadDiaryContent = async (apiKey, pageId) => {
   try {
-    const response = await fetch(`${getProxyWorkerUrl()}/notion/blocks/${pageId}`, {
+    const response2 = await fetch(`${getProxyWorkerUrl()}/notion/blocks/${pageId}`, {
       method: "GET",
       headers: {
         "X-Notion-API-Key": apiKey
       }
     });
-    const text = await response.text();
-    if (!response.ok) {
-      console.error("Read diary content failed:", response.status, text);
-      return { success: false, content: "", message: `\u8BFB\u53D6\u5931\u8D25: ${response.status}` };
+    const text = await response2.text();
+    if (!response2.ok) {
+      console.error("Read diary content failed:", response2.status, text);
+      return { success: false, content: "", message: `\u8BFB\u53D6\u5931\u8D25: ${response2.status}` };
     }
     const data = JSON.parse(text);
     if (!data.results || data.results.length === 0) {
@@ -9626,7 +9805,7 @@ var notionReadDiaryContent = async (apiKey, pageId) => {
 var notionReadNoteContent = notionReadDiaryContent;
 var notionSearchUserNotes = async (apiKey, notesDatabaseId, keyword, limit = 5) => {
   try {
-    const response = await fetch(`${getProxyWorkerUrl()}/notion/query`, {
+    const response2 = await fetch(`${getProxyWorkerUrl()}/notion/query`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -9642,9 +9821,9 @@ var notionSearchUserNotes = async (apiKey, notesDatabaseId, keyword, limit = 5) 
         page_size: limit
       })
     });
-    const text = await response.text();
-    if (!response.ok) {
-      return { success: false, entries: [], message: `\u641C\u7D22\u5931\u8D25: ${response.status}` };
+    const text = await response2.text();
+    if (!response2.ok) {
+      return { success: false, entries: [], message: `\u641C\u7D22\u5931\u8D25: ${response2.status}` };
     }
     const data = JSON.parse(text);
     if (!data.results || data.results.length === 0) {
@@ -9725,18 +9904,18 @@ var feishuGetToken = async (appId, appSecret) => {
     return { success: true, token: feishuTokenCache.token, message: "\u4F7F\u7528\u7F13\u5B58token" };
   }
   try {
-    const response = await fetch(`${getProxyWorkerUrl()}/feishu/token`, {
+    const response2 = await fetch(`${getProxyWorkerUrl()}/feishu/token`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ app_id: appId, app_secret: appSecret })
     });
-    const text = await response.text();
-    if (!response.ok) {
+    const text = await response2.text();
+    if (!response2.ok) {
       try {
         const errJson = JSON.parse(text);
-        return { success: false, token: "", message: `\u83B7\u53D6token\u5931\u8D25: ${errJson.msg || errJson.error || response.status}` };
+        return { success: false, token: "", message: `\u83B7\u53D6token\u5931\u8D25: ${errJson.msg || errJson.error || response2.status}` };
       } catch {
-        return { success: false, token: "", message: `\u83B7\u53D6token\u5931\u8D25: ${response.status}` };
+        return { success: false, token: "", message: `\u83B7\u53D6token\u5931\u8D25: ${response2.status}` };
       }
     }
     const data = JSON.parse(text);
@@ -9759,7 +9938,7 @@ var feishuGetDiaryByDate = async (appId, appSecret, baseId, tableId, characterNa
     }
     const dateTimestamp = new Date(date).getTime();
     const nextDayTimestamp = dateTimestamp + 24 * 60 * 60 * 1e3;
-    const response = await fetch(`${getProxyWorkerUrl()}/feishu/bitable/${baseId}/${tableId}/records/search`, {
+    const response2 = await fetch(`${getProxyWorkerUrl()}/feishu/bitable/${baseId}/${tableId}/records/search`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -9778,9 +9957,9 @@ var feishuGetDiaryByDate = async (appId, appSecret, baseId, tableId, characterNa
         page_size: 10
       })
     });
-    const text = await response.text();
-    if (!response.ok) {
-      return { success: false, entries: [], message: `\u67E5\u8BE2\u5931\u8D25: ${response.status}` };
+    const text = await response2.text();
+    if (!response2.ok) {
+      return { success: false, entries: [], message: `\u67E5\u8BE2\u5931\u8D25: ${response2.status}` };
     }
     const data = JSON.parse(text);
     if (data.code !== 0) {
@@ -9938,7 +10117,7 @@ var trySpiderV3CommentPatch = async (baseUrl, requestBody, cookie, detail) => {
   const requestedStrategy = storage.getItem(XHS_SPIDER_V3_EXPERIMENT.strategyKey) || "no-client-hints";
   const strategy = ["no-client-hints", "browser-hints", "legacy-transport"].includes(requestedStrategy) ? requestedStrategy : "no-client-hints";
   try {
-    const response = await fetch(`${baseUrl}/api/xhs-experimental-comments`, {
+    const response2 = await fetch(`${baseUrl}/api/xhs-experimental-comments`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -9954,7 +10133,7 @@ var trySpiderV3CommentPatch = async (baseUrl, requestBody, cookie, detail) => {
         session_state: sessionState || void 0
       })
     });
-    const experiment = await response.json().catch(() => null);
+    const experiment = await response2.json().catch(() => null);
     if (experiment?.session_state) {
       writeSpiderJson(XHS_SPIDER_V3_EXPERIMENT.sessionKey, experiment.session_state);
     }
@@ -9966,7 +10145,7 @@ var trySpiderV3CommentPatch = async (baseUrl, requestBody, cookie, detail) => {
       });
       return withSpiderCircuitError(detail, "Spider v3 was rejected with HTTP 406; automatic comment attempts are now stopped.");
     }
-    if (!response.ok || !experiment?.success || !experiment?.data) return detail;
+    if (!response2.ok || !experiment?.success || !experiment?.data) return detail;
     removeSpiderValue(XHS_SPIDER_V3_EXPERIMENT.circuitKey);
     return {
       ...detail,
@@ -10131,9 +10310,9 @@ var mcpInitialize = async (serverUrl) => {
     capabilities: {},
     clientInfo: { name: "AetherOS-XhsFreeRoam", version: "1.0.0" }
   });
-  const { response, sessionId } = await mcpPost(serverUrl, initReq);
+  const { response: response2, sessionId } = await mcpPost(serverUrl, initReq);
   if (sessionId) mcpSessionId = sessionId;
-  if (response?.error) throw new Error(`MCP Initialize failed: ${response.error.message}`);
+  if (response2?.error) throw new Error(`MCP Initialize failed: ${response2.error.message}`);
   if (!mcpSessionId) {
     console.warn(
       "[MCP] \u26A0\uFE0F \u65E0\u6CD5\u8BFB\u53D6 Mcp-Session-Id \u54CD\u5E94\u5934\uFF08CORS \u9650\u5236\uFF09\u3002\n\u8BF7\u4F7F\u7528 CORS \u4EE3\u7406: node scripts/mcp-proxy.mjs\n\u7136\u540E\u628A MCP URL \u6539\u4E3A http://localhost:18061/mcp"
@@ -12360,9 +12539,9 @@ var bytesToB64u = (bytes) => {
 };
 var textToB64u = (value) => bytesToB64u(utf83.encode(value));
 var pemToPkcs8 = (raw) => {
-  const base64 = raw.replace(/\\n/g, "\n").replace(/-----BEGIN PRIVATE KEY-----/g, "").replace(/-----END PRIVATE KEY-----/g, "").replace(/\s+/g, "");
-  if (!base64) throw new Error("FCM_SERVICE_ACCOUNT_PRIVATE_KEY \u4E0D\u662F\u6709\u6548\u7684 PKCS#8 PEM");
-  const binary = atob(base64);
+  const base642 = raw.replace(/\\n/g, "\n").replace(/-----BEGIN PRIVATE KEY-----/g, "").replace(/-----END PRIVATE KEY-----/g, "").replace(/\s+/g, "");
+  if (!base642) throw new Error("FCM_SERVICE_ACCOUNT_PRIVATE_KEY \u4E0D\u662F\u6709\u6548\u7684 PKCS#8 PEM");
+  const binary = atob(base642);
   return Uint8Array.from(binary, (char) => char.charCodeAt(0)).buffer;
 };
 var requireFcmConfig = (env) => {
@@ -12397,7 +12576,7 @@ var fetchFcmAccessToken = async (env) => {
   );
   const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, utf83.encode(unsigned));
   const assertion = `${unsigned}.${bytesToB64u(new Uint8Array(signature))}`;
-  const response = await fetch("https://oauth2.googleapis.com/token", {
+  const response2 = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -12405,9 +12584,9 @@ var fetchFcmAccessToken = async (env) => {
       assertion
     })
   });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok || !body.access_token) {
-    throw new Error(`FCM OAuth \u5931\u8D25 (${response.status})\uFF1A${body.error_description || "\u6CA1\u6709 access_token"}`);
+  const body = await response2.json().catch(() => ({}));
+  if (!response2.ok || !body.access_token) {
+    throw new Error(`FCM OAuth \u5931\u8D25 (${response2.status})\uFF1A${body.error_description || "\u6CA1\u6709 access_token"}`);
   }
   accessTokenCache = {
     key: cacheKey,
@@ -12454,7 +12633,7 @@ var buildFcmMessage = (token, rawPayload) => {
 };
 var sendFcmNotification = async (env, token, payload) => {
   const config = requireFcmConfig(env);
-  const response = await fetch(
+  const response2 = await fetch(
     `https://fcm.googleapis.com/v1/projects/${encodeURIComponent(config.projectId)}/messages:send`,
     {
       method: "POST",
@@ -12465,9 +12644,9 @@ var sendFcmNotification = async (env, token, payload) => {
       body: JSON.stringify(buildFcmMessage(token, payload))
     }
   );
-  if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`FCM_SEND_FAILED (${response.status}): ${detail.slice(0, 500)}`);
+  if (!response2.ok) {
+    const detail = await response2.text().catch(() => "");
+    throw new Error(`FCM_SEND_FAILED (${response2.status}): ${detail.slice(0, 500)}`);
   }
 };
 var createHybridPushTransport = (env, webPush) => ({
@@ -13827,6 +14006,66 @@ var upstream = createSingleUserCloudflareWorker(buildWorkerConfig, {
     console.error(`[amsg:upstream-error] ${where} \u2192 ${cause.name}: ${cause.message}`);
   }
 });
+var bytesFromHex = (value) => {
+  const bytes = new Uint8Array(value.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+  return bytes;
+};
+var base64 = (bytes) => btoa(Array.from(bytes, (byte) => String.fromCharCode(byte)).join(""));
+var encryptRelationshipPayload = async (payload, keyHex) => {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.importKey("raw", bytesFromHex(keyHex), { name: "AES-GCM" }, false, ["encrypt"]);
+  const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(payload))));
+  return { iv: base64(iv), authTag: base64(cipher.slice(-16)), encryptedData: base64(cipher.slice(0, -16)) };
+};
+var scheduleRelationshipTask = async (env, state) => {
+  try {
+    const userKey = await deriveUserEncryptionKey(state.userId, env.AMSG_MASTER_KEY);
+    const clientTaskId = crypto.randomUUID();
+    const payload = {
+      contactName: state.charName,
+      messageType: "prompted",
+      messageSubtype: "chat",
+      // amsg-server 对即将到点的任务有护栏；留出一分半钟给下一跳 Cron。
+      firstSendTime: new Date(Date.now() + 9e4).toISOString(),
+      recurrenceType: "none",
+      tzId: state.tzId,
+      messages: [{ role: "user", content: "\u5173\u7CFB\u4E3B\u52A8\u6D88\u606F\u4EFB\u52A1\u7531 fire-time hook \u73B0\u573A\u751F\u6210\u3002" }],
+      credRefs: { chat: state.credRef },
+      metadata: {
+        charId: state.charId,
+        charName: state.charName,
+        source: "active_msg_2",
+        amsgMode: "prompted",
+        amsgClientTaskId: clientTaskId,
+        amsgExpirePolicy: "expire",
+        amsgRelationship: true,
+        amsgTaskInstruction: buildTaskInstruction("prompted", "\u5173\u7CFB\u5C42\u8054\u7CFB\u673A\u4F1A\uFF1A\u7ED3\u5408\u89D2\u8272\u8BBE\u5B9A\u3001\u8FD1\u671F\u804A\u5929\u3001\u771F\u5B9E\u7ECF\u8FC7\u65F6\u95F4\u4E0E\u5F53\u524D\u65E5\u7A0B\uFF0C\u81EA\u7136\u5730\u51B3\u5B9A\u662F\u5426\u8054\u7CFB\u7528\u6237\u3002\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u3001\u601D\u5FF5\u503C\u6216\u4EFB\u52A1\uFF1B\u82E5\u7528\u6237\u521A\u5F00\u59CB\u804A\u5929\u6216\u4E0D\u9002\u5408\u6253\u6270\uFF0C\u8BF7\u8DF3\u8FC7\u3002")
+      }
+    };
+    const encrypted = await encryptRelationshipPayload(payload, userKey);
+    const result = await upstream.fetch(new Request("https://sullyos-relationship.internal/schedule-message", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-User-Id": state.userId,
+        "X-Payload-Encrypted": "true",
+        "X-Encryption-Version": "1",
+        ...env.AMSG_SERVER_TOKEN?.trim() ? { "X-Client-Token": env.AMSG_SERVER_TOKEN.trim() } : {}
+      },
+      body: JSON.stringify(encrypted)
+    }), env);
+    const body = await result.json();
+    if (!result.ok || !body.success || !body.data?.uuid) {
+      console.warn("[relationship] \u539F\u7248\u4EFB\u52A1\u521B\u5EFA\u5931\u8D25", body.error?.message || result.status);
+      return null;
+    }
+    return body.data.uuid;
+  } catch (error) {
+    console.warn("[relationship] \u539F\u7248\u4EFB\u52A1\u521B\u5EFA\u5F02\u5E38", error);
+    return null;
+  }
+};
 var inspectSchema = async (env) => {
   try {
     return { schema: await upstream.getSchemaVersion(env), error: null };
@@ -13873,9 +14112,9 @@ var readServerVersion = async (request, env) => {
     const url = new URL(request.url);
     url.pathname = "/capabilities";
     url.search = "";
-    const response = await upstream.fetch(new Request(url.toString(), { headers: request.headers }), env);
-    if (response.status !== 200) return null;
-    const body = await response.json();
+    const response2 = await upstream.fetch(new Request(url.toString(), { headers: request.headers }), env);
+    if (response2.status !== 200) return null;
+    const body = await response2.json();
     return { version: body.serverVersion ?? null, featureCount: body.features?.length ?? 0 };
   } catch {
     return null;
@@ -13943,6 +14182,8 @@ var src_default = {
         error: { code: "WORKER_CONFIG_MISSING", message: report.message, missing: report.missing }
       });
     }
+    const relationshipResponse = await handleRelationshipRequest(request, env);
+    if (relationshipResponse) return relationshipResponse;
     if (pathname.endsWith("/instant-chat")) {
       if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
       if (method !== "POST") {
@@ -13960,6 +14201,12 @@ var src_default = {
     if (!report.ok) {
       console.error(`[amsg] \u5B9A\u65F6\u4EFB\u52A1\u6574\u8F6E\u8DF3\u8FC7\uFF1A${report.message}`);
       return;
+    }
+    try {
+      const relation = await runRelationshipTick(env, (state) => scheduleRelationshipTask(env, state));
+      if (relation.scheduled) console.log(`[relationship] scheduled=${relation.scheduled}`);
+    } catch (error) {
+      console.warn("[relationship] tick failed", error);
     }
     await upstream.scheduled(event, env);
   }
