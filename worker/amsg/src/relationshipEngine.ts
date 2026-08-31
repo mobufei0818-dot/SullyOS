@@ -72,7 +72,8 @@ let schemaReady: Promise<void> | null = null;
 export const configureRelationshipEngine = (env: RelationshipEngineEnv | null) => { configuredEnv = env; };
 
 const HOUR = 60 * 60_000;
-const clamp = (value: number, min = 0, max = 100) => Math.round(Math.max(min, Math.min(max, value)));
+const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max, value));
+const isTakeoutPromise = (kind?: string) => kind === 'takeout_to_user' || kind === 'takeout_to_character';
 const ratePerMs = (style: Style) => (style === 'clingy' ? 30 / HOUR : style === 'reserved' ? 6 / HOUR : 9 / HOUR);
 const dayKey = (time: number, tzId: string) => {
   try {
@@ -129,15 +130,19 @@ const save = async (env: RelationshipEngineEnv, record: RelationshipRecord) => {
   const payload = await encryptForStorage(JSON.stringify(record), key);
   const now = Date.now();
   // 原版 Cron 仍是一分钟一次；关系层每十分钟才需要结算，关闭时则一天后再看。
-  const nextTickAt = record.config.enabled ? now + 10 * 60_000 : now + 24 * HOUR;
+  const normalTickAt = record.config.enabled ? now + 10 * 60_000 : now + 24 * HOUR;
+  // 外卖/承诺事件需要在明确 ETA 到达时被 Cron 取到，不能被 10 分钟轮询额外拖后。
+  const nextTickAt = record.promiseDueAt && record.promiseDueAt > now
+    ? Math.min(normalTickAt, record.promiseDueAt)
+    : normalTickAt;
   await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at, next_tick_at)
     VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, next_tick_at = excluded.next_tick_at`)
     .bind(record.userId, record.charId, payload, now, nextTickAt).run();
 };
 
 const publicState = (state: RelationshipRecord) => ({
-  longing: state.longing, nextThreshold: state.nextThreshold, affection: state.affection,
-  jealousy: state.jealousy, innerVoice: state.innerVoice, dailySent: state.dailySent,
+  longing: Math.round(state.longing), nextThreshold: Math.round(state.nextThreshold), affection: Math.round(state.affection),
+  jealousy: Math.round(state.jealousy), innerVoice: state.innerVoice, dailySent: state.dailySent,
   updatedAt: state.lastCalculatedAt,
 });
 
@@ -149,7 +154,15 @@ const advance = (state: RelationshipRecord, now: number) => {
   state.lastCalculatedAt = now;
 };
 
-const signalDelta = (signal: RelationshipSyncInput['userSignal']) => signal === 'affectionate' ? 2 : signal === 'distant' ? 1 : -4;
+/**
+ * 用户回来的“安心感”取决于离开多久：热聊里不能每句都大幅扣分。
+ * 内部保留小数，关系卡只显示取整，且 clamp 保证永不跌到负数。
+ */
+const replyDelta = (gapMs: number, signal: RelationshipSyncInput['userSignal']) => {
+  const gapMinutes = Math.max(0, gapMs) / 60_000;
+  const relief = gapMinutes >= 180 ? -8 : gapMinutes >= 60 ? -4 : gapMinutes >= 20 ? -1.5 : -0.35;
+  return relief + (signal === 'affectionate' ? 2 : signal === 'distant' ? 1 : 0);
+};
 
 export const syncRelationshipState = async (env: RelationshipEngineEnv, userId: string, input: RelationshipSyncInput) => {
   const now = Date.now();
@@ -163,14 +176,14 @@ export const syncRelationshipState = async (env: RelationshipEngineEnv, userId: 
       innerVoice: String(input.innerVoice || '把想说的话先悄悄留在心里。'),
       lastCalculatedAt: now, lastUserAt: input.lastUserAt || 0, lastAssistantAt: input.lastAssistantAt || 0,
       lastDispatchAt: 0, dailyDate: dayKey(now, input.tzId || 'UTC'), dailySent: 0,
-      ...(input.config.followUpPromises && input.promise && input.promise.dueAt > now
+      ...((input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now
         ? { promiseDueAt: input.promise.dueAt, promiseKind: input.promise.kind }
         : {}),
     };
   } else {
     advance(state, now);
     const receivedNewUserMessage = (input.lastUserAt || 0) > state.lastUserAt;
-    if (receivedNewUserMessage) state.longing = clamp(state.longing + signalDelta(input.userSignal));
+    if (receivedNewUserMessage) state.longing = clamp(state.longing + replyDelta((input.lastUserAt || now) - state.lastUserAt, input.userSignal));
     state.lastUserAt = Math.max(state.lastUserAt, input.lastUserAt || 0);
     state.lastAssistantAt = Math.max(state.lastAssistantAt, input.lastAssistantAt || 0);
     state.charName = input.charName || state.charName;
@@ -180,7 +193,7 @@ export const syncRelationshipState = async (env: RelationshipEngineEnv, userId: 
     if (typeof input.affection === 'number') state.affection = clamp(input.affection);
     if (typeof input.jealousy === 'number') state.jealousy = clamp(input.jealousy);
     if (typeof input.innerVoice === 'string' && input.innerVoice.trim()) state.innerVoice = input.innerVoice.trim();
-    if (input.config.followUpPromises && input.promise && input.promise.dueAt > now && input.promise.dueAt - now < 3 * 60 * 60_000) {
+    if ((input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now && input.promise.dueAt - now < 3 * 60 * 60_000) {
       state.promiseDueAt = input.promise.dueAt;
       state.promiseKind = input.promise.kind;
     }
@@ -245,7 +258,7 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
     const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 60_000;
     const inactiveEnough = now - Math.max(state.lastUserAt, state.lastAssistantAt) >= minGap;
     const thresholdDue = state.longing >= state.nextThreshold;
-    const promiseDue = Boolean(state.config.followUpPromises && state.promiseDueAt && now >= state.promiseDueAt);
+    const promiseDue = Boolean((state.config.followUpPromises || isTakeoutPromise(state.promiseKind)) && state.promiseDueAt && now >= state.promiseDueAt);
     // 数字目标的补足仅在自然空档中加速；无限模式严格只看阈值。
     const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
     const canDispatch = !state.pendingTaskUuid && now - state.lastDispatchAt >= minGap && !inQuietHours(now, state.config, state.tzId);
