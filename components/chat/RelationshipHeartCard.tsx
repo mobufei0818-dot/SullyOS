@@ -62,6 +62,7 @@ const RelationshipHeartCard: React.FC<RelationshipHeartCardProps> = ({ char, pul
               <p><span className="font-bold text-slate-600">当前状态：</span>{pulse.diagnostics.status || '等待后端状态回传。'}</p>
               <p><span className="font-bold text-slate-600">pendingTaskUuid：</span>{pulse.diagnostics.pendingTaskUuid || '无'}</p>
               <p><span className="font-bold text-slate-600">lastDispatchAt：</span>{formatTime(pulse.diagnostics.lastDispatchAt)}</p>
+              <p><span className="font-bold text-slate-600">lastTickAt：</span>{formatTime(pulse.diagnostics.lastTickAt)}</p>
               <p><span className="font-bold text-slate-600">next_tick_at：</span>{formatTime(pulse.diagnostics.nextTickAt)}</p>
               <p><span className="font-bold text-slate-600">任务创建失败：</span>{pulse.diagnostics.lastScheduleError || '无'}{pulse.diagnostics.lastScheduleErrorAt ? `（${formatTime(pulse.diagnostics.lastScheduleErrorAt)}）` : ''}</p>
             </div>
