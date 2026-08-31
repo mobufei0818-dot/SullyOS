@@ -8,6 +8,27 @@ type UserSignal = 'neutral' | 'affectionate' | 'distant';
 
 const latest = (messages: Message[], role: Message['role']) => [...messages].reverse().find(message => message.role === role);
 
+type TakeoutDirection = 'takeout_to_user' | 'takeout_to_character';
+
+const explicitTakeoutOrder = (text: string) => /(?:给|帮|替)(?:你|他|她|ta|TA).{0,16}(?:点了|下单了|叫了)|(?:点了|下单了|叫了).{0,16}(?:外卖|餐|饭|奶茶|饮品|咖啡|汉堡|披萨|水果|药)/.test(text);
+const stableDeliveryMinutes = (seed: string) => {
+  let value = 0;
+  for (let index = 0; index < seed.length; index += 1) value = ((value * 31) + seed.charCodeAt(index)) >>> 0;
+  return 25 + (value % 11);
+};
+/**
+ * 外卖 App 暂停时的轻量剧情事件：只承认明确的“已经给对方点了/下单了”表述，
+ * 不从“想吃”“帮我点一下”等意愿句猜订单，避免误触发。
+ */
+const latestTakeoutPromise = (messages: Message[]): { kind: TakeoutDirection; dueAt: number } | null => {
+  const candidate = [...messages].reverse().slice(0, 16).find(message =>
+    (message.role === 'assistant' || message.role === 'user') && explicitTakeoutOrder(message.content || ''));
+  if (!candidate) return null;
+  const kind: TakeoutDirection = candidate.role === 'assistant' ? 'takeout_to_user' : 'takeout_to_character';
+  const minutes = stableDeliveryMinutes(`${candidate.id}:${candidate.timestamp}:${kind}`);
+  return { kind, dueAt: candidate.timestamp + minutes * 60_000 };
+};
+
 const signalFrom = (message?: Message): UserSignal => {
   const text = message?.content || '';
   if (/(爱你|想你|喜欢你|抱抱|亲亲|舍不得|宝贝|宝宝|好爱)/.test(text)) return 'affectionate';
@@ -42,8 +63,12 @@ export const syncRelationshipBackend = async (char: CharacterProfile, messages: 
   const user = latest(messages, 'user');
   const assistant = latest(messages, 'assistant');
   const config = getRelationshipConfig(char);
+  const takeoutPromise = latestTakeoutPromise(messages);
   const followUpKind = config.followUpPromises ? inferFollowUpKind(assistant) : null;
   const followUpDelay = followUpKind ? followUpDelayMs(followUpKind, config.initiativeStyle) : 0;
+  const promise = takeoutPromise || (followUpKind && assistant
+    ? { kind: followUpKind, dueAt: assistant.timestamp + followUpDelay }
+    : null);
   const response = await fetch(endpoint(global.workerUrl), {
     method: 'POST', headers: headers(global.userId, global.serverToken),
     body: JSON.stringify({
@@ -53,7 +78,7 @@ export const syncRelationshipBackend = async (char: CharacterProfile, messages: 
       initialLonging: fallback.baselineLonging, affection: fallback.affection, jealousy: fallback.jealousy,
       innerVoice: fallback.innerVoice, lastUserAt: user?.timestamp, lastAssistantAt: assistant?.timestamp,
       userSignal: signalFrom(user),
-      ...(followUpKind && assistant ? { promise: { kind: followUpKind, dueAt: assistant.timestamp + followUpDelay } } : {}),
+      ...(promise ? { promise } : {}),
     }),
   });
   const body = await response.json().catch(() => null);
