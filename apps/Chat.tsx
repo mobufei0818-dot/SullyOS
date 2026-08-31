@@ -81,7 +81,7 @@ import {
     calculateRelationshipPulse,
     getRelationshipConfig,
 } from '../utils/relationshipProactive';
-import { fetchRelationshipBackend, syncRelationshipBackend } from '../utils/relationshipBackend';
+import { fetchRelationshipBackend, syncRelationshipBackend, updateRelationshipManualValues } from '../utils/relationshipBackend';
 import { getLastInnerState } from '../utils/emotionApply';
 import { formatHours } from '../utils/format';
 import {
@@ -3969,6 +3969,11 @@ const Chat: React.FC = () => {
                     char={char}
                     pulse={relationshipPulse}
                     onClose={() => setRelationshipCardOpen(false)}
+                    onManualUpdate={async values => {
+                        const next = await updateRelationshipManualValues(char, values);
+                        if (next) setRelationshipBackendPulse(next);
+                        return next;
+                    }}
                 />
              )}
 
