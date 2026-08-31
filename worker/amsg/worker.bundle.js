@@ -9038,9 +9038,21 @@ var save = async (env, record) => {
   const payload = await encryptForStorage(JSON.stringify(record), key);
   const now = Date.now();
   const normalTickAt = record.config.enabled ? now + 10 * 6e4 : now + 24 * HOUR;
-  const nextTickAt = record.promiseDueAt && record.promiseDueAt > now ? Math.min(normalTickAt, record.promiseDueAt) : normalTickAt;
+  const requestedTickAt = record.promiseDueAt && record.promiseDueAt > now ? Math.min(normalTickAt, record.promiseDueAt) : normalTickAt;
+  const nextTickAt = record.nextTickAt && record.nextTickAt > now ? Math.min(record.nextTickAt, requestedTickAt) : requestedTickAt;
+  record.nextTickAt = nextTickAt;
   await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at, next_tick_at)
     VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, next_tick_at = excluded.next_tick_at`).bind(record.userId, record.charId, payload, now, nextTickAt).run();
+};
+var dispatchStatus = (state, now = Date.now()) => {
+  if (!state.config.enabled) return "\u5173\u7CFB\u4E3B\u52A8\u6D88\u606F\u5DF2\u5173\u95ED\u3002";
+  if (state.pendingTaskUuid) return "\u5DF2\u6709\u4E00\u6761\u5173\u7CFB\u4EFB\u52A1\u6B63\u5728\u7B49\u5F85\u539F\u7248\u4E3B\u52A8\u6D88\u606F 2.0 \u7ED3\u7B97\u3002";
+  const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 6e4;
+  if (now - state.lastDispatchAt < minGap) return "\u8DDD\u79BB\u4E0A\u4E00\u6B21\u5173\u7CFB\u4EFB\u52A1\u521B\u5EFA\u5C1A\u672A\u8FBE\u5230\u6700\u77ED\u95F4\u9694\u3002";
+  if (inQuietHours(now, state.config, state.tzId)) return "\u5F53\u524D\u5904\u4E8E\u8BE5\u89D2\u8272\u7684\u514D\u6253\u6270\u65F6\u6BB5\u3002";
+  if (state.longing >= state.nextThreshold && state.nextTickAt && state.nextTickAt > now) return "\u9608\u503C\u5DF2\u8FBE\u5230\uFF0C\u7B49\u5F85 Worker \u7684\u4E0B\u4E00\u6B21\u5173\u7CFB\u68C0\u67E5\u3002";
+  if (state.longing >= state.nextThreshold) return "\u9608\u503C\u5DF2\u8FBE\u5230\uFF0C\u7B49\u5F85 Worker Cron \u6267\u884C\u3002";
+  return "\u5C1A\u672A\u8FBE\u5230\u4E0B\u4E00\u6B21\u601D\u5FF5\u9608\u503C\u3002";
 };
 var publicState = (state) => ({
   longing: Math.round(state.longing),
@@ -9049,7 +9061,15 @@ var publicState = (state) => ({
   jealousy: Math.round(state.jealousy),
   innerVoice: state.innerVoice,
   dailySent: state.dailySent,
-  updatedAt: state.lastCalculatedAt
+  updatedAt: state.lastCalculatedAt,
+  diagnostics: {
+    pendingTaskUuid: state.pendingTaskUuid,
+    lastDispatchAt: state.lastDispatchAt || void 0,
+    nextTickAt: state.nextTickAt,
+    lastScheduleError: state.lastScheduleError,
+    lastScheduleErrorAt: state.lastScheduleErrorAt,
+    status: dispatchStatus(state)
+  }
 });
 var advance = (state, now) => {
   const date = dayKey(now, state.tzId);
@@ -9165,14 +9185,19 @@ var runRelationshipTick = async (env, schedule) => {
     const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
     const canDispatch = !state.pendingTaskUuid && now - state.lastDispatchAt >= minGap && !inQuietHours(now, state.config, state.tzId);
     if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
-      const uuid = await schedule(state);
-      if (uuid) {
-        state.pendingTaskUuid = uuid;
+      const result = await schedule(state);
+      if (result.uuid) {
+        state.pendingTaskUuid = result.uuid;
         state.lastDispatchAt = now;
+        state.lastScheduleError = void 0;
+        state.lastScheduleErrorAt = void 0;
         state.nextThreshold = Math.max(state.nextThreshold + 30, state.longing + 30);
         state.promiseDueAt = void 0;
         state.promiseKind = void 0;
         scheduled += 1;
+      } else {
+        state.lastScheduleError = (result.error || "\u539F\u7248\u4E3B\u52A8\u6D88\u606F\u4EFB\u52A1\u521B\u5EFA\u6CA1\u6709\u8FD4\u56DE\u4EFB\u52A1 ID\u3002").slice(0, 400);
+        state.lastScheduleErrorAt = now;
       }
     }
     await save(env, state);
@@ -14110,13 +14135,14 @@ var scheduleRelationshipTask = async (env, state) => {
     }), env);
     const body = await result.json();
     if (!result.ok || !body.success || !body.data?.uuid) {
-      console.warn("[relationship] \u539F\u7248\u4EFB\u52A1\u521B\u5EFA\u5931\u8D25", body.error?.message || result.status);
-      return null;
+      const error = body.error?.message || `\u539F\u7248\u4EFB\u52A1\u521B\u5EFA\u63A5\u53E3\u8FD4\u56DE HTTP ${result.status}\u3002`;
+      console.warn("[relationship] \u539F\u7248\u4EFB\u52A1\u521B\u5EFA\u5931\u8D25", error);
+      return { error };
     }
-    return body.data.uuid;
+    return { uuid: body.data.uuid };
   } catch (error) {
     console.warn("[relationship] \u539F\u7248\u4EFB\u52A1\u521B\u5EFA\u5F02\u5E38", error);
-    return null;
+    return { error: error instanceof Error ? error.message : "\u539F\u7248\u4EFB\u52A1\u521B\u5EFA\u65F6\u53D1\u751F\u672A\u77E5\u5F02\u5E38\u3002" };
   }
 };
 var inspectSchema = async (env) => {
