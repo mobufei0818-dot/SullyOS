@@ -9008,7 +9008,12 @@ var inQuietHours = (time, config, tzId) => {
   }
 };
 var minimumGapMs = (state) => Math.max(30, state.config.minimumIntervalMinutes || 60) * 6e4;
-var canDispatchNow = (state, now) => !state.pendingTaskUuid && now - state.lastDispatchAt >= minimumGapMs(state) && !inQuietHours(now, state.config, state.tzId);
+var hasReachedDailyLimit = (state) => {
+  const limit = Math.max(0, state.config.dailyLimit || 0);
+  return limit > 0 && state.dailySent >= limit;
+};
+var canDispatchNow = (state, now) => !state.pendingTaskUuid && !hasReachedDailyLimit(state) && now - state.lastDispatchAt >= minimumGapMs(state) && !inQuietHours(now, state.config, state.tzId);
+var sentRelief = (style) => style === "clingy" ? 6 : style === "reserved" ? 10 : 8;
 var dbOf = (env) => env.DB;
 var ensureTable = (env) => {
   if (schemaReady) return schemaReady;
@@ -9051,6 +9056,7 @@ var save = async (env, record) => {
 var dispatchStatus = (state, now = Date.now()) => {
   if (!state.config.enabled) return "\u5173\u7CFB\u4E3B\u52A8\u6D88\u606F\u5DF2\u5173\u95ED\u3002";
   if (state.pendingTaskUuid) return "\u5DF2\u6709\u4E00\u6761\u5173\u7CFB\u4EFB\u52A1\u6B63\u5728\u7B49\u5F85\u539F\u7248\u4E3B\u52A8\u6D88\u606F 2.0 \u7ED3\u7B97\u3002";
+  if (hasReachedDailyLimit(state)) return "\u5DF2\u8FBE\u5230\u8BE5\u89D2\u8272\u8BBE\u7F6E\u7684\u6BCF\u65E5\u4E3B\u52A8\u6D88\u606F\u4E0A\u9650\u3002";
   if (now - state.lastDispatchAt < minimumGapMs(state)) return "\u8DDD\u79BB\u4E0A\u4E00\u6B21\u5173\u7CFB\u4EFB\u52A1\u521B\u5EFA\u5C1A\u672A\u8FBE\u5230\u6700\u77ED\u95F4\u9694\u3002";
   if (inQuietHours(now, state.config, state.tzId)) return "\u5F53\u524D\u5904\u4E8E\u8BE5\u89D2\u8272\u7684\u514D\u6253\u6270\u65F6\u6BB5\u3002";
   if (state.longing >= state.nextThreshold && state.nextTickAt && state.nextTickAt > now) return "\u9608\u503C\u5DF2\u8FBE\u5230\uFF0C\u7B49\u5F85 Worker \u7684\u4E0B\u4E00\u6B21\u5173\u7CFB\u68C0\u67E5\u3002";
@@ -9197,10 +9203,8 @@ var runRelationshipTick = async (env, schedule) => {
       const result = await schedule(state);
       if (result.uuid) {
         state.pendingTaskUuid = result.uuid;
-        state.lastDispatchAt = now;
         state.lastScheduleError = void 0;
         state.lastScheduleErrorAt = void 0;
-        state.nextThreshold = clamp(Math.max(state.nextThreshold + 30, state.longing + 30));
         state.promiseDueAt = void 0;
         state.promiseKind = void 0;
         scheduled += 1;
@@ -9218,9 +9222,15 @@ var settleRelationshipTask = async (args) => {
   if (!env || !args.userId || !args.charId || !args.taskUuid) return;
   const state = await load(env, args.userId, args.charId);
   if (!state || state.pendingTaskUuid !== args.taskUuid) return;
-  advance(state, Date.now());
+  const now = Date.now();
+  advance(state, now);
   state.pendingTaskUuid = void 0;
-  if (args.sent) state.dailySent += 1;
+  if (args.sent) {
+    state.longing = clamp(state.longing - sentRelief(state.config.initiativeStyle));
+    state.nextThreshold = clamp(state.longing + 30);
+    state.lastDispatchAt = now;
+    state.dailySent += 1;
+  }
   await save(env, state);
 };
 
