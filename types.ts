@@ -495,6 +495,15 @@ export interface RelationshipPulse {
   nextThreshold?: number;
   /** 当地当天已实际送达的关系主动消息数。 */
   dailySent?: number;
+  /** 关系层只读排程诊断；不含聊天正文、地址、密钥或模型配置。 */
+  diagnostics?: {
+    pendingTaskUuid?: string;
+    lastDispatchAt?: number;
+    nextTickAt?: number;
+    lastScheduleError?: string;
+    lastScheduleErrorAt?: number;
+    status?: string;
+  };
 }
 
 /** 任务「没了」的回执台账（amsg-local IDB kv，按角色一条数组）。 */
