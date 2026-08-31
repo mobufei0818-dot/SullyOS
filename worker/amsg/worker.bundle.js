@@ -8976,6 +8976,7 @@ async function handleSelfUpdate(request, env) {
 
 // worker/amsg/src/relationshipEngine.ts
 var configuredEnv = null;
+var schemaReady = null;
 var configureRelationshipEngine = (env) => {
   configuredEnv = env;
 };
@@ -9006,11 +9007,18 @@ var inQuietHours = (time, config, tzId) => {
   }
 };
 var dbOf = (env) => env.DB;
-var ensureTable = async (env) => {
-  await dbOf(env).prepare(`CREATE TABLE IF NOT EXISTS sully_relationship_state (
+var ensureTable = (env) => {
+  if (schemaReady) return schemaReady;
+  schemaReady = (async () => {
+    await dbOf(env).prepare(`CREATE TABLE IF NOT EXISTS sully_relationship_state (
     user_id TEXT NOT NULL, char_id TEXT NOT NULL, payload TEXT NOT NULL, updated_at INTEGER NOT NULL,
+    next_tick_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, char_id)
   )`).run();
+    await dbOf(env).prepare("ALTER TABLE sully_relationship_state ADD COLUMN next_tick_at INTEGER NOT NULL DEFAULT 0").run().catch(() => void 0);
+    await dbOf(env).prepare("CREATE INDEX IF NOT EXISTS idx_sully_relationship_next_tick ON sully_relationship_state(next_tick_at)").run();
+  })();
+  return schemaReady;
 };
 var load = async (env, userId, charId) => {
   await ensureTable(env);
@@ -9027,8 +9035,10 @@ var load = async (env, userId, charId) => {
 var save = async (env, record) => {
   const key = await deriveUserEncryptionKey(record.userId, env.AMSG_MASTER_KEY);
   const payload = await encryptForStorage(JSON.stringify(record), key);
-  await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at)
-    VALUES (?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`).bind(record.userId, record.charId, payload, Date.now()).run();
+  const now = Date.now();
+  const nextTickAt = record.config.enabled ? now + 10 * 6e4 : now + 24 * HOUR;
+  await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at, next_tick_at)
+    VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, next_tick_at = excluded.next_tick_at`).bind(record.userId, record.charId, payload, now, nextTickAt).run();
 };
 var publicState = (state) => ({
   longing: state.longing,
@@ -9072,7 +9082,8 @@ var syncRelationshipState = async (env, userId, input) => {
       lastAssistantAt: input.lastAssistantAt || 0,
       lastDispatchAt: 0,
       dailyDate: dayKey(now, input.tzId || "UTC"),
-      dailySent: 0
+      dailySent: 0,
+      ...input.config.followUpPromises && input.promise && input.promise.dueAt > now ? { promiseDueAt: input.promise.dueAt, promiseKind: input.promise.kind } : {}
     };
   } else {
     advance(state, now);
@@ -9087,6 +9098,10 @@ var syncRelationshipState = async (env, userId, input) => {
     if (typeof input.affection === "number") state.affection = clamp(input.affection);
     if (typeof input.jealousy === "number") state.jealousy = clamp(input.jealousy);
     if (typeof input.innerVoice === "string" && input.innerVoice.trim()) state.innerVoice = input.innerVoice.trim();
+    if (input.config.followUpPromises && input.promise && input.promise.dueAt > now && input.promise.dueAt - now < 3 * 60 * 6e4) {
+      state.promiseDueAt = input.promise.dueAt;
+      state.promiseKind = input.promise.kind;
+    }
   }
   await save(env, state);
   return publicState(state);
@@ -9120,16 +9135,15 @@ var handleRelationshipRequest = async (request, env) => {
 };
 var runRelationshipTick = async (env, schedule) => {
   await ensureTable(env);
-  const rows = await dbOf(env).prepare("SELECT payload FROM sully_relationship_state LIMIT 200").all();
+  const rows = await dbOf(env).prepare("SELECT user_id, char_id, payload FROM sully_relationship_state WHERE next_tick_at <= ? LIMIT 200").bind(Date.now()).all();
   const now = Date.now();
   let scheduled = 0;
   for (const row of rows.results || []) {
     if (!row.payload) continue;
     let state = null;
     try {
-      const probe = await dbOf(env).prepare("SELECT user_id, char_id FROM sully_relationship_state WHERE payload = ? LIMIT 1").bind(row.payload).first();
-      if (!probe?.user_id || !probe.char_id) continue;
-      const key = await deriveUserEncryptionKey(probe.user_id, env.AMSG_MASTER_KEY);
+      if (!row.user_id || !row.char_id) continue;
+      const key = await deriveUserEncryptionKey(row.user_id, env.AMSG_MASTER_KEY);
       state = JSON.parse(await decryptFromStorage(row.payload, key));
     } catch {
       continue;
@@ -9141,14 +9155,17 @@ var runRelationshipTick = async (env, schedule) => {
     const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 6e4;
     const inactiveEnough = now - Math.max(state.lastUserAt, state.lastAssistantAt) >= minGap;
     const thresholdDue = state.longing >= state.nextThreshold;
+    const promiseDue = Boolean(state.config.followUpPromises && state.promiseDueAt && now >= state.promiseDueAt);
     const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
     const canDispatch = !state.pendingTaskUuid && now - state.lastDispatchAt >= minGap && !inQuietHours(now, state.config, state.tzId);
-    if (canDispatch && (thresholdDue || targetDue)) {
+    if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
       const uuid = await schedule(state);
       if (uuid) {
         state.pendingTaskUuid = uuid;
         state.lastDispatchAt = now;
         state.nextThreshold = Math.max(state.nextThreshold + 30, state.longing + 30);
+        state.promiseDueAt = void 0;
+        state.promiseKind = void 0;
         scheduled += 1;
       }
     }
@@ -13986,7 +14003,7 @@ var inspectStorage = async (env, probe) => {
     if (!present.has("scheduled_messages")) {
       return { reachable: true, missingTables, missingColumns, schemaReady: false, schemaError };
     }
-    const schemaReady = schema ? missingTables.length === 0 && missingColumns.length === 0 : null;
+    const schemaReady2 = schema ? missingTables.length === 0 && missingColumns.length === 0 : null;
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const stats = await db.prepare(
       `SELECT COUNT(*) AS pending,
@@ -13997,7 +14014,7 @@ var inspectStorage = async (env, probe) => {
     const pushRow = present.has("push_subscriptions") ? await db.prepare("SELECT COUNT(*) AS n, MAX(updated_at) AS updatedAt FROM push_subscriptions").first() : null;
     return {
       reachable: true,
-      schemaReady,
+      schemaReady: schemaReady2,
       // null = 这次自查跑成了。有值时 schemaReady 必然是 null，界面照它选该说哪句话。
       schemaError,
       missingTables,
