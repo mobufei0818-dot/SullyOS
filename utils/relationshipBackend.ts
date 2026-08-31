@@ -1,6 +1,7 @@
 import type { CharacterProfile, Message, RelationshipPulse } from '../types';
 import { ActiveMsgStore } from './activeMsgStore';
 import { getRelationshipConfig } from './relationshipProactive';
+import { followUpDelayMs, inferFollowUpKind } from './relationshipProactive';
 import { resolveCharTimeZone } from './timezone';
 
 type UserSignal = 'neutral' | 'affectionate' | 'distant';
@@ -41,6 +42,8 @@ export const syncRelationshipBackend = async (char: CharacterProfile, messages: 
   const user = latest(messages, 'user');
   const assistant = latest(messages, 'assistant');
   const config = getRelationshipConfig(char);
+  const followUpKind = config.followUpPromises ? inferFollowUpKind(assistant) : null;
+  const followUpDelay = followUpKind ? followUpDelayMs(followUpKind, config.initiativeStyle) : 0;
   const response = await fetch(endpoint(global.workerUrl), {
     method: 'POST', headers: headers(global.userId, global.serverToken),
     body: JSON.stringify({
@@ -50,6 +53,7 @@ export const syncRelationshipBackend = async (char: CharacterProfile, messages: 
       initialLonging: fallback.baselineLonging, affection: fallback.affection, jealousy: fallback.jealousy,
       innerVoice: fallback.innerVoice, lastUserAt: user?.timestamp, lastAssistantAt: assistant?.timestamp,
       userSignal: signalFrom(user),
+      ...(followUpKind && assistant ? { promise: { kind: followUpKind, dueAt: assistant.timestamp + followUpDelay } } : {}),
     }),
   });
   const body = await response.json().catch(() => null);
@@ -65,4 +69,3 @@ export const fetchRelationshipBackend = async (char: CharacterProfile) => {
   if (!response.ok || !body?.success) return null;
   return asPulse(body.data);
 };
-
