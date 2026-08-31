@@ -103,7 +103,7 @@ import {
 } from '../../../utils/amsgToolPack';
 import { buildRealtimeWorldBlock } from './realtimeWorld';
 import { handleSelfUpdate } from './selfUpdate';
-import { handleRelationshipRequest, runRelationshipTick, type RelationshipEngineEnv } from './relationshipEngine';
+import { configureRelationshipEngine, handleRelationshipRequest, runRelationshipTick, settleRelationshipTask, type RelationshipEngineEnv } from './relationshipEngine';
 import {
   buildMcpDirectHeaders,
   buildMcpFireBlock,
@@ -420,6 +420,9 @@ interface FireStash {
   sceneSong: { id?: number; name: string; artists: string } | null;
   /** 这条任务是不是即时对话（用户刚发完消息在等回复）；决定要不要写 outbox。 */
   instant: boolean;
+  /** 关系层创建的任务，收尾时才解 pending 锁并计入当天实际发送数。 */
+  relationshipTask: boolean;
+  relationshipUserId: string | null;
   /**
    * 这一轮的情绪评估（副 API）。onBeforeFire 起跑、onLLMOutput 收尾时 await，
    * 结论挂上最后一条 push。没配评估 / 不是即时对话时是 null。
@@ -882,6 +885,20 @@ export const amsgFireSettled = async (
 ): Promise<void> => {
   const stash = getFireStash(info.scratch);
   if (!stash) return;   // onBeforeFire 没走到挂 stash 那步（比如取 fire_pack 就失败了）
+
+  if (stash.relationshipTask && stash.relationshipUserId && stash.taskUuid
+    && (info.status === 'sent' || info.status === 'skipped' || info.status === 'failed')) {
+    try {
+      await settleRelationshipTask({
+        userId: stash.relationshipUserId,
+        charId: stash.charId,
+        taskUuid: stash.taskUuid,
+        sent: info.status === 'sent' && (info.sentCount || 0) > 0,
+      });
+    } catch (error) {
+      console.warn('[relationship] fire settlement write failed', error);
+    }
+  }
 
   // 即时对话这一跳挂了 → 失败原因留痕（chat_fail），每次失败尝试覆盖写，最终留下的
   // 就是最后一跳的原因。客户端 60s 点名判到「行已出清」后一次点名读回这份，向用户
@@ -1848,6 +1865,8 @@ export const amsgHooks = {
       // （resolveFireSceneSong 与 renderFireSceneBlock 共用判定），冻的必然是正文里那首。
       sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
       instant,
+      relationshipTask: taskMeta.amsgRelationship === true,
+      relationshipUserId: typeof ctx.userId === 'string' ? ctx.userId : null,
       // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
       emotionEvalPromise: null,
       emotionLatePending: false,
@@ -2469,6 +2488,7 @@ export const buildWorkerConfig = (env: Env) => {
   configureInstantErrorPush(env.DB && env.AMSG_MASTER_KEY
     ? { webpush, db: env.DB as unknown as InstantErrorPushDeps['db'], masterKey: env.AMSG_MASTER_KEY }
     : null);
+  configureRelationshipEngine(env.DB && env.AMSG_MASTER_KEY ? env as RelationshipEngineEnv : null);
   return {
     // db 缺省时 factory 自动用 createD1Adapter(env.DB)
     masterKey: env.AMSG_MASTER_KEY,

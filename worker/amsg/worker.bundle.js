@@ -8975,6 +8975,10 @@ async function handleSelfUpdate(request, env) {
 }
 
 // worker/amsg/src/relationshipEngine.ts
+var configuredEnv = null;
+var configureRelationshipEngine = (env) => {
+  configuredEnv = env;
+};
 var HOUR = 60 * 6e4;
 var clamp = (value, min = 0, max = 100) => Math.round(Math.max(min, Math.min(max, value)));
 var ratePerMs = (style) => style === "clingy" ? 30 / HOUR : style === "reserved" ? 6 / HOUR : 9 / HOUR;
@@ -9151,6 +9155,16 @@ var runRelationshipTick = async (env, schedule) => {
     await save(env, state);
   }
   return { scheduled };
+};
+var settleRelationshipTask = async (args) => {
+  const env = configuredEnv;
+  if (!env || !args.userId || !args.charId || !args.taskUuid) return;
+  const state = await load(env, args.userId, args.charId);
+  if (!state || state.pendingTaskUuid !== args.taskUuid) return;
+  advance(state, Date.now());
+  state.pendingTaskUuid = void 0;
+  if (args.sent) state.dailySent += 1;
+  await save(env, state);
 };
 
 // utils/mcpFireCore.ts
@@ -12865,6 +12879,18 @@ var sendInstantErrorPush = async (args) => {
 var amsgFireSettled = async (info) => {
   const stash = getFireStash(info.scratch);
   if (!stash) return;
+  if (stash.relationshipTask && stash.relationshipUserId && stash.taskUuid && (info.status === "sent" || info.status === "skipped" || info.status === "failed")) {
+    try {
+      await settleRelationshipTask({
+        userId: stash.relationshipUserId,
+        charId: stash.charId,
+        taskUuid: stash.taskUuid,
+        sent: info.status === "sent" && (info.sentCount || 0) > 0
+      });
+    } catch (error) {
+      console.warn("[relationship] fire settlement write failed", error);
+    }
+  }
   if (stash.instant && info.status === "failed" && stash.taskUuid) {
     const failReason = info.error instanceof Error ? info.error.message : String(info.error ?? "\u672A\u77E5\u9519\u8BEF");
     const retryCount = typeof info.task?.retry_count === "number" ? info.task.retry_count : 0;
@@ -13419,6 +13445,8 @@ var amsgHooks = {
       // （resolveFireSceneSong 与 renderFireSceneBlock 共用判定），冻的必然是正文里那首。
       sceneSong: resolveFireSceneSong(pack.scene, ctx.now.getTime(), tz),
       instant,
+      relationshipTask: taskMeta.amsgRelationship === true,
+      relationshipUserId: typeof ctx.userId === "string" ? ctx.userId : null,
       // 下面即时对话那一支起跑（要等请求消息拼完才知道给评估喂什么）。
       emotionEvalPromise: null,
       emotionLatePending: false
@@ -13793,6 +13821,7 @@ var buildWorkerConfig = (env) => {
   const effectiveVapid = nativeFcmReady && (!vapid.publicKey?.trim() || !vapid.privateKey?.trim()) ? { email: vapid.email, publicKey: "native-fcm", privateKey: "native-fcm" } : vapid;
   const webpush = createHybridPushTransport(env, createWebCryptoWebPush(effectiveVapid));
   configureInstantErrorPush(env.DB && env.AMSG_MASTER_KEY ? { webpush, db: env.DB, masterKey: env.AMSG_MASTER_KEY } : null);
+  configureRelationshipEngine(env.DB && env.AMSG_MASTER_KEY ? env : null);
   return {
     // db 缺省时 factory 自动用 createD1Adapter(env.DB)
     masterKey: env.AMSG_MASTER_KEY,

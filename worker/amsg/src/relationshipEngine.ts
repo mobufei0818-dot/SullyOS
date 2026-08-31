@@ -62,6 +62,10 @@ export interface RelationshipSyncInput {
 
 export interface RelationshipEngineEnv { DB: unknown; AMSG_MASTER_KEY: string; AMSG_SERVER_TOKEN?: string; }
 
+let configuredEnv: RelationshipEngineEnv | null = null;
+/** buildWorkerConfig 每次初始化时注入；与原版 Worker 共用同一个 D1 和主密钥。 */
+export const configureRelationshipEngine = (env: RelationshipEngineEnv | null) => { configuredEnv = env; };
+
 const HOUR = 60 * 60_000;
 const clamp = (value: number, min = 0, max = 100) => Math.round(Math.max(min, Math.min(max, value)));
 const ratePerMs = (style: Style) => (style === 'clingy' ? 30 / HOUR : style === 'reserved' ? 6 / HOUR : 9 / HOUR);
@@ -234,4 +238,16 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
     await save(env, state);
   }
   return { scheduled };
+};
+
+/** 原版 fire 确认真正送达/跳过后回写关系账本，避免 pending 锁把后续阈值永久卡住。 */
+export const settleRelationshipTask = async (args: { userId: string; charId: string; taskUuid: string; sent: boolean }) => {
+  const env = configuredEnv;
+  if (!env || !args.userId || !args.charId || !args.taskUuid) return;
+  const state = await load(env, args.userId, args.charId);
+  if (!state || state.pendingTaskUuid !== args.taskUuid) return;
+  advance(state, Date.now());
+  state.pendingTaskUuid = undefined;
+  if (args.sent) state.dailySent += 1;
+  await save(env, state);
 };
