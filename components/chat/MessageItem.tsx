@@ -1672,7 +1672,6 @@ const MessageItem = React.memo(({
                     aria-label="查看关系状态"
                 >
                     {content}
-                    <span className="absolute -right-0.5 -top-0.5 grid h-3.5 w-3.5 place-items-center rounded-full bg-rose-400 text-[8px] leading-none text-white shadow-sm">♥</span>
                 </button>
             );
         }
