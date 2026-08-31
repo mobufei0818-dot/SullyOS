@@ -38,6 +38,8 @@ interface RelationshipRecord {
   lastUserAt: number;
   lastAssistantAt: number;
   lastDispatchAt: number;
+  /** 仅由 Cron 在完成一轮关系检查后更新；绝不能复用 lastCalculatedAt。 */
+  lastTickAt?: number;
   dailyDate: string;
   dailySent: number;
   pendingTaskUuid?: string;
@@ -100,6 +102,11 @@ const inQuietHours = (time: number, config: RelationshipConfigWire, tzId: string
   } catch { return false; }
 };
 
+const minimumGapMs = (state: RelationshipRecord) => Math.max(30, state.config.minimumIntervalMinutes || 60) * 60_000;
+const canDispatchNow = (state: RelationshipRecord, now: number) => !state.pendingTaskUuid
+  && now - state.lastDispatchAt >= minimumGapMs(state)
+  && !inQuietHours(now, state.config, state.tzId);
+
 const dbOf = (env: RelationshipEngineEnv): D1Like => env.DB as D1Like;
 
 const ensureTable = (env: RelationshipEngineEnv) => {
@@ -137,9 +144,14 @@ const save = async (env: RelationshipEngineEnv, record: RelationshipRecord) => {
   // 原版 Cron 仍是一分钟一次；关系层每十分钟才需要结算，关闭时则一天后再看。
   const normalTickAt = record.config.enabled ? now + 10 * 60_000 : now + 24 * HOUR;
   // 外卖/承诺事件需要在明确 ETA 到达时被 Cron 取到，不能被 10 分钟轮询额外拖后。
-  const requestedTickAt = record.promiseDueAt && record.promiseDueAt > now
+  const scheduledPromiseAt = record.promiseDueAt && record.promiseDueAt > now
     ? Math.min(normalTickAt, record.promiseDueAt)
     : normalTickAt;
+  // 已超过阈值且没有明确阻塞时，下一分钟 Cron 就应尝试创建任务；不能再白等 10 分钟。
+  const shouldCheckImmediately = record.config.enabled && canDispatchNow(record, now)
+    && (record.longing >= record.nextThreshold
+      || Boolean((record.config.followUpPromises || isTakeoutPromise(record.promiseKind)) && record.promiseDueAt && record.promiseDueAt <= now));
+  const requestedTickAt = shouldCheckImmediately ? now : scheduledPromiseAt;
   // 关键：聊天页面的同步可每分钟发生一次，不能把已经安排好的 10 分钟检查反复推迟。
   // 仅保留「仍在未来的更早时刻」；已到期的时刻由本次保存重新排下一轮。
   const nextTickAt = record.nextTickAt && record.nextTickAt > now
@@ -154,8 +166,7 @@ const save = async (env: RelationshipEngineEnv, record: RelationshipRecord) => {
 const dispatchStatus = (state: RelationshipRecord, now = Date.now()) => {
   if (!state.config.enabled) return '关系主动消息已关闭。';
   if (state.pendingTaskUuid) return '已有一条关系任务正在等待原版主动消息 2.0 结算。';
-  const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 60_000;
-  if (now - state.lastDispatchAt < minGap) return '距离上一次关系任务创建尚未达到最短间隔。';
+  if (now - state.lastDispatchAt < minimumGapMs(state)) return '距离上一次关系任务创建尚未达到最短间隔。';
   if (inQuietHours(now, state.config, state.tzId)) return '当前处于该角色的免打扰时段。';
   if (state.longing >= state.nextThreshold && state.nextTickAt && state.nextTickAt > now) return '阈值已达到，等待 Worker 的下一次关系检查。';
   if (state.longing >= state.nextThreshold) return '阈值已达到，等待 Worker Cron 执行。';
@@ -169,6 +180,7 @@ const publicState = (state: RelationshipRecord) => ({
   diagnostics: {
     pendingTaskUuid: state.pendingTaskUuid,
     lastDispatchAt: state.lastDispatchAt || undefined,
+    lastTickAt: state.lastTickAt,
     nextTickAt: state.nextTickAt,
     lastScheduleError: state.lastScheduleError,
     lastScheduleErrorAt: state.lastScheduleErrorAt,
@@ -280,18 +292,19 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
       state = JSON.parse(await decryptFromStorage(row.payload, key)) as RelationshipRecord;
     } catch { continue; }
     if (!state.config.enabled) continue;
-    // Worker 的 Cron 仍每分钟保留给原版任务；关系层本身只每十分钟结算一次，
-    // 不把免费层额度浪费在无意义的逐分钟读写上。
-    if (now - state.lastCalculatedAt < 10 * 60_000) continue;
+    // `lastCalculatedAt` 会在前端每次同步时推进，不能拿它节流 Cron；否则打开聊天页
+    // 反而会让检查永远达不到 10 分钟。Cron 专用的 lastTickAt 只在本循环成功检查后更新。
+    if (state.lastTickAt && now - state.lastTickAt < 10 * 60_000) continue;
     advance(state, now);
+    state.lastTickAt = now;
     const target = Math.max(0, state.config.dailyLimit || 0);
-    const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 60_000;
+    const minGap = minimumGapMs(state);
     const inactiveEnough = now - Math.max(state.lastUserAt, state.lastAssistantAt) >= minGap;
     const thresholdDue = state.longing >= state.nextThreshold;
     const promiseDue = Boolean((state.config.followUpPromises || isTakeoutPromise(state.promiseKind)) && state.promiseDueAt && now >= state.promiseDueAt);
     // 数字目标的补足仅在自然空档中加速；无限模式严格只看阈值。
     const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
-    const canDispatch = !state.pendingTaskUuid && now - state.lastDispatchAt >= minGap && !inQuietHours(now, state.config, state.tzId);
+    const canDispatch = canDispatchNow(state, now);
     if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
       const result = await schedule(state);
       if (result.uuid) {
