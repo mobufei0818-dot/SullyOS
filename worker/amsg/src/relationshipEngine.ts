@@ -41,6 +41,9 @@ interface RelationshipRecord {
   dailyDate: string;
   dailySent: number;
   pendingTaskUuid?: string;
+  /** 最近一次带现实后续含义的话，到了合理时间窗后仅提供一次联系机会。 */
+  promiseDueAt?: number;
+  promiseKind?: string;
 }
 
 export interface RelationshipSyncInput {
@@ -58,11 +61,13 @@ export interface RelationshipSyncInput {
   affection?: number;
   jealousy?: number;
   innerVoice?: string;
+  promise?: { dueAt: number; kind: string };
 }
 
 export interface RelationshipEngineEnv { DB: unknown; AMSG_MASTER_KEY: string; AMSG_SERVER_TOKEN?: string; }
 
 let configuredEnv: RelationshipEngineEnv | null = null;
+let schemaReady: Promise<void> | null = null;
 /** buildWorkerConfig 每次初始化时注入；与原版 Worker 共用同一个 D1 和主密钥。 */
 export const configureRelationshipEngine = (env: RelationshipEngineEnv | null) => { configuredEnv = env; };
 
@@ -91,11 +96,19 @@ const inQuietHours = (time: number, config: RelationshipConfigWire, tzId: string
 
 const dbOf = (env: RelationshipEngineEnv): D1Like => env.DB as D1Like;
 
-const ensureTable = async (env: RelationshipEngineEnv) => {
-  await dbOf(env).prepare(`CREATE TABLE IF NOT EXISTS sully_relationship_state (
+const ensureTable = (env: RelationshipEngineEnv) => {
+  if (schemaReady) return schemaReady;
+  schemaReady = (async () => {
+    await dbOf(env).prepare(`CREATE TABLE IF NOT EXISTS sully_relationship_state (
     user_id TEXT NOT NULL, char_id TEXT NOT NULL, payload TEXT NOT NULL, updated_at INTEGER NOT NULL,
+    next_tick_at INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, char_id)
   )`).run();
+  // 兼容这一功能测试期间已经创建过的旧表；重复添加在 D1 中会报错，忽略即可。
+  await dbOf(env).prepare('ALTER TABLE sully_relationship_state ADD COLUMN next_tick_at INTEGER NOT NULL DEFAULT 0').run().catch(() => undefined);
+  await dbOf(env).prepare('CREATE INDEX IF NOT EXISTS idx_sully_relationship_next_tick ON sully_relationship_state(next_tick_at)').run();
+  })();
+  return schemaReady;
 };
 
 const load = async (env: RelationshipEngineEnv, userId: string, charId: string): Promise<RelationshipRecord | null> => {
@@ -114,9 +127,12 @@ const load = async (env: RelationshipEngineEnv, userId: string, charId: string):
 const save = async (env: RelationshipEngineEnv, record: RelationshipRecord) => {
   const key = await deriveUserEncryptionKey(record.userId, env.AMSG_MASTER_KEY);
   const payload = await encryptForStorage(JSON.stringify(record), key);
-  await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at)
-    VALUES (?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at`)
-    .bind(record.userId, record.charId, payload, Date.now()).run();
+  const now = Date.now();
+  // 原版 Cron 仍是一分钟一次；关系层每十分钟才需要结算，关闭时则一天后再看。
+  const nextTickAt = record.config.enabled ? now + 10 * 60_000 : now + 24 * HOUR;
+  await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at, next_tick_at)
+    VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, next_tick_at = excluded.next_tick_at`)
+    .bind(record.userId, record.charId, payload, now, nextTickAt).run();
 };
 
 const publicState = (state: RelationshipRecord) => ({
@@ -147,6 +163,9 @@ export const syncRelationshipState = async (env: RelationshipEngineEnv, userId: 
       innerVoice: String(input.innerVoice || '把想说的话先悄悄留在心里。'),
       lastCalculatedAt: now, lastUserAt: input.lastUserAt || 0, lastAssistantAt: input.lastAssistantAt || 0,
       lastDispatchAt: 0, dailyDate: dayKey(now, input.tzId || 'UTC'), dailySent: 0,
+      ...(input.config.followUpPromises && input.promise && input.promise.dueAt > now
+        ? { promiseDueAt: input.promise.dueAt, promiseKind: input.promise.kind }
+        : {}),
     };
   } else {
     advance(state, now);
@@ -161,6 +180,10 @@ export const syncRelationshipState = async (env: RelationshipEngineEnv, userId: 
     if (typeof input.affection === 'number') state.affection = clamp(input.affection);
     if (typeof input.jealousy === 'number') state.jealousy = clamp(input.jealousy);
     if (typeof input.innerVoice === 'string' && input.innerVoice.trim()) state.innerVoice = input.innerVoice.trim();
+    if (input.config.followUpPromises && input.promise && input.promise.dueAt > now && input.promise.dueAt - now < 3 * 60 * 60_000) {
+      state.promiseDueAt = input.promise.dueAt;
+      state.promiseKind = input.promise.kind;
+    }
   }
   await save(env, state);
   return publicState(state);
@@ -202,16 +225,15 @@ export const handleRelationshipRequest = async (request: Request, env: Relations
  */
 export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: (state: RelationshipRecord) => Promise<string | null>) => {
   await ensureTable(env);
-  const rows = await dbOf(env).prepare('SELECT payload FROM sully_relationship_state LIMIT 200').all<{ payload?: string }>();
+  const rows = await dbOf(env).prepare('SELECT user_id, char_id, payload FROM sully_relationship_state WHERE next_tick_at <= ? LIMIT 200').bind(Date.now()).all<{ user_id?: string; char_id?: string; payload?: string }>();
   const now = Date.now();
   let scheduled = 0;
   for (const row of rows.results || []) {
     if (!row.payload) continue;
     let state: RelationshipRecord | null = null;
     try {
-      const probe = await dbOf(env).prepare('SELECT user_id, char_id FROM sully_relationship_state WHERE payload = ? LIMIT 1').bind(row.payload).first<{ user_id?: string; char_id?: string }>();
-      if (!probe?.user_id || !probe.char_id) continue;
-      const key = await deriveUserEncryptionKey(probe.user_id, env.AMSG_MASTER_KEY);
+      if (!row.user_id || !row.char_id) continue;
+      const key = await deriveUserEncryptionKey(row.user_id, env.AMSG_MASTER_KEY);
       state = JSON.parse(await decryptFromStorage(row.payload, key)) as RelationshipRecord;
     } catch { continue; }
     if (!state.config.enabled) continue;
@@ -223,15 +245,18 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
     const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 60_000;
     const inactiveEnough = now - Math.max(state.lastUserAt, state.lastAssistantAt) >= minGap;
     const thresholdDue = state.longing >= state.nextThreshold;
+    const promiseDue = Boolean(state.config.followUpPromises && state.promiseDueAt && now >= state.promiseDueAt);
     // 数字目标的补足仅在自然空档中加速；无限模式严格只看阈值。
     const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
     const canDispatch = !state.pendingTaskUuid && now - state.lastDispatchAt >= minGap && !inQuietHours(now, state.config, state.tzId);
-    if (canDispatch && (thresholdDue || targetDue)) {
+    if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
       const uuid = await schedule(state);
       if (uuid) {
         state.pendingTaskUuid = uuid;
         state.lastDispatchAt = now;
         state.nextThreshold = Math.max(state.nextThreshold + 30, state.longing + 30);
+        state.promiseDueAt = undefined;
+        state.promiseKind = undefined;
         scheduled += 1;
       }
     }
