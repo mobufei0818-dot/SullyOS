@@ -796,6 +796,26 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     return revealAndCopy(token, setGeneratedServerToken, 'AMSG_SERVER_TOKEN');
   };
 
+  /**
+   * 已保存的共享密钥采用 password 输入框显示，用户仍需要能把原值安全地交给可信设备。
+   * 只写入系统剪贴板，不展开到页面、日志或埋点中。
+   */
+  const handleCopyServerToken = async () => {
+    const token = config?.serverToken?.trim();
+    if (!token) {
+      addToast('当前没有已保存的共享密钥。', 'info');
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(token);
+      addToast('共享密钥已复制，可私下发给可信朋友。', 'success');
+      trackEvent('复制 2.0 Worker 密钥', { result: 'ok' });
+    } catch (error: any) {
+      addToast(`复制失败（${error?.message || error}）。请在支持剪贴板权限的浏览器中重试。`, 'error');
+      trackEvent('复制 2.0 Worker 密钥', { result: 'failed' });
+    }
+  };
+
   if (!config) return null;
 
   const isConnected = Boolean(config.initializedAt);
@@ -1312,6 +1332,14 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                 className="shrink-0 px-3 py-3 text-xs rounded-2xl font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform"
               >
                 随机
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleCopyServerToken()}
+                disabled={!config.serverToken?.trim()}
+                className="shrink-0 px-3 py-3 text-xs rounded-2xl font-bold bg-white border border-slate-200 text-slate-600 active:scale-95 transition-transform disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                复制
               </button>
             </div>
             {generatedServerToken ? (
