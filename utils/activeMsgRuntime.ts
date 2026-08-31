@@ -25,6 +25,7 @@ import {
   drainOutbox,
   failInstantChatPending,
   getInstantChatPending,
+  isInstantChatCancelled,
   listInstantChatPendings,
   settleInstantChatApiLog,
   settleInstantChatExpiredNotices,
@@ -1676,6 +1677,14 @@ const flushInboxToChatImpl = async (): Promise<string[]> => {
         messageType: message.messageType,
         bodyChars: typeof message.body === 'string' ? message.body.length : undefined,
       });
+
+      // 用户已经明确停止的云端即时对话：即使模型已在上游跑完、回复经 push / outbox 迟到，
+      // 也不允许再落进聊天。此处不 requeue，finally 会正常 ack 账本，避免下一次补收再捞回来。
+      if (isInstantChatCancelled(message.charId, message.taskUuid)) {
+        log.info('用户已停止的即时对话回复迟到，丢弃', { messageId: message.messageId, charId: message.charId, uuid: message.taskUuid });
+        activeMsgTrace('runtime-instant-chat-cancelled-dropped', { messageId: message.messageId, charId: message.charId, uuid: message.taskUuid });
+        continue;
+      }
 
       // 见上面 isAlreadyPersisted 的注释：这条已经在聊天记录里了（补收先到、真推送迟到，
       // 或重试重跑的重叠段），第二份原样丢弃。
