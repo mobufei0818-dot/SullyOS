@@ -9133,6 +9133,9 @@ var syncRelationshipState = async (env, userId, input) => {
       state.promiseKind = input.promise.kind;
     }
   }
+  if (Number.isFinite(input.manual?.longing)) state.longing = clamp(Number(input.manual?.longing));
+  if (Number.isFinite(input.manual?.nextThreshold)) state.nextThreshold = clamp(Math.round(Number(input.manual?.nextThreshold)));
+  state.nextThreshold = clamp(state.nextThreshold);
   await save(env, state);
   return publicState(state);
 };
@@ -9181,6 +9184,7 @@ var runRelationshipTick = async (env, schedule) => {
     if (!state.config.enabled) continue;
     if (state.lastTickAt && now - state.lastTickAt < 10 * 6e4) continue;
     advance(state, now);
+    state.nextThreshold = clamp(state.nextThreshold);
     state.lastTickAt = now;
     const target = Math.max(0, state.config.dailyLimit || 0);
     const minGap = minimumGapMs(state);
@@ -9196,7 +9200,7 @@ var runRelationshipTick = async (env, schedule) => {
         state.lastDispatchAt = now;
         state.lastScheduleError = void 0;
         state.lastScheduleErrorAt = void 0;
-        state.nextThreshold = Math.max(state.nextThreshold + 30, state.longing + 30);
+        state.nextThreshold = clamp(Math.max(state.nextThreshold + 30, state.longing + 30));
         state.promiseDueAt = void 0;
         state.promiseKind = void 0;
         scheduled += 1;
