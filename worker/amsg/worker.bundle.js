@@ -9007,6 +9007,8 @@ var inQuietHours = (time, config, tzId) => {
     return false;
   }
 };
+var minimumGapMs = (state) => Math.max(30, state.config.minimumIntervalMinutes || 60) * 6e4;
+var canDispatchNow = (state, now) => !state.pendingTaskUuid && now - state.lastDispatchAt >= minimumGapMs(state) && !inQuietHours(now, state.config, state.tzId);
 var dbOf = (env) => env.DB;
 var ensureTable = (env) => {
   if (schemaReady) return schemaReady;
@@ -9038,7 +9040,9 @@ var save = async (env, record) => {
   const payload = await encryptForStorage(JSON.stringify(record), key);
   const now = Date.now();
   const normalTickAt = record.config.enabled ? now + 10 * 6e4 : now + 24 * HOUR;
-  const requestedTickAt = record.promiseDueAt && record.promiseDueAt > now ? Math.min(normalTickAt, record.promiseDueAt) : normalTickAt;
+  const scheduledPromiseAt = record.promiseDueAt && record.promiseDueAt > now ? Math.min(normalTickAt, record.promiseDueAt) : normalTickAt;
+  const shouldCheckImmediately = record.config.enabled && canDispatchNow(record, now) && (record.longing >= record.nextThreshold || Boolean((record.config.followUpPromises || isTakeoutPromise(record.promiseKind)) && record.promiseDueAt && record.promiseDueAt <= now));
+  const requestedTickAt = shouldCheckImmediately ? now : scheduledPromiseAt;
   const nextTickAt = record.nextTickAt && record.nextTickAt > now ? Math.min(record.nextTickAt, requestedTickAt) : requestedTickAt;
   record.nextTickAt = nextTickAt;
   await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at, next_tick_at)
@@ -9047,8 +9051,7 @@ var save = async (env, record) => {
 var dispatchStatus = (state, now = Date.now()) => {
   if (!state.config.enabled) return "\u5173\u7CFB\u4E3B\u52A8\u6D88\u606F\u5DF2\u5173\u95ED\u3002";
   if (state.pendingTaskUuid) return "\u5DF2\u6709\u4E00\u6761\u5173\u7CFB\u4EFB\u52A1\u6B63\u5728\u7B49\u5F85\u539F\u7248\u4E3B\u52A8\u6D88\u606F 2.0 \u7ED3\u7B97\u3002";
-  const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 6e4;
-  if (now - state.lastDispatchAt < minGap) return "\u8DDD\u79BB\u4E0A\u4E00\u6B21\u5173\u7CFB\u4EFB\u52A1\u521B\u5EFA\u5C1A\u672A\u8FBE\u5230\u6700\u77ED\u95F4\u9694\u3002";
+  if (now - state.lastDispatchAt < minimumGapMs(state)) return "\u8DDD\u79BB\u4E0A\u4E00\u6B21\u5173\u7CFB\u4EFB\u52A1\u521B\u5EFA\u5C1A\u672A\u8FBE\u5230\u6700\u77ED\u95F4\u9694\u3002";
   if (inQuietHours(now, state.config, state.tzId)) return "\u5F53\u524D\u5904\u4E8E\u8BE5\u89D2\u8272\u7684\u514D\u6253\u6270\u65F6\u6BB5\u3002";
   if (state.longing >= state.nextThreshold && state.nextTickAt && state.nextTickAt > now) return "\u9608\u503C\u5DF2\u8FBE\u5230\uFF0C\u7B49\u5F85 Worker \u7684\u4E0B\u4E00\u6B21\u5173\u7CFB\u68C0\u67E5\u3002";
   if (state.longing >= state.nextThreshold) return "\u9608\u503C\u5DF2\u8FBE\u5230\uFF0C\u7B49\u5F85 Worker Cron \u6267\u884C\u3002";
@@ -9065,6 +9068,7 @@ var publicState = (state) => ({
   diagnostics: {
     pendingTaskUuid: state.pendingTaskUuid,
     lastDispatchAt: state.lastDispatchAt || void 0,
+    lastTickAt: state.lastTickAt,
     nextTickAt: state.nextTickAt,
     lastScheduleError: state.lastScheduleError,
     lastScheduleErrorAt: state.lastScheduleErrorAt,
@@ -9175,15 +9179,16 @@ var runRelationshipTick = async (env, schedule) => {
       continue;
     }
     if (!state.config.enabled) continue;
-    if (now - state.lastCalculatedAt < 10 * 6e4) continue;
+    if (state.lastTickAt && now - state.lastTickAt < 10 * 6e4) continue;
     advance(state, now);
+    state.lastTickAt = now;
     const target = Math.max(0, state.config.dailyLimit || 0);
-    const minGap = Math.max(30, state.config.minimumIntervalMinutes || 60) * 6e4;
+    const minGap = minimumGapMs(state);
     const inactiveEnough = now - Math.max(state.lastUserAt, state.lastAssistantAt) >= minGap;
     const thresholdDue = state.longing >= state.nextThreshold;
     const promiseDue = Boolean((state.config.followUpPromises || isTakeoutPromise(state.promiseKind)) && state.promiseDueAt && now >= state.promiseDueAt);
     const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
-    const canDispatch = !state.pendingTaskUuid && now - state.lastDispatchAt >= minGap && !inQuietHours(now, state.config, state.tzId);
+    const canDispatch = canDispatchNow(state, now);
     if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
       const result = await schedule(state);
       if (result.uuid) {
