@@ -499,6 +499,7 @@ export interface RelationshipPulse {
   diagnostics?: {
     pendingTaskUuid?: string;
     lastDispatchAt?: number;
+    lastTickAt?: number;
     nextTickAt?: number;
     lastScheduleError?: string;
     lastScheduleErrorAt?: number;
