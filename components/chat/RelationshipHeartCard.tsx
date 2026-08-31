@@ -14,8 +14,13 @@ const Metric: React.FC<{ label: string; value: number; color: string }> = ({ lab
   </div>
 );
 
+const formatTime = (value?: number) => value
+  ? new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', month: 'numeric', day: 'numeric', hour12: false }).format(new Date(value))
+  : '—';
+
 const RelationshipHeartCard: React.FC<RelationshipHeartCardProps> = ({ char, pulse, onClose }) => {
   const [voiceExpanded, setVoiceExpanded] = React.useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = React.useState(false);
   const voice = pulse.innerVoice || '把想说的话先悄悄留在心里。';
   return (
   <div className="fixed inset-0 z-[120] flex items-end justify-center bg-slate-900/20 px-4 pb-[calc(env(safe-area-inset-bottom)+18px)] backdrop-blur-[1px]" onClick={onClose}>
@@ -46,6 +51,23 @@ const RelationshipHeartCard: React.FC<RelationshipHeartCardProps> = ({ char, pul
           </button>
         )}
       </div>
+      {pulse.diagnostics && (
+        <div className="mx-5 mb-4 rounded-2xl border border-slate-200/80 bg-white/55 px-3.5 py-2.5">
+          <button type="button" className="flex w-full items-center justify-between text-left" onClick={() => setDiagnosticsOpen(value => !value)}>
+            <span className="text-[11px] font-bold text-slate-500">排程诊断</span>
+            <span className="text-[11px] font-bold text-rose-400">{diagnosticsOpen ? '收起' : '查看'}</span>
+          </button>
+          {diagnosticsOpen && (
+            <div className="mt-2.5 space-y-1.5 break-all text-[10px] leading-relaxed text-slate-500">
+              <p><span className="font-bold text-slate-600">当前状态：</span>{pulse.diagnostics.status || '等待后端状态回传。'}</p>
+              <p><span className="font-bold text-slate-600">pendingTaskUuid：</span>{pulse.diagnostics.pendingTaskUuid || '无'}</p>
+              <p><span className="font-bold text-slate-600">lastDispatchAt：</span>{formatTime(pulse.diagnostics.lastDispatchAt)}</p>
+              <p><span className="font-bold text-slate-600">next_tick_at：</span>{formatTime(pulse.diagnostics.nextTickAt)}</p>
+              <p><span className="font-bold text-slate-600">任务创建失败：</span>{pulse.diagnostics.lastScheduleError || '无'}{pulse.diagnostics.lastScheduleErrorAt ? `（${formatTime(pulse.diagnostics.lastScheduleErrorAt)}）` : ''}</p>
+            </div>
+          )}
+        </div>
+      )}
       <div className="border-t border-white/80 bg-white/40 px-5 py-2.5 text-center text-[10px] text-slate-400">
         仅供查看 · {pulse.nextThreshold ? `下一次阈值 ${pulse.nextThreshold}` : '数值会随聊天与时间自然变化'}
       </div>
