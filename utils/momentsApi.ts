@@ -9,6 +9,8 @@ export interface MomentsPlannedInteraction {
   actorName: string;
   kind: 'reaction' | 'comment';
   content?: string;
+  replyToCommentId?: string;
+  replyToActorId?: string;
   dueAt: number;
   idempotencyKey: string;
 }
@@ -24,6 +26,8 @@ export interface MomentsCharacterPostPlan {
   content: string;
   photoPrompt?: string;
   photoIncludesAuthor?: boolean;
+  /** 角色可改用自己小手机相册中的既有照片；只保存稳定 Gallery id，不把图片发给文本 API。 */
+  galleryImageId?: string;
   dueAt?: number;
   /** 角色可选择对部分朋友圈好友低调；最终名单仍由前端按稳定 actorId 校验。 */
   visibilityMode?: 'public' | 'exclude';
@@ -122,7 +126,10 @@ export async function planMomentsInteractions(args: {
   now?: number;
   maxComments?: number;
   threadVersion?: number;
-  contextComments?: Array<{ actorName: string; content: string }>;
+  contextComments?: Array<{ id: string; actorId: string; actorName: string; content: string }>;
+  contextReactions?: Array<{ actorId: string; actorName: string }>;
+  /** 用户新增评论后的讨论轮。只生成最多三条错峰回复，不再补普通点赞。 */
+  replyRound?: boolean;
 }): Promise<MomentsInteractionPlan> {
   if (!isMomentsApiReady(args.config)) throw new Error('朋友圈副 API 尚未配置完整');
   const now = args.now || Date.now();
@@ -133,16 +140,29 @@ export async function planMomentsInteractions(args: {
     actorName: actor.displayName,
     bio: actor.bio || '',
   }));
+  const replyTargets = new Set([
+    ...(args.contextComments || []).map(item => item.actorId),
+    ...(args.contextReactions || []).map(item => item.actorId),
+  ]);
+  const commentTargets = new Map((args.contextComments || []).map(item => [item.id, item.actorId]));
+  const fallbackReplyComment = args.replyRound && args.contextComments?.length
+    ? args.contextComments[args.contextComments.length - 1]
+    : undefined;
   const prompt = [
     '你是朋友圈互动规划器。只输出 JSON，不要 Markdown，不要解释。',
-    '为这条朋友圈一次性规划首轮点赞/评论；不要为凑数强行互动，最多 8 条评论。',
+    args.replyRound
+      ? '用户刚在评论区说了新内容。请一次性规划这一轮自然回复，最多 3 条；候选人可以回复用户、回复已有评论者，或 @ 已点赞的人。互动是相互的，发帖者也可以回复别人。不要再规划普通点赞。'
+      : '为这条朋友圈一次性规划首轮点赞/评论；不要为凑数强行互动，最多 8 条评论。',
     '每个 actorId 最多出现一次；可见角色已由系统筛选，不要新增名单外的人。',
     'dueAt 使用毫秒时间戳，必须在 now 之后 30 秒到 24 小时内，按自然错峰安排。',
-    `JSON 形状：{"interactions":[{"actorId":"...","kind":"reaction|comment","content":"评论正文（点赞时省略）","dueAt":${now + 5 * 60_000}}]}`,
+    args.replyRound
+      ? `JSON 形状：{"interactions":[{"actorId":"...","kind":"comment","content":"回复正文","replyToCommentId":"已有评论 id，可省略","replyToActorId":"用户/评论者/点赞者 actorId","dueAt":${now + 5 * 60_000}}]}`
+      : `JSON 形状：{"interactions":[{"actorId":"...","kind":"reaction|comment","content":"评论正文（点赞时省略）","dueAt":${now + 5 * 60_000}}]}`,
     `now=${now}`,
     `帖子：${JSON.stringify({ authorName: args.post.authorName, content: args.post.content, createdAt: args.post.createdAt })}`,
     `候选角色：${JSON.stringify(actorLines)}`,
-    args.contextComments?.length ? `最新评论区（只规划未发送的新回应）：${JSON.stringify(args.contextComments)}` : '',
+    args.contextComments?.length ? `现有评论区：${JSON.stringify(args.contextComments)}` : '',
+    args.contextReactions?.length ? `已点赞的人（可以被 @）：${JSON.stringify(args.contextReactions)}` : '',
   ].join('\n');
   const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
     method: 'POST',
@@ -164,15 +184,27 @@ export async function planMomentsInteractions(args: {
     const row = item as Record<string, unknown>;
     const actorId = typeof row.actorId === 'string' ? row.actorId : '';
     const actor = byId.get(actorId);
-    const kind = row.kind === 'comment' ? 'comment' : row.kind === 'reaction' ? 'reaction' : null;
+    const kind = row.kind === 'comment' ? 'comment' : row.kind === 'reaction' && !args.replyRound ? 'reaction' : null;
     if (!actor || !kind || used.has(actorId)) continue;
     const content = typeof row.content === 'string' ? row.content.trim().slice(0, 500) : '';
     if (kind === 'comment' && !content) continue;
     if (kind === 'comment' && interactions.filter(item => item.kind === 'comment').length >= maxComments) continue;
     used.add(actorId);
+    const requestedCommentId = typeof row.replyToCommentId === 'string' ? row.replyToCommentId : '';
+    const requestedActorId = typeof row.replyToActorId === 'string' ? row.replyToActorId : '';
+    const replyToActorId = requestedCommentId && commentTargets.has(requestedCommentId)
+      ? commentTargets.get(requestedCommentId)
+      : replyTargets.has(requestedActorId) ? requestedActorId : fallbackReplyComment?.actorId;
+    const replyToCommentId = requestedCommentId && commentTargets.has(requestedCommentId)
+      ? requestedCommentId
+      : fallbackReplyComment?.id;
     interactions.push({
       actorId, actorType: actor.actorType === 'npc' ? 'npc' : 'character', actorName: actor.displayName,
-      kind, ...(content ? { content } : {}), dueAt: clampDueAt(row.dueAt, now),
+      kind, ...(content ? { content } : {}),
+      ...(args.replyRound && replyToActorId ? { replyToActorId, ...(replyToCommentId ? { replyToCommentId } : {}) } : {}),
+      dueAt: args.replyRound
+        ? Math.min(Math.max(clampDueAt(row.dueAt, now), now + 60_000), now + 60 * 60_000)
+        : clampDueAt(row.dueAt, now),
       idempotencyKey: `moments:${args.post.id}:v${args.threadVersion || 1}:${actorId}:${kind}`,
     });
   }
@@ -187,6 +219,7 @@ export async function planMomentsCharacterPost(args: {
   privacyCandidates?: Array<{ actorId: string; name: string; groupName?: string }>;
   /** 由前端按稳定 80% 概率决定；为 true 时应生成可点击合成的照片占位。 */
   preferPhoto?: boolean;
+  galleryOptions?: Array<{ id: string; savedDate?: string; review?: string; context?: string }>;
   now?: number;
 }): Promise<MomentsCharacterPostPlan> {
   if (!isMomentsApiReady(args.config)) throw new Error('朋友圈副 API 尚未配置完整');
@@ -195,11 +228,12 @@ export async function planMomentsCharacterPost(args: {
     '你是角色朋友圈生活线规划器。只输出 JSON，不要解释。',
     '结合角色人设与最近动态判断今天是否有值得发的朋友圈。没有真正值得记录的内容就 shouldPost=false，绝不要凑数。',
     `频率档位=${args.mode}（只影响机会，不代表必须发）；当前时间=${now}。不要在睡眠/明显不合适时段发。`,
-    `本次照片占位=${args.preferPhoto ? '需要' : '不强制'}。若为“需要”且 shouldPost=true，必须填写 photoPrompt；同时用 photoIncludesAuthor 表示作者本人是否出镜。纯场景、食物、物品、风景应为 false。`,
-    'JSON 形状：{"shouldPost":true,"content":"不超过500字的生活化正文","photoPrompt":"照片的具体画面描述","photoIncludesAuthor":false,"dueAt":0,"visibilityMode":"public|exclude","excludedActorIds":["候选 actorId"]}',
+    `本次带图倾向=${args.preferPhoto ? '需要' : '不强制'}。若 shouldPost=true 且需要带图，可以从自己的小手机相册候选中选择 galleryImageId；只有没有合适旧照时才填写 photoPrompt 生成新照片占位。二者只能选一个。photoIncludesAuthor 仅用于新生成照片。`,
+    'JSON 形状：{"shouldPost":true,"content":"不超过500字的生活化正文","galleryImageId":"自己的相册候选 id，可省略","photoPrompt":"没有合适旧照时的新照片画面描述","photoIncludesAuthor":false,"dueAt":0,"visibilityMode":"public|exclude","excludedActorIds":["候选 actorId"]}',
     '只有角色人设明确低调、避嫌或不愿被特定人看到时，才可选择 exclude；不得编造候选名单以外的 actorId。',
     `角色：${JSON.stringify({ name: args.actor.displayName, bio: args.actor.bio || '' })}`,
     `最近动态：${JSON.stringify(args.recentPosts.slice(0, 6).map(post => ({ content: post.content, createdAt: post.createdAt })))}`,
+    `自己的小手机相册候选（只根据文字摘要选择，不要编造 id）：${JSON.stringify(args.galleryOptions || [])}`,
     `可作低调排除的朋友圈好友：${JSON.stringify(args.privacyCandidates || [])}`,
   ].join('\n');
   const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
@@ -209,8 +243,10 @@ export async function planMomentsCharacterPost(args: {
   }, 0, 90_000, { appName: '朋友圈', purpose: '角色生活线发帖判断' });
   const root = parseJsonObject(extractContent(data));
   const content = typeof root.content === 'string' ? root.content.trim().slice(0, 1000) : '';
+  const galleryIds = new Set((args.galleryOptions || []).map(item => item.id));
+  const galleryImageId = typeof root.galleryImageId === 'string' && galleryIds.has(root.galleryImageId) ? root.galleryImageId : '';
   const modelPhotoPrompt = typeof root.photoPrompt === 'string' ? root.photoPrompt.trim().slice(0, 1000) : '';
-  const photoPrompt = args.preferPhoto ? (modelPhotoPrompt || (content ? `与这条朋友圈正文一致的自然生活照片：${content}` : '')) : '';
+  const photoPrompt = args.preferPhoto && !galleryImageId ? (modelPhotoPrompt || (content ? `与这条朋友圈正文一致的自然生活照片：${content}` : '')) : '';
   const photoIncludesAuthor = root.photoIncludesAuthor === true;
   const dueAt = clampDueAt(root.dueAt, now);
   const candidates = new Set((args.privacyCandidates || []).map(item => item.actorId));
@@ -218,7 +254,8 @@ export async function planMomentsCharacterPost(args: {
     ? [...new Set(root.excludedActorIds.filter((item): item is string => typeof item === 'string' && candidates.has(item)))].slice(0, 24)
     : [];
   return {
-    shouldPost: root.shouldPost === true && Boolean(content), content, ...(photoPrompt ? { photoPrompt, photoIncludesAuthor } : {}), dueAt,
+    shouldPost: root.shouldPost === true && Boolean(content), content,
+    ...(galleryImageId ? { galleryImageId } : photoPrompt ? { photoPrompt, photoIncludesAuthor } : {}), dueAt,
     ...(root.visibilityMode === 'exclude' && excludedActorIds.length ? { visibilityMode: 'exclude' as const, excludedActorIds } : {}),
   };
 }

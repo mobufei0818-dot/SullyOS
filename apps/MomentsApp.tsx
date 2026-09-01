@@ -561,10 +561,13 @@ const MomentsApp: React.FC = () => {
               const comment: MomentsComment = {
                 id: String(payload.sourceId || executable.id), postId: executable.postId, actorId,
                 actorType: payload.actorType === 'npc' ? 'npc' : 'character', actorName: actor?.displayName || String(payload.actorName || '角色'),
-                actorAvatar: actor?.avatar, content: String(payload.content), createdAt: now, source: 'planned',
+                actorAvatar: actor?.avatar, content: String(payload.content),
+                replyToCommentId: typeof payload.replyToCommentId === 'string' ? payload.replyToCommentId : undefined,
+                replyToActorId: typeof payload.replyToActorId === 'string' ? payload.replyToActorId : undefined,
+                createdAt: now, source: 'planned',
               };
               await DB.saveMomentsComment(comment);
-              if (post) await recordMomentsEvent({ postId: post.id, actorId, type: 'comment', sourceId: comment.id, visibleToActorIds: visibleActorIdsForPost(post.visibility), createdAt: now });
+              if (post) await recordMomentsEvent({ postId: post.id, actorId, type: comment.replyToActorId ? 'reply' : 'comment', sourceId: comment.id, visibleToActorIds: visibleActorIdsForPost(post.visibility), createdAt: now });
               setCommentsByPost(prev => ({ ...prev, [job.postId!]: [...(prev[job.postId!] || []), comment] }));
             }
           }
@@ -657,21 +660,42 @@ const MomentsApp: React.FC = () => {
     const [storedJobs, storedReactions, storedComments] = await Promise.all([
       DB.getMomentsPendingJobs(), DB.getMomentsReactionsByPostId(post.id), DB.getMomentsCommentsByPostId(post.id),
     ]);
-    const alreadySent = new Set([...storedReactions, ...storedComments].map(item => item.actorId));
-    const actors = selectInteractionActors(`${post.id}:v${Math.max(1, ...storedJobs.filter(job => job.postId === post.id).map(job => job.threadVersion || 1)) + 1}`,
-      interactionActorsForPost(post).filter(actor => !alreadySent.has(actor.id)));
+    const nextVersion = Math.max(1, ...storedJobs.filter(job => job.postId === post.id).map(job => job.threadVersion || 1)) + 1;
+    const participantIds = new Set([...storedReactions, ...storedComments].map(item => item.actorId));
+    const passerbyActors = post.visibility.mode === 'public'
+      ? randomPasserbyActorsForPost(post.id).filter(actor => participantIds.has(actor.id))
+      : [];
+    const formalActors = [
+      ...friends.filter(actor => {
+        if (!isPostVisibleTo(post, actor.id)) return false;
+        const mode = settings.characterInteractionModes?.[actor.characterId || ''] || 'normal';
+        return mode !== 'off';
+      }),
+      ...npcProfiles.filter(actor => isPostVisibleTo(post, actor.id)),
+    ];
+    const priorityIds = new Set([...participantIds, post.authorId]);
+    const priorityActors = [...formalActors, ...passerbyActors].filter(actor => priorityIds.has(actor.id));
+    const discoveryActors = selectInteractionActors(`${post.id}:reply:v${nextVersion}`, formalActors.filter(actor => !priorityIds.has(actor.id)));
+    const actors = [...new Map([...priorityActors, ...discoveryActors].filter(actor => actor.id !== USER_PROFILE_ID).map(actor => [actor.id, actor])).values()];
     if (!actors.length) return;
     try {
       const samePost = storedJobs.filter(job => job.postId === post.id && job.state === 'pending');
-      const nextVersion = Math.max(1, ...storedJobs.filter(job => job.postId === post.id).map(job => job.threadVersion || 1)) + 1;
-      await Promise.all(samePost.map(job => DB.saveMomentsPendingJob({ ...job, state: 'cancelled', updatedAt: Date.now(), error: '用户新增评论后统一重排' })));
-      const comments = [...storedComments, latestComment].filter((comment, index, all) => all.findIndex(item => item.id === comment.id) === index).slice(-8).map(comment => ({ actorName: comment.actorName, content: comment.content }));
-      const plan = await planMomentsInteractions({ config, post, actors, now: Date.now(), maxComments: 3, threadVersion: nextVersion, contextComments: comments });
+      const comments = [...storedComments, latestComment]
+        .filter((comment, index, all) => all.findIndex(item => item.id === comment.id) === index)
+        .slice(-12)
+        .map(comment => ({ id: comment.id, actorId: comment.actorId, actorName: comment.actorName, content: comment.content }));
+      const reactions = storedReactions.map(reaction => ({ actorId: reaction.actorId, actorName: reaction.actorName }));
+      const plan = await planMomentsInteractions({
+        config, post, actors, now: Date.now(), maxComments: 3, threadVersion: nextVersion,
+        contextComments: comments, contextReactions: reactions, replyRound: true,
+      });
       const jobs = plan.interactions.map(item => {
         const sourceId = `${post.id}:${item.actorId}:${item.kind}:v${plan.threadVersion}`;
-        return { id: `moments-job-${sourceId}`, type: 'interaction' as const, actorId: item.actorId, postId: post.id, dueAt: item.dueAt, state: 'pending' as const, createdAt: Date.now(), threadVersion: plan.threadVersion, payload: { actorId: item.actorId, actorType: item.actorType, actorName: item.actorName, kind: item.kind, content: item.content || '', sourceId } };
+        return { id: `moments-job-${sourceId}`, type: 'interaction' as const, actorId: item.actorId, postId: post.id, dueAt: item.dueAt, state: 'pending' as const, createdAt: Date.now(), threadVersion: plan.threadVersion, payload: { actorId: item.actorId, actorType: item.actorType, actorName: item.actorName, kind: item.kind, content: item.content || '', replyToCommentId: item.replyToCommentId, replyToActorId: item.replyToActorId, sourceId } };
       });
       await Promise.all([
+        // 先生成新计划，再取消旧任务。副 API 失败时不会把原本尚未发出的互动一起清空。
+        ...samePost.map(job => DB.saveMomentsPendingJob({ ...job, state: 'cancelled', updatedAt: Date.now(), error: '用户新增评论后统一重排' })),
         ...jobs.map(job => DB.saveMomentsPendingJob(job)),
         ...actors.map(actor => DB.saveMomentsSeenReceipt({ id: `moment-seen-${post.id}-${actor.id}`, postId: post.id, actorId: actor.id, state: 'selected_for_interaction', reason: 'comment-replan', createdAt: Date.now(), updatedAt: Date.now() })),
       ]);
@@ -683,7 +707,7 @@ const MomentsApp: React.FC = () => {
       setMomentsApiStatus(`评论区重排失败：${error?.message || '未知错误'}`);
       addToast(error?.message || '评论区重排失败，已保留你的评论', 'error');
     }
-  }, [addToast, apiConfig, flushMomentsWorker, interactionActorsForPost, recordMomentsEvent, settings.autoInteractionEnabled, settings.momentsApi]);
+  }, [addToast, apiConfig, flushMomentsWorker, friends, npcProfiles, recordMomentsEvent, settings.autoInteractionEnabled, settings.characterInteractionModes, settings.momentsApi]);
 
   const queuePostInteractionReplan = useCallback((post: MomentsPost, latestComment: MomentsComment) => {
     queuedReplans.current.set(post.id, { post, comment: latestComment });
@@ -751,10 +775,17 @@ const MomentsApp: React.FC = () => {
         if (plannedOne) break;
         plannedOne = true;
         const photoSeed = `${dayKey}:${sourceId}:${opportunity}:photo`;
+        const ownGallery = actor.characterId
+          ? gallery.filter(image => image.charId === actor.characterId).slice(0, 18)
+          : [];
         const plan = await planMomentsCharacterPost({
           config, actor: { ...actor, bio }, mode,
           recentPosts: posts.filter(post => post.authorId === actor.id), now: Date.now(),
           preferPhoto: stableHash(photoSeed) % 100 < 80,
+          galleryOptions: ownGallery.map(image => ({
+            id: image.id, savedDate: image.savedDate,
+            review: image.review?.slice(0, 160), context: image.chatContext?.slice(-3).join(' · ').slice(0, 240),
+          })),
           privacyCandidates: [...friends, ...npcProfiles].filter(friend => friend.id !== actor.id).map(friend => ({
             actorId: friend.id, name: friend.displayName,
             groupName: characters.find(item => item.id === friend.characterId)?.groupId || undefined,
@@ -763,7 +794,8 @@ const MomentsApp: React.FC = () => {
         if (plan.shouldPost && plan.content) {
           const createdAt = Date.now();
           const postId = `moment-${actorType}-${stableHash(sourceId).toString(36)}-${dayKey}-${opportunity}`;
-          const mediaId = plan.photoPrompt ? `moments-generated-${postId}` : undefined;
+          const selectedGalleryImage = plan.galleryImageId ? ownGallery.find(image => image.id === plan.galleryImageId) : undefined;
+          const mediaId = selectedGalleryImage ? `moments-gallery-${postId}` : plan.photoPrompt ? `moments-generated-${postId}` : undefined;
           const post: MomentsPost = {
             id: postId, authorType: actorType, authorId: actor.id, authorName: actor.displayName, authorAvatar: actor.avatar,
             content: plan.content, mediaIds: mediaId ? [mediaId] : [], createdAt, source: actorType,
@@ -773,7 +805,9 @@ const MomentsApp: React.FC = () => {
               groupIds: [], version: 1, capturedAt: createdAt,
             },
           };
-          const media: MomentsMediaRef[] = mediaId ? [{ id: mediaId, postId, url: `moments-photo-pending:${mediaId}`, createdAt, generated: true, prompt: plan.photoPrompt, includeCharacter: plan.photoIncludesAuthor === true, generationStatus: 'pending' }] : [];
+          const media: MomentsMediaRef[] = selectedGalleryImage && mediaId
+            ? [{ id: mediaId, postId, url: selectedGalleryImage.url, galleryImageId: selectedGalleryImage.id, createdAt, generated: false, generationStatus: 'ready' }]
+            : mediaId ? [{ id: mediaId, postId, url: `moments-photo-pending:${mediaId}`, createdAt, generated: true, prompt: plan.photoPrompt, includeCharacter: plan.photoIncludesAuthor === true, generationStatus: 'pending' }] : [];
           // 内容在手机仍打开时已经预写好，但不提前“发表”；到点由本机或 Worker 统一投递。
           // 这样关闭小手机后仍可由 Cron 投递，且 Worker 永远不持有副 API Key。
           const dueAt = Math.max(createdAt + 6 * 60_000, Math.min(plan.dueAt || createdAt + 18 * 60_000, createdAt + 24 * 60 * 60_000));
@@ -793,7 +827,7 @@ const MomentsApp: React.FC = () => {
       }
     }
     } finally { characterPostCheckInFlight.current = false; }
-  }, [apiConfig, characters, friends, npcProfiles, planPostInteractions, posts, settings.characterPostingModes, settings.momentsApi, settings.npcPostingModes]);
+  }, [apiConfig, characters, friends, gallery, npcProfiles, planPostInteractions, posts, settings.characterPostingModes, settings.momentsApi, settings.npcPostingModes]);
 
   // 到点任务先在本机落地执行；若配置了 Worker，同时把事件/任务同步到云端。
   useEffect(() => {
@@ -850,6 +884,8 @@ const MomentsApp: React.FC = () => {
         createdAt: Date.now(),
       })));
       setDraftMedia(prev => [...prev, ...next]);
+      setGalleryPickerOpen(false);
+      addToast(`已从手机系统相册选择 ${next.length} 张照片`, 'success');
     } catch (error: any) {
       addToast(error?.message || '图片读取失败', 'error');
     }
@@ -1338,11 +1374,20 @@ const MomentsApp: React.FC = () => {
     ...characters.filter(character => character.groupId && draftGroupIds.includes(character.groupId)).map(character => `moments:character:${character.id}`),
     ...(settings.visibilityGroups || []).filter(group => draftGroupIds.includes(group.id)).flatMap(group => group.actorIds),
   ]).length;
+  const interactionActorName = (post: MomentsPost, actorId?: string) => {
+    if (!actorId) return '对方';
+    if (actorId === USER_PROFILE_ID) return profile.displayName || '我';
+    if (post.authorId === actorId) return post.authorName;
+    return friends.find(actor => actor.id === actorId)?.displayName
+      || npcProfiles.find(actor => actor.id === actorId)?.displayName
+      || randomPasserbyActorsForPost(post.id).find(actor => actor.id === actorId)?.displayName
+      || '对方';
+  };
   const socialInbox = useMemo(() => posts.flatMap(post => {
     const target = post.authorId === USER_PROFILE_ID ? '你的动态' : `${post.authorName}的动态`;
     return [
     ...(reactionsByPost[post.id] || []).filter(reaction => reaction.actorId !== USER_PROFILE_ID).map(reaction => ({ id: `reaction-${reaction.id}`, postId: post.id, actorName: reaction.actorName, kind: `赞了${target}`, createdAt: reaction.createdAt })),
-    ...(commentsByPost[post.id] || []).filter(comment => comment.actorId !== USER_PROFILE_ID).map(comment => ({ id: `comment-${comment.id}`, postId: post.id, actorName: comment.actorName, kind: `评论了${target}：${comment.content}`, createdAt: comment.createdAt })),
+    ...(commentsByPost[post.id] || []).filter(comment => comment.actorId !== USER_PROFILE_ID).map(comment => ({ id: `comment-${comment.id}`, postId: post.id, actorName: comment.actorName, kind: `${comment.replyToActorId ? `回复了 ${interactionActorName(post, comment.replyToActorId)}` : `评论了${target}`}：${comment.content}`, createdAt: comment.createdAt })),
     ];
   }).sort((a, b) => b.createdAt - a.createdAt), [commentsByPost, posts, reactionsByPost]);
   const unreadSocialCount = socialInbox.filter(item => item.createdAt > (settings.lastInboxReadAt || 0)).length;
@@ -1523,7 +1568,7 @@ const MomentsApp: React.FC = () => {
                   {((reactionsByPost[post.id] || []).length > 0 || (commentsByPost[post.id] || []).length > 0) && <div className="mt-2 rounded-sm bg-[#f7f7f7] px-2.5 py-2 text-[12px] leading-relaxed">
                     {(reactionsByPost[post.id] || []).length > 0 && <div className="border-b border-[#e9e9e9] pb-1.5 text-[#576b95]"><Heart size={13} weight="fill" className="mr-1 inline text-[#576b95]" />{(reactionsByPost[post.id] || []).map(reaction => reaction.actorName).join('、')}</div>}
                     {(commentsByPost[post.id] || []).map(comment => <button type="button" key={comment.id} onClick={() => { if (commentLongPressTriggered.current) { commentLongPressTriggered.current = false; return; } openCommentComposer(post.id, comment); }} onPointerDown={() => startCommentLongPress(comment)} onPointerUp={cancelCommentLongPress} onPointerCancel={cancelCommentLongPress} onPointerLeave={cancelCommentLongPress} onContextMenu={event => { if (comment.actorId === USER_PROFILE_ID) { event.preventDefault(); setDeleteCommentTarget(comment); } }} className="mt-1 block w-full touch-manipulation text-left text-[#576b95]">
-                      <span className="font-medium">{comment.actorName}</span>{comment.replyToActorId ? <><span className="text-[#555]"> 回复 </span><span className="font-medium">{(commentsByPost[post.id] || []).find(item => item.actorId === comment.replyToActorId)?.actorName || '对方'}</span></> : null}<span className="text-[#555]">：{comment.content}</span>
+                      <span className="font-medium">{comment.actorName}</span>{comment.replyToActorId ? <><span className="text-[#555]"> 回复 </span><span className="font-medium">{interactionActorName(post, comment.replyToActorId)}</span></> : null}<span className="text-[#555]">：{comment.content}</span>
                     </button>)}
                   </div>}
                       <div className="mt-2 text-[11px] text-[#999]">长按自己的评论，或自己动态下的任意评论，都可以删除；自动互动按可见范围错峰执行。</div>
@@ -1561,7 +1606,7 @@ const MomentsApp: React.FC = () => {
 
       {privacyPickerOpen && <div className="absolute inset-0 z-[70] flex flex-col bg-[#f7f7f7]"><header className="flex h-[54px] items-center justify-between border-b border-[#ededed] bg-white px-3"><button type="button" aria-label="返回发表朋友圈" onClick={() => setPrivacyPickerOpen(false)} className="p-1.5"><ArrowLeft size={23} /></button><span className="text-[16px] font-semibold">谁可以看</span><button type="button" onClick={() => setPrivacyPickerOpen(false)} className="px-2 text-[13px] font-medium text-[#07c160]">完成</button></header><div className="flex-1 overflow-y-auto"><div className="mt-3 bg-white">{([['public', '公开', '所有已添加的朋友可见'], ['partial', '部分可见', '只让选中的朋友看'], ['exclude', '不给谁看', '除了选中的朋友，其他朋友可见'], ['private', '仅自己', '只有你自己可见']] as const).map(([mode, title, description]) => <button type="button" key={mode} onClick={() => { setDraftVisibility(mode); if (mode === 'public' || mode === 'private') { setDraftAudience([]); setDraftGroupIds([]); } }} className="flex w-full items-center gap-3 border-b border-[#ededed] px-4 py-3.5 text-left"><span className={`flex h-5 w-5 items-center justify-center rounded-full border ${draftVisibility === mode ? 'border-[#07c160] bg-[#07c160] text-white' : 'border-[#c7c7c7]'}`}>{draftVisibility === mode && <Check size={13} weight="bold" />}</span><span><span className="block text-[14px]">{title}</span><span className="mt-0.5 block text-[11px] text-[#999]">{description}</span></span></button>)}</div>{(draftVisibility === 'partial' || draftVisibility === 'exclude') && <div className="mt-3 bg-white"><div className="px-4 py-3 text-[12px] text-[#999]">先按角色分组选择，再可单独补充角色；发出后都会冻结为具体对象。</div>{characterGroups.map(group => { const members = characters.filter(character => character.groupId === group.id); const selected = draftGroupIds.includes(group.id); return <button type="button" key={group.id} onClick={() => setDraftGroupIds(prev => selected ? prev.filter(id => id !== group.id) : [...prev, group.id])} className="flex w-full items-center gap-3 border-t border-[#ededed] px-4 py-3 text-left"><span className={`flex h-5 w-5 items-center justify-center rounded-full border ${selected ? 'border-[#07c160] bg-[#07c160] text-white' : 'border-[#c7c7c7]'}`}>{selected && <Check size={13} weight="bold" />}</span><span className="flex-1 text-[14px]">{group.name}<span className="ml-1.5 text-[11px] text-[#999]">{members.length} 位角色</span></span></button>})}<div className="border-t border-[#ededed] px-4 py-3 text-[12px] text-[#999]">单独补充</div>{friends.map(friend => <button type="button" key={friend.id} onClick={() => setDraftAudience(prev => prev.includes(friend.id) ? prev.filter(id => id !== friend.id) : [...prev, friend.id])} className="flex w-full items-center gap-3 border-t border-[#ededed] px-4 py-3 text-left"><div className="h-9 w-9 overflow-hidden bg-[#eee]">{friend.avatar ? <TokenImg value={friend.avatar} alt={friend.displayName} className="h-full w-full object-cover" /> : null}</div><span className="flex-1 text-[14px]">{friend.displayName}</span><span className={`flex h-5 w-5 items-center justify-center rounded-full border ${draftAudience.includes(friend.id) ? 'border-[#07c160] bg-[#07c160] text-white' : 'border-[#c7c7c7]'}`}>{draftAudience.includes(friend.id) && <Check size={13} weight="bold" />}</span></button>)}</div>}</div></div>}
 
-      {galleryPickerOpen && <div className="absolute inset-0 z-[70] flex flex-col bg-[#f7f7f7]"><header className="flex h-[54px] items-center justify-between border-b border-[#ededed] bg-white px-3"><button type="button" aria-label="返回发表朋友圈" onClick={() => setGalleryPickerOpen(false)} className="p-1.5"><ArrowLeft size={23} /></button><span className="text-[16px] font-semibold">从相册选择</span><button type="button" onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1 rounded-md bg-[#07c160] px-2.5 py-1.5 text-[12px] text-white"><Plus size={14} />上传</button></header><div className="flex-1 overflow-y-auto p-1.5"><div className="grid grid-cols-3 gap-1.5">{gallery.map(image => { const selected = allDraftUrls.has(image.url); return <button type="button" key={image.id} onClick={() => toggleGalleryImage(image)} className="relative aspect-square overflow-hidden bg-white"><TokenImg value={image.url} alt="相册图片" className="h-full w-full object-cover" />{selected && <span className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#07c160] text-white"><Check size={13} weight="bold" /></span>}</button>; })}</div>{gallery.length === 0 && <div className="py-20 text-center text-[13px] text-[#999]">相册里还没有图片，可以点右上角上传。</div>}</div></div>}
+      {galleryPickerOpen && <div className="absolute inset-0 z-[70] flex flex-col bg-[#f7f7f7]"><header className="flex h-[54px] shrink-0 items-center justify-between border-b border-[#ededed] bg-white px-3"><button type="button" aria-label="返回发表朋友圈" onClick={() => setGalleryPickerOpen(false)} className="p-1.5"><ArrowLeft size={23} /></button><span className="text-[16px] font-semibold">选择照片</span><span className="w-9" /></header><div className="shrink-0 bg-white px-3 py-3"><div className="grid grid-cols-2 gap-2"><button type="button" className="rounded-xl bg-[#edf6ff] px-3 py-3 text-left text-[#576b95]"><span className="block text-[13px] font-medium">小手机相册</span><span className="mt-0.5 block text-[10px] text-[#8794aa]">角色与聊天保存的图片</span></button><button type="button" onClick={() => fileInputRef.current?.click()} className="rounded-xl bg-[#eaf8ef] px-3 py-3 text-left text-[#078b43]"><span className="flex items-center gap-1 text-[13px] font-medium"><Plus size={14} />手机系统相册</span><span className="mt-0.5 block text-[10px] text-[#6e9a7d]">打开 iPhone 的照片选择器</span></button></div></div><div className="flex-1 overflow-y-auto p-1.5"><div className="grid grid-cols-3 gap-1.5">{gallery.map(image => { const selected = allDraftUrls.has(image.url); return <button type="button" key={image.id} onClick={() => toggleGalleryImage(image)} className="relative aspect-square overflow-hidden bg-white"><TokenImg value={image.url} alt="小手机相册图片" className="h-full w-full object-cover" />{selected && <span className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[#07c160] text-white"><Check size={13} weight="bold" /></span>}</button>; })}</div>{gallery.length === 0 && <div className="py-20 text-center text-[13px] text-[#999]">小手机相册里还没有图片，也可以从上方打开手机系统相册。</div>}</div></div>}
 
       {photoPromptOpen && <div className="absolute inset-0 z-[75] flex items-end bg-black/35 p-3"><div className="w-full rounded-2xl bg-white p-4"><div className="flex items-center justify-between"><div className="text-[16px] font-semibold">添加照片占位</div><button type="button" aria-label="关闭照片占位编辑" onClick={() => setPhotoPromptOpen(false)}><X size={20} /></button></div><p className="mt-2 text-[11px] leading-relaxed text-[#888]">先写下想分享的画面，动态发表后点击占位卡才会调用已配置的生图模型。</p><textarea autoFocus value={draftPhotoPrompt} onChange={event => setDraftPhotoPrompt(event.target.value)} maxLength={1000} placeholder="例如：窗边一杯刚泡好的热咖啡，午后自然光…" className="mt-3 min-h-[100px] w-full resize-none rounded-xl bg-[#f7f7f7] px-3 py-2.5 text-[14px] outline-none" /><button type="button" onClick={addPhotoPlaceholder} className="mt-3 w-full rounded-xl bg-[#07c160] py-2.5 text-[13px] font-medium text-white">加入这条朋友圈</button></div></div>}
 
