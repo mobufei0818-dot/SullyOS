@@ -1216,22 +1216,15 @@ const MomentsApp: React.FC = () => {
     : [];
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[#f7f7f7] text-[#181818]">
-      <header className="relative z-40 flex h-[56px] shrink-0 items-center justify-between border-b border-black/[0.05] bg-[#f7f7f7] px-2.5 shadow-[0_1px_1px_rgba(0,0,0,0.02)]">
-        <div className="flex items-center gap-0.5">
-          <button type="button" onClick={view === 'feed' ? closeApp : () => setView('feed')} className="flex h-11 w-11 touch-manipulation items-center justify-center rounded-full active:bg-black/[0.06]" aria-label="返回">
-            <ArrowLeft size={26} weight="regular" />
-          </button>
-          {view === 'feed' && <button type="button" onClick={() => setStrangerListOpen(true)} className="flex h-11 w-11 touch-manipulation items-center justify-center rounded-full text-[#576b95] active:bg-black/[0.06]" aria-label="摇一摇与陌生人">
-            <ArrowsClockwise size={22} weight="regular" />
-          </button>}
+    <div className="sully-moments-root relative flex h-full min-h-0 flex-col overflow-hidden bg-[#f7f7f7] text-[#181818]">
+      <style>{`.sully-moments-root > .absolute.inset-0.flex.flex-col{padding-top:var(--chrome-top,var(--safe-top,0px))}.sully-moments-root > .absolute.inset-0.flex.flex-col > header button{min-width:44px;min-height:44px;touch-action:manipulation}`}</style>
+      {(view === 'settings' || view === 'messages') && <header className="relative z-40 shrink-0 border-b border-black/[0.05] bg-[#f7f7f7]" style={{ paddingTop: 'var(--chrome-top, var(--safe-top, 0px))' }}>
+        <div className="flex h-[54px] items-center justify-between px-2.5">
+          <button type="button" onClick={() => setView('feed')} className="flex h-11 w-11 touch-manipulation items-center justify-center rounded-full active:bg-black/[0.06]" aria-label="返回朋友圈"><ArrowLeft size={26} /></button>
+          <div className="text-[17px] font-semibold tracking-[0.02em]">{headerTitle}</div>
+          <div className="h-11 w-11" />
         </div>
-        <div className="text-[17px] font-semibold tracking-[0.02em]">{headerTitle}</div>
-        <div className="flex min-w-[88px] items-center justify-end gap-0.5">
-          {view === 'feed' && <button type="button" onClick={() => { resetDraft(); setComposeOpen(true); }} className="flex h-11 w-11 touch-manipulation items-center justify-center rounded-full active:bg-black/[0.06]" aria-label="发表朋友圈"><Camera size={23} weight="regular" /></button>}
-          {view === 'feed' && <button type="button" onClick={() => setView('settings')} className="flex h-11 w-11 touch-manipulation items-center justify-center rounded-full text-[#1f1f1f] active:bg-black/[0.06]" aria-label="朋友圈设置"><GearSix size={23} weight="regular" /></button>}
-        </div>
-      </header>
+      </header>}
 
       {view === 'settings' ? (
         <div className="flex-1 overflow-y-auto px-4 py-5">
@@ -1317,8 +1310,18 @@ const MomentsApp: React.FC = () => {
         </div> : <div className="flex-1 overflow-y-auto bg-white">{socialInbox.map(item => <button type="button" key={item.id} onClick={() => { markSocialInboxRead(); const post = posts.find(candidate => candidate.id === item.postId); if (post) { setTimelineProfile(profileForPostAuthor(post)); setView('profile'); } }} className="flex w-full gap-3 border-b border-[#ededed] px-4 py-4 text-left"><div className="flex h-10 w-10 items-center justify-center rounded bg-[#edf5ff] text-[#576b95]">♥</div><div className="min-w-0 flex-1"><div className="text-[13px] text-[#576b95]">{item.actorName}</div><div className="mt-1 truncate text-[13px] text-[#555]">{item.kind}</div><div className="mt-1 text-[11px] text-[#999]">{formatMomentTime(item.createdAt)}</div></div></button>)}</div>
       ) : (
         <div className="flex-1 overflow-y-auto overscroll-contain">
-          <div className="relative h-[218px] bg-[#a4b0bd]" style={displayProfile.cover?.startsWith('linear-gradient') ? { background: displayProfile.cover } : undefined}>
-            {displayProfile.cover && !displayProfile.cover.startsWith('linear-gradient') ? <TokenImg value={displayProfile.cover} alt="朋友圈封面" className="h-full w-full object-cover" /> : null}
+          <div className="relative min-h-[268px] bg-[#a4b0bd]" style={displayProfile.cover?.startsWith('linear-gradient') ? { background: displayProfile.cover } : undefined}>
+            {displayProfile.cover && !displayProfile.cover.startsWith('linear-gradient') ? <TokenImg value={displayProfile.cover} alt="朋友圈封面" className="absolute inset-0 h-full w-full object-cover" /> : null}
+            <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center justify-between px-2.5" style={{ paddingTop: 'calc(var(--chrome-top, var(--safe-top, 0px)) + 8px)' }}>
+              <div className="flex items-center gap-1">
+                <button type="button" onClick={view === 'feed' ? closeApp : () => setView('feed')} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="返回"><ArrowLeft size={27} /></button>
+                {view === 'feed' && <button type="button" onClick={() => setStrangerListOpen(true)} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="摇一摇与陌生人"><ArrowsClockwise size={23} /></button>}
+              </div>
+              {view === 'feed' && <div className="flex items-center gap-1">
+                <button type="button" onClick={() => { resetDraft(); setComposeOpen(true); }} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="发表朋友圈"><Camera size={24} /></button>
+                <button type="button" onClick={() => setView('settings')} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="朋友圈设置"><GearSix size={24} /></button>
+              </div>}
+            </div>
             {displayProfile.id === USER_PROFILE_ID && <button type="button" onClick={() => coverInputRef.current?.click()} className="absolute bottom-3 left-3 z-20 flex h-9 touch-manipulation items-center gap-1.5 rounded-full bg-black/45 px-3 text-[11px] text-white shadow-sm backdrop-blur-sm active:bg-black/60"><ImageSquare size={16} />换封面</button>}
             {view === 'profile' && displayProfile.actorType === 'npc' && <button type="button" disabled={busy} onClick={() => void addNpcAsFriend(displayProfile)} className="absolute bottom-3 left-3 z-20 flex h-10 touch-manipulation items-center gap-1.5 rounded-full bg-[#07c160] px-3.5 text-[12px] text-white shadow-sm disabled:opacity-50"><UserPlus size={16} />添加好友</button>}
             <div className="absolute -bottom-[41px] right-4 flex items-end gap-2.5">
@@ -1331,7 +1334,6 @@ const MomentsApp: React.FC = () => {
           <div className="h-14 bg-white" />
           <div className="border-y border-[#eeeeee] bg-white px-4 py-3 text-[13px] text-[#576b95]">
             <button type="button" onClick={() => { markSocialInboxRead(); setView('messages'); }} className="relative mr-6">消息{unreadSocialCount > 0 && <span className="absolute -right-2 -top-1 h-1.5 w-1.5 rounded-full bg-[#fa5151]" />}</button>
-            <span className="text-[#a4a4a4]">设置在右上角</span>
           </div>
 
           {view === 'feed' && friends.length > 0 && <div className="border-b border-[#ededed] bg-white px-4 py-3">
@@ -1384,7 +1386,7 @@ const MomentsApp: React.FC = () => {
       <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={event => { void addUploadedMedia(event.target.files); event.currentTarget.value = ''; }} />
       <input ref={coverInputRef} type="file" accept="image/*" className="hidden" onChange={event => { void updateCover(event.target.files?.[0]); event.currentTarget.value = ''; }} />
 
-      {composeOpen && <div className="absolute inset-0 z-20 flex flex-col bg-white">
+      {composeOpen && <div className="absolute inset-0 z-50 flex flex-col bg-white">
         <header className="flex h-[54px] shrink-0 items-center justify-between border-b border-[#ededed] px-3"><button type="button" onClick={() => { resetDraft(); setComposeOpen(false); }} className="p-1.5"><X size={24} /></button><span className="text-[16px] font-semibold">发表朋友圈</span><button type="button" disabled={busy} onClick={() => void publish()} className="rounded-md bg-[#07c160] px-3.5 py-1.5 text-[13px] font-medium text-white disabled:opacity-50">{busy ? '发表中' : '发表'}</button></header>
         <div className="flex-1 overflow-y-auto px-4 py-4">
           <textarea autoFocus value={draftContent} onChange={event => setDraftContent(event.target.value)} maxLength={2000} placeholder="这一刻的想法…" className="min-h-[148px] w-full resize-none border-0 text-[16px] leading-relaxed outline-none placeholder:text-[#b7b7b7]" />
@@ -1413,7 +1415,7 @@ const MomentsApp: React.FC = () => {
 
       {activeCommentPostId && <div className="absolute inset-x-0 bottom-0 z-30 border-t border-[#e5e5e5] bg-white p-3 shadow-[0_-6px_20px_rgba(0,0,0,0.08)]"><div className="mb-2 text-[12px] text-[#777]">{replyingTo ? `回复 ${replyingTo.actorName}` : '评论这条朋友圈'}</div><div className="flex items-end gap-2"><textarea autoFocus value={commentDraft} onChange={event => setCommentDraft(event.target.value)} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') void submitComment(); }} maxLength={500} placeholder="说点什么…" className="min-h-[38px] flex-1 resize-none rounded-md bg-[#f5f5f5] px-3 py-2 text-[14px] outline-none" /><button type="button" disabled={!commentDraft.trim() || busy} onClick={() => void submitComment()} className="rounded-md bg-[#07c160] px-3 py-2 text-[13px] text-white disabled:opacity-40">发送</button></div><button type="button" onClick={() => { setActiveCommentPostId(null); setReplyingTo(null); setCommentDraft(''); }} className="mt-2 text-[11px] text-[#888]">取消</button></div>}
 
-      {selectedMedia && <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/95 p-3" role="dialog" aria-label="查看朋友圈图片" onClick={() => setSelectedMedia(null)}><button type="button" className="absolute right-3 top-3 rounded-full bg-white/15 p-2 text-white" onClick={() => setSelectedMedia(null)}><X size={22} /></button><div className="max-h-full max-w-full" onClick={event => event.stopPropagation()}><TokenImg value={selectedMedia.url} alt="朋友圈大图" className="max-h-full max-w-full object-contain" /></div></div>}
+      {selectedMedia && <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/95 p-3" role="dialog" aria-label="查看朋友圈图片" onClick={() => setSelectedMedia(null)}><button type="button" className="absolute right-3 flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-white/15 text-white" style={{ top: 'calc(var(--chrome-top, var(--safe-top, 0px)) + 12px)' }} onClick={() => setSelectedMedia(null)}><X size={22} /></button><div className="max-h-full max-w-full" onClick={event => event.stopPropagation()}><TokenImg value={selectedMedia.url} alt="朋友圈大图" className="max-h-full max-w-full object-contain" /></div></div>}
 
       {shareTargetPost && <div className="absolute inset-0 z-40 flex items-end bg-black/35 p-3"><div className="max-h-[75%] w-full overflow-hidden rounded-2xl bg-white"><div className="flex items-center justify-between border-b border-[#ededed] px-4 py-4"><div><div className="text-[16px] font-semibold">转发给谁</div><p className="mt-1 text-[11px] text-[#888]">只在你主动选择时发进对应私聊。</p></div><button type="button" onClick={() => setShareTargetPost(null)}><X size={20} /></button></div><div className="max-h-[48vh] overflow-y-auto">{friends.length === 0 ? <div className="px-4 py-7 text-center text-[13px] text-[#999]">还没有可转发的角色好友。</div> : friends.map(friend => <button type="button" key={friend.id} disabled={busy} onClick={() => void forwardPostToCharacter(shareTargetPost, friend)} className="flex w-full items-center gap-3 border-b border-[#f0f0f0] px-4 py-3.5 text-left disabled:opacity-50"><div className="h-10 w-10 overflow-hidden bg-[#eee]">{friend.avatar ? <TokenImg value={friend.avatar} alt={friend.displayName} className="h-full w-full object-cover" /> : <span className="flex h-full items-center justify-center">🙂</span>}</div><span className="flex-1 text-[14px]">{friend.displayName}</span><CaretRight size={17} className="text-[#aaa]" /></button>)}</div></div></div>}
 
