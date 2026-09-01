@@ -2,6 +2,13 @@ import type { APIConfig, ApiPreset, MomentsApiConfig, MomentsPost, MomentsProfil
 import { extractContent, safeFetchJson } from './safeApi';
 import { extractModelIds } from './modelList';
 import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from './apiConfigNormalize';
+import {
+  getCollaborationMakerPrompt,
+  installableToCharacterPatch,
+  parseInstallableArtifactBlocks,
+  validateInstallableArtifact,
+} from '../features/collaboration/makers';
+import type { CollaborationInstallableArtifact } from '../features/collaboration/types';
 
 export interface MomentsPlannedInteraction {
   actorId: string;
@@ -63,8 +70,10 @@ export interface MomentsNpcPlan {
 }
 
 export interface MomentsNpcCharacterPlan {
+  name: string;
   description: string;
   systemPrompt: string;
+  worldview?: string;
 }
 
 const PERSONA_SECTIONS = ['【基础身份】', '【外貌特征】', '【性格核心】', '【与用户关系】', '【沟通风格】', '【互动指南】', '【生活习惯】', '【特殊设定】'];
@@ -425,57 +434,94 @@ const completePersonaSystemPrompt = (args: {
   ].join('\n');
 };
 
-const fallbackNpcSystemPrompt = (npc: MomentsProfile, source: { name: string; description: string; systemPrompt: string }) => completePersonaSystemPrompt({
-  name: npc.displayName,
-  bio: npc.bio || `${source.name}关系网中的${npc.relationLabel || '熟人'}`,
-  identity: npc.relationLabel || `${source.name}关系网中的稳定人物`,
-  relationContext: `用户通过${source.name}的关系网认识${npc.displayName}，目前是刚添加好友、可以逐步熟悉的关系。`,
-  sourceAnchor: `${npc.displayName}与来源角色${source.name}的既定关系是“${npc.relationLabel || '稳定熟人关系'}”。允许合理补齐${npc.displayName}自己的生活与性格，但必须保留这条来源关系，不能挪用${source.name}的经历、性格或记忆。`,
+const fallbackNpcCharacterArtifact = (args: {
+  npc: MomentsProfile;
+  sourceCharacter: { name: string; description: string; systemPrompt: string; worldview?: string };
+  user: { name: string; bio: string };
+  relatedMemories: string[];
+}): CollaborationInstallableArtifact => ({
+  kind: 'character-card',
+  title: `${args.npc.displayName}角色卡`,
+  payload: {
+    name: args.npc.displayName,
+    description: args.npc.bio || compactNpcDescription('', args.npc, args.sourceCharacter.name),
+    systemPrompt: [
+      `你是${args.npc.displayName}。`,
+      `你的已知身份与性格：${args.npc.bio || `${args.sourceCharacter.name}关系网中的${args.npc.relationLabel || '稳定人物'}。`}`,
+      `你与${args.sourceCharacter.name}的既定关系：${args.npc.relationLabel || '稳定关系人物'}。这段关系是真实背景，但你有独立于${args.sourceCharacter.name}的人格、生活、动机与表达方式。`,
+      `你正在与${args.user.name || '用户'}建立自己的好友关系；${args.user.bio ? `对方的自我设定是：${args.user.bio}。` : ''}关系只按真实发生的聊天和朋友圈互动自然发展。`,
+      '交流时保持生活化、口语化和稳定人格；说清自己的立场，不复述设定，不冒充系统或模型。不得把来源角色的第一人称经历、性格和记忆挪成自己的经历。',
+      args.relatedMemories.length ? `你需要正确理解但不得张冠李戴的既有相关记忆：\n${args.relatedMemories.map((memory, index) => `${index + 1}. ${memory}`).join('\n')}` : '',
+    ].filter(Boolean).join('\n\n'),
+    worldview: args.sourceCharacter.worldview || '沿用来源角色所在的现实与共同事实；新增细节不得推翻已发生事件。',
+  },
 });
 
-/** 用户把明确 NPC 正式加为角色时才调用；把短 bio 扩写为角色卡核心指令，不污染描述行。 */
+const npcPlanFromCharacterArtifact = (
+  artifact: CollaborationInstallableArtifact,
+  fallback: CollaborationInstallableArtifact,
+  npcName: string,
+): MomentsNpcCharacterPlan => {
+  const selected = validateInstallableArtifact(artifact).length === 0 ? artifact : fallback;
+  const patch = installableToCharacterPatch(selected);
+  const fallbackPatch = installableToCharacterPatch(fallback);
+  return {
+    // 明确 NPC 已有稳定身份，模型不能在制卡时把人改名。
+    name: npcName,
+    description: (patch.description || fallbackPatch.description || '').trim(),
+    systemPrompt: (patch.systemPrompt || fallbackPatch.systemPrompt || '').trim(),
+    worldview: (patch.worldview || fallbackPatch.worldview || '').trim() || undefined,
+  };
+};
+
+/** 用户把明确 NPC 正式加为角色时才调用；完整复用“协同工作 → 角色卡制作”的协议、解析与原生字段。 */
 export async function planMomentsNpcCharacterProfile(args: {
   config: MomentsApiConfig;
   npc: MomentsProfile;
-  sourceCharacter: { name: string; description: string; systemPrompt: string };
+  sourceCharacter: { name: string; description: string; systemPrompt: string; worldview?: string };
+  user: { name: string; bio: string };
+  relatedMemories: string[];
+  collaborationContext: string;
 }): Promise<MomentsNpcCharacterPlan> {
-  const fallbackSystemPrompt = fallbackNpcSystemPrompt(args.npc, args.sourceCharacter);
-  const fallbackDescription = compactNpcDescription('', args.npc, args.sourceCharacter.name);
-  if (!isMomentsApiReady(args.config)) return { description: fallbackDescription, systemPrompt: fallbackSystemPrompt };
-  const prompt = [
-    '你正在把一个“既有角色人设中明确提到的 NPC”整理成独立角色卡。只输出 JSON，不要解释。',
-    `NPC 名称：${args.npc.displayName}`,
-    `NPC 与来源角色的关系：${args.npc.relationLabel || '稳定关系人物'}`,
-    `NPC 已提取资料：${args.npc.bio || '无额外资料'}`,
-    `来源角色名称：${args.sourceCharacter.name}`,
-    `来源角色描述：${args.sourceCharacter.description || '无'}`,
-    `来源角色核心指令：${args.sourceCharacter.systemPrompt || '无'}`,
-    'description 是显示在角色名称下方的行为描述，只写一句完整的简短概括，最多 15 个汉字；不能截断句子，不能粘贴整段人设。',
-    `systemPrompt 才是完整人设。必须明确写出此 NPC 与来源角色“${args.sourceCharacter.name}”的关系，并按有依据的内容组织以下部分：`,
-    '【基础身份】姓名、年龄/性别（仅资料明确时）、身份；【关联角色】与来源角色的具体关系；【外貌特征】仅有依据时；',
-    '【性格核心】公开形象、私下本质、反差；【与用户关系】初始关系与自然发展原则；【沟通风格】语言、文字、语音习惯；',
-    '【互动指南】常见话题、敏感话题、亲密互动、冲突处理；【生活习惯】日常、喜好、厌恶；【特殊设定】禁止事项和特殊反应。',
-    '允许依据已有资料进行合理、连贯、有生活感的创作补全；年龄、性别、外貌、生日、习惯等缺失项也要给出具体设定。不要写“未知”“待补充”“以资料为准”，用户不满意会自行修改。不要写“你原本是角色人设中已有的……现在用户已正式添加你为好友”之类的系统过程描述。',
-    '保持 NPC 自己的独立人格，不能把来源角色的第一人称、经历或性格直接复制给 NPC。',
-    'JSON 形状：{"description":"15字以内完整概括","systemPrompt":"完整角色核心指令"}',
+  const relatedMemories = args.relatedMemories.map(memory => memory.trim()).filter(Boolean).slice(0, 5);
+  const fallback = fallbackNpcCharacterArtifact({ ...args, relatedMemories });
+  if (!isMomentsApiReady(args.config)) return npcPlanFromCharacterArtifact(fallback, fallback, args.npc.displayName);
+  const task = [
+    '请为下面这位“来源角色人设中已经明确存在的 NPC”制作一张可直接安装的新角色卡。',
+    '角色卡的结构、字段、交付块和约束，完全遵守系统消息里的“角色卡制作”协议；不要再输出旧版 description/systemPrompt 裸 JSON。',
+    '',
+    '### 制卡对象',
+    `- 用户：${args.user.name || '用户'}；用户设定：${args.user.bio || '无额外设定'}`,
+    `- 来源主角色：${args.sourceCharacter.name}；显示描述：${args.sourceCharacter.description || '无'}`,
+    `- 待创建角色：${args.npc.displayName}；与来源主角色的关系：${args.npc.relationLabel || '稳定关系人物'}；已提取资料：${args.npc.bio || '无额外资料'}`,
+    '',
+    `### ${args.sourceCharacter.name}与${args.npc.displayName}最相关的五条记忆`,
+    relatedMemories.length
+      ? relatedMemories.map((memory, index) => `${index + 1}. ${memory}`).join('\n')
+      : '当前没有可核实的相关记忆；不要编造已经发生过的共同事件。',
+    '',
+    `请合理补全${args.npc.displayName}自己的动机、边界、语言习惯、关系立场与生活细节，但不要复制${args.sourceCharacter.name}的第一人称经历，也不要把上述记忆张冠李戴。`,
+    `作品块中的 name 必须是“${args.npc.displayName}”。description 按协同工作角色卡的“给用户看的简短介绍”填写；systemPrompt 写完整核心设定；worldview 写角色所在世界与共同事实。`,
   ].join('\n');
   try {
     const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
       method: 'POST', headers: { Authorization: `Bearer ${args.config.apiKey.trim()}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: args.config.model.trim(), temperature: 0.45, stream: false, messages: [{ role: 'user', content: prompt }] }),
+      body: JSON.stringify({
+        model: args.config.model.trim(), temperature: 0.65, stream: false,
+        messages: [
+          { role: 'system', content: args.collaborationContext },
+          { role: 'system', content: getCollaborationMakerPrompt('character-card') },
+          { role: 'user', content: task },
+        ],
+      }),
     }, 0, 20_000, { appName: '朋友圈', purpose: '明确 NPC 转正式角色' });
-    const root = parseJsonObject(extractContent(data));
-    const description = compactNpcDescription(typeof root.description === 'string' ? root.description : '', args.npc, args.sourceCharacter.name);
-    const modelSystemPrompt = typeof root.systemPrompt === 'string' ? root.systemPrompt.trim() : '';
-    const relationAnchor = `【关联来源】\n${args.npc.displayName}来自${args.sourceCharacter.name}的既有人设关系网，与${args.sourceCharacter.name}的关系为：${args.npc.relationLabel || '稳定关系人物'}。`;
-    const completeModelCard = modelSystemPrompt && PERSONA_SECTIONS.every(section => modelSystemPrompt.includes(section));
-    const systemPrompt = completeModelCard
-      ? (modelSystemPrompt.includes(args.sourceCharacter.name) ? modelSystemPrompt : `${relationAnchor}\n\n${modelSystemPrompt}`)
-      : fallbackSystemPrompt;
-    return { description, systemPrompt };
+    const parsed = parseInstallableArtifactBlocks(extractContent(data));
+    const artifact = parsed.artifacts.find(item => item.kind === 'character-card');
+    if (!artifact) throw new Error('副 API 没有返回协同工作角色卡作品块');
+    return npcPlanFromCharacterArtifact(artifact, fallback, args.npc.displayName);
   } catch {
-    // 加好友是用户已经确认的本地操作；副 API 临时失败时仍用结构化保底人设完成，避免留下空白角色。
-    return { description: fallbackDescription, systemPrompt: fallbackSystemPrompt };
+    // 添加好友是已确认的本地操作；接口临时失败仍用同一种 character-card 原生字段落库，不退回旧八段式模板。
+    return npcPlanFromCharacterArtifact(fallback, fallback, args.npc.displayName);
   }
 }
 
@@ -492,7 +538,7 @@ export async function planMomentsStrangerCharacterProfile(args: {
     identity: args.profile.bio || '通过朋友圈摇一摇认识的新朋友',
     relationContext: `与用户通过朋友圈摇一摇偶然认识，目前处于刚添加好友、互相了解的阶段。临时聊天中已经发生的内容视为双方真实记忆。`,
   });
-  if (!isMomentsApiReady(args.config)) return { description, systemPrompt: fallback };
+  if (!isMomentsApiReady(args.config)) return { name: args.profile.displayName, description, systemPrompt: fallback };
   const prompt = [
     '把这位摇一摇认识的陌生人整理为完整、可直接使用的角色卡。只输出 JSON。',
     `姓名：${args.profile.displayName}`,
@@ -510,11 +556,12 @@ export async function planMomentsStrangerCharacterProfile(args: {
     const root = parseJsonObject(extractContent(data));
     const modelPrompt = typeof root.systemPrompt === 'string' ? root.systemPrompt.trim() : '';
     return {
+      name: args.profile.displayName,
       description: compactNpcDescription(typeof root.description === 'string' ? root.description : '', args.profile, '摇一摇'),
       systemPrompt: modelPrompt && PERSONA_SECTIONS.every(section => modelPrompt.includes(section)) ? modelPrompt : fallback,
     };
   } catch {
-    return { description, systemPrompt: fallback };
+    return { name: args.profile.displayName, description, systemPrompt: fallback };
   }
 }
 

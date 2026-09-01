@@ -12,6 +12,9 @@ import { acknowledgeMomentsDeliveries, claimMomentsTask, completeMomentsTask, ge
 import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { mirrorMomentsEventToMemoryPalace, removeMomentsPostFromMemoryPalace, removeMomentsSourcesFromMemoryPalace } from '../utils/momentsMemoryPalace';
 import { reportRelationshipJealousyEvents, setRelationshipJealousyForceEnabled } from '../utils/relationshipBackend';
+import { MemoryNodeDB } from '../utils/memoryPalace/db';
+import { buildCollaborationContextSnapshot, selectCollaborationMemories } from '../features/collaboration/context';
+import type { MemoryNode } from '../utils/memoryPalace/types';
 
 const USER_PROFILE_ID = 'moments:user';
 const DEFAULT_SETTINGS: MomentsSettings = {
@@ -117,6 +120,38 @@ const randomPasserbyActorsForPost = (postId: string): MomentsProfile[] => {
       updatedAt: Date.now(),
     };
   });
+};
+
+/** 明确 NPC 转正时复用协同工作的相关记忆排序；新旧两套记忆都纳入，最终只给制卡器五条。 */
+const loadNpcCharacterCardMemories = async (source: CharacterProfile, npc: MomentsProfile): Promise<string[]> => {
+  const palaceNodes = await MemoryNodeDB.getByCharId(source.id).catch(() => [] as MemoryNode[]);
+  const fragmentNodes: MemoryNode[] = (source.memories || []).map((memory, index) => {
+    const parsedAt = Date.parse(memory.date);
+    const createdAt = Number.isFinite(parsedAt) ? parsedAt : index + 1;
+    return {
+      id: `moments-card-fragment:${source.id}:${memory.id}`,
+      charId: source.id,
+      content: memory.summary,
+      room: 'living_room', tags: [], importance: 5, mood: memory.mood || 'neutral', embedded: false,
+      createdAt, lastAccessedAt: createdAt, accessCount: 0,
+    };
+  });
+  const refinedNodes: MemoryNode[] = Object.entries(source.refinedMemories || {}).map(([date, content], index) => {
+    const parsedAt = Date.parse(date);
+    const createdAt = Number.isFinite(parsedAt) ? parsedAt : index + 1;
+    return {
+      id: `moments-card-refined:${source.id}:${date}`,
+      charId: source.id,
+      content, room: 'living_room', tags: [], importance: 6, mood: 'archive', embedded: false,
+      createdAt, lastAccessedAt: createdAt, accessCount: 0,
+    };
+  });
+  const deduped = [...palaceNodes, ...fragmentNodes, ...refinedNodes].filter((node, index, all) => {
+    const normalized = node.content.replace(/\s+/g, ' ').trim();
+    return normalized && all.findIndex(candidate => candidate.content.replace(/\s+/g, ' ').trim() === normalized) === index;
+  });
+  const query = [npc.displayName, npc.relationLabel, npc.bio, source.name, source.description].filter(Boolean).join('\n');
+  return selectCollaborationMemories(deduped, query, 5).map(node => node.content.trim());
 };
 
 const MomentMediaGrid = React.memo(({ media, onOpen, onGenerate, generatingIds }: { media: MomentsMediaRef[]; onOpen: (item: MomentsMediaRef) => void; onGenerate: (item: MomentsMediaRef) => void; generatingIds: Set<string> }) => {
@@ -321,11 +356,19 @@ const MomentsApp: React.FC = () => {
           id: `moments:character:${legacy.id}`, actorType: 'npc', displayName: legacy.name, avatar: legacy.avatar,
           bio: legacyBio, parentCharacterId: source.id, relationLabel, friendshipState: 'friend', updatedAt: Date.now(),
         };
+        const relatedMemories = await loadNpcCharacterCardMemories(source, npc);
+        const collaborationContext = await buildCollaborationContextSnapshot({
+          char: source, user: userProfile, mode: 'focused',
+          taskText: `为明确 NPC ${npc.displayName} 制作角色卡`,
+        });
         const card = await planMomentsNpcCharacterProfile({
           config: settingsRef.current.momentsApi || momentsApiFromMain(apiConfig), npc,
-          sourceCharacter: { name: source.name, description: source.description || '', systemPrompt: source.systemPrompt || '' },
+          sourceCharacter: { name: source.name, description: source.description || '', systemPrompt: source.systemPrompt || '', worldview: source.worldview },
+          user: { name: userProfile.name, bio: userProfile.bio || '' },
+          relatedMemories,
+          collaborationContext,
         });
-        await updateCharacter(legacy.id, { description: card.description, systemPrompt: card.systemPrompt });
+        await updateCharacter(legacy.id, { name: card.name, description: card.description, systemPrompt: card.systemPrompt, worldview: card.worldview });
         const existingProfile = await DB.getMomentsProfile(`moments:character:${legacy.id}`);
         if (existingProfile) await DB.saveMomentsProfile({ ...existingProfile, bio: legacyBio, parentCharacterId: source.id, relationLabel, updatedAt: Date.now() });
         migrated += 1;
@@ -1183,16 +1226,35 @@ const MomentsApp: React.FC = () => {
     try {
       const sourceCharacter = characters.find(character => character.id === npc.parentCharacterId);
       if (!sourceCharacter) throw new Error(`找不到 ${npc.displayName} 对应的来源角色，无法安全生成独立人设`);
+      const relatedMemories = await loadNpcCharacterCardMemories(sourceCharacter, npc);
+      const collaborationContext = await buildCollaborationContextSnapshot({
+        char: sourceCharacter, user: userProfile, mode: 'focused',
+        taskText: `为明确 NPC ${npc.displayName} 制作角色卡`,
+      });
       const card = await planMomentsNpcCharacterProfile({
         config: settings.momentsApi || momentsApiFromMain(apiConfig),
         npc,
-        sourceCharacter: { name: sourceCharacter.name, description: sourceCharacter.description || '', systemPrompt: sourceCharacter.systemPrompt || '' },
+        sourceCharacter: {
+          name: sourceCharacter.name,
+          description: sourceCharacter.description || '',
+          systemPrompt: sourceCharacter.systemPrompt || '',
+          worldview: sourceCharacter.worldview,
+        },
+        user: { name: userProfile.name, bio: userProfile.bio || '' },
+        relatedMemories,
+        collaborationContext,
       });
       const created = await addCharacter();
       const now = Date.now();
       const sourcePosts = posts.filter(post => post.authorId === npc.id).slice(0, 10).map(post => post.content).filter(Boolean).join('\n');
       const memory: MemoryFragment = { id: `moments-npc-memory-${npc.id}-${created.id}`, date: new Date().toISOString().slice(0, 10), summary: `通过朋友圈认识了${npc.displayName}；${npc.displayName}来自${sourceCharacter.name}的人设关系网，与${sourceCharacter.name}的关系为${npc.relationLabel || '稳定熟人'}。其公开动态摘要：\n${sourcePosts || '暂无动态。'}`, mood: 'archive' };
-      await updateCharacter(created.id, { name: npc.displayName, description: card.description, systemPrompt: card.systemPrompt, memories: [...(created.memories || []), memory] });
+      await updateCharacter(created.id, {
+        name: card.name,
+        description: card.description,
+        systemPrompt: card.systemPrompt,
+        worldview: card.worldview,
+        memories: [...(created.memories || []), memory],
+      });
       const promoted: MomentsProfile = { ...npc, id: `moments:character:${created.id}`, actorType: 'character', characterId: created.id, friendshipState: 'friend', updatedAt: now };
       const promotedPosts = posts.filter(post => post.authorId === npc.id).map(post => ({ ...post, authorId: promoted.id, authorType: 'character' as const, updatedAt: now }));
       // 原 NPC 行改为“已转正”是持久化幂等凭据；即使刷新页面也不会再次显示添加入口。
