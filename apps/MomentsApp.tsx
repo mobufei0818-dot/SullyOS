@@ -169,6 +169,7 @@ const MomentsApp: React.FC = () => {
   const [busy, setBusy] = useState(false);
   const [generatingMediaIds, setGeneratingMediaIds] = useState<Set<string>>(() => new Set());
   const [deleteTarget, setDeleteTarget] = useState<MomentsPost | null>(null);
+  const [dataReady, setDataReady] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const coverInputRef = useRef<HTMLInputElement | null>(null);
   const commentLongPressTimer = useRef<number | null>(null);
@@ -181,6 +182,7 @@ const MomentsApp: React.FC = () => {
   const workerSyncInFlight = useRef(false);
   const characterPostCheckInFlight = useRef(false);
   const characterPostCheckRetryAt = useRef(0);
+  const legacyNpcCardMigrationInFlight = useRef(false);
 
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
@@ -214,7 +216,8 @@ const MomentsApp: React.FC = () => {
       const next: MomentsProfile = {
         id, actorType: 'character', displayName: char.name, avatar: char.avatar,
         characterId: char.id, friendshipState: 'friend', cover: existing?.cover || defaultCover,
-        bio: existing?.bio || '', updatedAt: Date.now(),
+        bio: existing?.bio || '', parentCharacterId: existing?.parentCharacterId,
+        relationLabel: existing?.relationLabel, updatedAt: Date.now(),
       };
       // 只同步角色基础身份；未来用户在朋友圈为角色设置的 cover/bio 不会被角色卡更新冲掉。
       await DB.saveMomentsProfile(next);
@@ -234,9 +237,47 @@ const MomentsApp: React.FC = () => {
     setReactionsByPost(Object.fromEntries(reactionEntries));
     setCommentsByPost(Object.fromEntries(commentEntries));
     setGallery(allGallery.sort((a, b) => b.timestamp - a.timestamp));
+    setDataReady(true);
   }, [apiConfig, characters, userProfile.avatar, userProfile.name]);
 
   useEffect(() => { void loadData(); }, [loadData]);
+
+  useEffect(() => {
+    if (!dataReady || legacyNpcCardMigrationInFlight.current) return;
+    const legacyCharacters = characters.filter(character => character.systemPrompt?.includes('现在用户已正式添加你为好友'));
+    if (!legacyCharacters.length) return;
+    legacyNpcCardMigrationInFlight.current = true;
+    void (async () => {
+      let migrated = 0;
+      for (const legacy of legacyCharacters) {
+        const source = characters
+          .filter(candidate => candidate.id !== legacy.id && (legacy.description?.includes(candidate.name) || legacy.systemPrompt?.includes(candidate.name)))
+          .sort((a, b) => b.name.length - a.name.length)[0];
+        if (!source) continue;
+        const descriptionWithoutSource = legacy.description?.startsWith(source.name)
+          ? legacy.description.slice(source.name.length).replace(/^的/, '')
+          : legacy.description;
+        const relationLabel = legacy.systemPrompt.match(/角色人设中已有的([^，。\n]+)[，。]/)?.[1]?.trim()
+          || descriptionWithoutSource?.split(/[，。]/)[0]?.trim()
+          || '稳定关系人物';
+        const legacyBio = legacy.systemPrompt.split('\n').find(line => line.trim() && !line.includes('现在用户已正式添加你为好友'))?.trim()
+          || legacy.description || relationLabel;
+        const npc: MomentsProfile = {
+          id: `moments:character:${legacy.id}`, actorType: 'npc', displayName: legacy.name, avatar: legacy.avatar,
+          bio: legacyBio, parentCharacterId: source.id, relationLabel, friendshipState: 'friend', updatedAt: Date.now(),
+        };
+        const card = await planMomentsNpcCharacterProfile({
+          config: settingsRef.current.momentsApi || momentsApiFromMain(apiConfig), npc,
+          sourceCharacter: { name: source.name, description: source.description || '', systemPrompt: source.systemPrompt || '' },
+        });
+        await updateCharacter(legacy.id, { description: card.description, systemPrompt: card.systemPrompt });
+        const existingProfile = await DB.getMomentsProfile(`moments:character:${legacy.id}`);
+        if (existingProfile) await DB.saveMomentsProfile({ ...existingProfile, bio: legacyBio, parentCharacterId: source.id, relationLabel, updatedAt: Date.now() });
+        migrated += 1;
+      }
+      if (migrated) addToast(`已升级 ${migrated} 位旧版朋友圈 NPC 的角色人设`, 'success');
+    })().finally(() => { legacyNpcCardMigrationInFlight.current = false; });
+  }, [addToast, apiConfig, characters, dataReady, updateCharacter]);
 
   const allDraftUrls = useMemo(() => new Set(draftMedia.map(item => item.url)), [draftMedia]);
 
