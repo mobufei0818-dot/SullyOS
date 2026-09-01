@@ -7,7 +7,7 @@ import { processImageToBlob } from '../utils/file';
 import TokenImg from '../components/os/TokenImg';
 import type { CharacterProfile, GalleryImage, MemoryFragment, MomentsComment, MomentsEventType, MomentsInteractionMode, MomentsMediaRef, MomentsPendingJob, MomentsPost, MomentsPostingMode, MomentsProfile, MomentsReaction, MomentsSettings, MomentsTempStranger, MomentsTempTranscript, MomentsVisibilityMode, MomentsApiConfig, MomentsWorkerConfig, MomentsWorkerDiagnostics } from '../types';
 import { generateChatImage, isImageGenerationConfigured } from '../utils/imageGeneration';
-import { fetchMomentsModels, isMomentsApiReady, momentsApiFromMain, momentsApiFromPreset, planMomentsCharacterPost, planMomentsInteractions, planMomentsNpcProfiles, planMomentsStranger, replyMomentsStranger, testMomentsApi } from '../utils/momentsApi';
+import { fetchMomentsModels, isMomentsApiReady, momentsApiFromMain, momentsApiFromPreset, planMomentsCharacterPost, planMomentsInteractions, planMomentsNpcCharacterProfile, planMomentsNpcProfiles, planMomentsStranger, replyMomentsStranger, testMomentsApi } from '../utils/momentsApi';
 import { acknowledgeMomentsDeliveries, claimMomentsTask, completeMomentsTask, getMomentsWorkerDiagnostics, isMomentsWorkerReady, outboxToSyncPayload, pullMomentsDeliveries, pullMomentsTasks, syncMomentsOutbox } from '../utils/momentsSync';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { mirrorMomentsEventToMemoryPalace, removeMomentsPostFromMemoryPalace } from '../utils/momentsMemoryPalace';
@@ -983,11 +983,18 @@ const MomentsApp: React.FC = () => {
     if (npc.actorType !== 'npc') return;
     setBusy(true);
     try {
+      const sourceCharacter = characters.find(character => character.id === npc.parentCharacterId);
+      if (!sourceCharacter) throw new Error(`找不到 ${npc.displayName} 对应的来源角色，无法安全生成独立人设`);
+      const card = await planMomentsNpcCharacterProfile({
+        config: settings.momentsApi || momentsApiFromMain(apiConfig),
+        npc,
+        sourceCharacter: { name: sourceCharacter.name, description: sourceCharacter.description || '', systemPrompt: sourceCharacter.systemPrompt || '' },
+      });
       const created = await addCharacter();
       const now = Date.now();
       const sourcePosts = posts.filter(post => post.authorId === npc.id).slice(0, 10).map(post => post.content).filter(Boolean).join('\n');
-      const memory: MemoryFragment = { id: `moments-npc-memory-${npc.id}-${created.id}`, date: new Date().toISOString().slice(0, 10), summary: `通过朋友圈认识了${npc.displayName}（${npc.relationLabel || '角色人设中的熟人'}）。其公开动态摘要：\n${sourcePosts || '暂无动态。'}`, mood: 'archive' };
-      await updateCharacter(created.id, { name: npc.displayName, description: npc.bio || '', systemPrompt: `${npc.bio || ''}\n你原本是角色人设中已有的${npc.relationLabel || '熟人'}，现在用户已正式添加你为好友。`, memories: [...(created.memories || []), memory] });
+      const memory: MemoryFragment = { id: `moments-npc-memory-${npc.id}-${created.id}`, date: new Date().toISOString().slice(0, 10), summary: `通过朋友圈认识了${npc.displayName}；${npc.displayName}来自${sourceCharacter.name}的人设关系网，与${sourceCharacter.name}的关系为${npc.relationLabel || '稳定熟人'}。其公开动态摘要：\n${sourcePosts || '暂无动态。'}`, mood: 'archive' };
+      await updateCharacter(created.id, { name: npc.displayName, description: card.description, systemPrompt: card.systemPrompt, memories: [...(created.memories || []), memory] });
       const promoted: MomentsProfile = { ...npc, id: `moments:character:${created.id}`, actorType: 'character', characterId: created.id, friendshipState: 'friend', updatedAt: now };
       const promotedPosts = posts.filter(post => post.authorId === npc.id).map(post => ({ ...post, authorId: promoted.id, authorType: 'character' as const, updatedAt: now }));
       await Promise.all([DB.saveMomentsProfile(promoted), ...promotedPosts.map(post => DB.saveMomentsPost(post))]);

@@ -46,6 +46,11 @@ export interface MomentsNpcPlan {
   initialPhotoIncludesAuthor?: boolean;
 }
 
+export interface MomentsNpcCharacterPlan {
+  description: string;
+  systemPrompt: string;
+}
+
 const stableHash = (value: string) => {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
@@ -286,6 +291,85 @@ export async function planMomentsNpcProfiles(args: { config: MomentsApiConfig; c
       ...(initialPhotoPrompt ? { initialPhotoPrompt, initialPhotoIncludesAuthor: row.initialPhotoIncludesAuthor === true } : {}),
     }];
   }).slice(0, 18);
+}
+
+const compactNpcDescription = (candidate: string, npc: MomentsProfile, sourceName: string) => {
+  const clean = candidate.replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim().replace(/[。；;，,]+$/g, '');
+  if (clean && Array.from(clean).length <= 15) return clean;
+  const fallbacks = [`${sourceName}的${npc.relationLabel || '熟人'}`, npc.relationLabel || '', `${sourceName}关联人物`, '角色关系网中的熟人'];
+  return fallbacks.find(item => item && Array.from(item).length <= 15) || '角色关系网中的熟人';
+};
+
+const fallbackNpcSystemPrompt = (npc: MomentsProfile, source: { name: string; description: string; systemPrompt: string }) => [
+  '【基础身份】',
+  `姓名：${npc.displayName}`,
+  `身份：${npc.relationLabel || `${source.name}人设中的稳定关系人物`}`,
+  '',
+  '【关联角色】',
+  `${npc.displayName}来自${source.name}的既有人设关系网。与${source.name}的关系：${npc.relationLabel || '稳定熟人关系'}。这层来源关系必须保持明确，不得张冠李戴。`,
+  '',
+  '【人物设定】',
+  npc.bio || '依据来源角色人设保持稳定、自然的独立人格。',
+  '',
+  '【性格核心】',
+  '以既有人物设定为准，保持公开形象与私下本质的自然层次；资料没有提到的年龄、外貌和经历不要擅自编造。',
+  '',
+  '【与用户关系】',
+  `用户通过${source.name}的关系网认识${npc.displayName}。之后的熟悉程度、情感与共同经历只根据实际聊天和记忆自然发展，不预设亲密度。`,
+  '',
+  '【沟通风格】',
+  '说话方式、用词和语气服从人物设定；像独立的人一样交流，不复述设定，不自称 NPC 或系统角色。',
+  '',
+  '【互动指南】',
+  `可自然提及与${source.name}有关的共同关系和既有事实，但不能把${source.name}的经历、性格或记忆据为己有。`,
+  '',
+  '【生活习惯与边界】',
+  '日常、喜好、厌恶和特殊反应以已知资料及后续记忆为准；未知内容允许在不冲突的前提下逐步形成，禁止一次性编造整段人生。',
+].join('\n');
+
+/** 用户把明确 NPC 正式加为角色时才调用；把短 bio 扩写为角色卡核心指令，不污染描述行。 */
+export async function planMomentsNpcCharacterProfile(args: {
+  config: MomentsApiConfig;
+  npc: MomentsProfile;
+  sourceCharacter: { name: string; description: string; systemPrompt: string };
+}): Promise<MomentsNpcCharacterPlan> {
+  const fallbackSystemPrompt = fallbackNpcSystemPrompt(args.npc, args.sourceCharacter);
+  const fallbackDescription = compactNpcDescription('', args.npc, args.sourceCharacter.name);
+  if (!isMomentsApiReady(args.config)) return { description: fallbackDescription, systemPrompt: fallbackSystemPrompt };
+  const prompt = [
+    '你正在把一个“既有角色人设中明确提到的 NPC”整理成独立角色卡。只输出 JSON，不要解释。',
+    `NPC 名称：${args.npc.displayName}`,
+    `NPC 与来源角色的关系：${args.npc.relationLabel || '稳定关系人物'}`,
+    `NPC 已提取资料：${args.npc.bio || '无额外资料'}`,
+    `来源角色名称：${args.sourceCharacter.name}`,
+    `来源角色描述：${args.sourceCharacter.description || '无'}`,
+    `来源角色核心指令：${args.sourceCharacter.systemPrompt || '无'}`,
+    'description 是显示在角色名称下方的行为描述，只写一句完整的简短概括，最多 15 个汉字；不能截断句子，不能粘贴整段人设。',
+    `systemPrompt 才是完整人设。必须明确写出此 NPC 与来源角色“${args.sourceCharacter.name}”的关系，并按有依据的内容组织以下部分：`,
+    '【基础身份】姓名、年龄/性别（仅资料明确时）、身份；【关联角色】与来源角色的具体关系；【外貌特征】仅有依据时；',
+    '【性格核心】公开形象、私下本质、反差；【与用户关系】初始关系与自然发展原则；【沟通风格】语言、文字、语音习惯；',
+    '【互动指南】常见话题、敏感话题、亲密互动、冲突处理；【生活习惯】日常、喜好、厌恶；【特殊设定】禁止事项和特殊反应。',
+    '没有依据的具体年龄、外貌、生日、经历不要编造，可以省略对应条目。不要写“你原本是角色人设中已有的……现在用户已正式添加你为好友”之类的系统过程描述。',
+    '保持 NPC 自己的独立人格，不能把来源角色的第一人称、经历或性格直接复制给 NPC。',
+    'JSON 形状：{"description":"15字以内完整概括","systemPrompt":"完整角色核心指令"}',
+  ].join('\n');
+  try {
+    const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
+      method: 'POST', headers: { Authorization: `Bearer ${args.config.apiKey.trim()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: args.config.model.trim(), temperature: 0.45, stream: false, messages: [{ role: 'user', content: prompt }] }),
+    }, 0, 90_000, { appName: '朋友圈', purpose: '明确 NPC 转正式角色' });
+    const root = parseJsonObject(extractContent(data));
+    const description = compactNpcDescription(typeof root.description === 'string' ? root.description : '', args.npc, args.sourceCharacter.name);
+    const modelSystemPrompt = typeof root.systemPrompt === 'string' ? root.systemPrompt.trim() : '';
+    const relationAnchor = `【关联来源】\n${args.npc.displayName}来自${args.sourceCharacter.name}的既有人设关系网，与${args.sourceCharacter.name}的关系为：${args.npc.relationLabel || '稳定关系人物'}。`;
+    const systemPrompt = modelSystemPrompt
+      ? (modelSystemPrompt.includes(args.sourceCharacter.name) ? modelSystemPrompt : `${relationAnchor}\n\n${modelSystemPrompt}`)
+      : fallbackSystemPrompt;
+    return { description, systemPrompt };
+  } catch {
+    // 加好友是用户已经确认的本地操作；副 API 临时失败时仍用结构化保底人设完成，避免留下空白角色。
+    return { description: fallbackDescription, systemPrompt: fallbackSystemPrompt };
+  }
 }
 
 /** 临时聊天只携带固定人设与最近少量原文，避免在未加好友前污染正式记忆。 */
