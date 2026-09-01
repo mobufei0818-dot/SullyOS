@@ -232,7 +232,7 @@ export async function planMomentsNpcProfiles(args: { config: MomentsApiConfig; c
     '你是角色人设中的朋友圈 NPC 提取器。只输出 JSON，不要解释。',
     '只保留已有明确姓名或稳定身份关系的 NPC（例如有名字的同事、室友、家人、固定好友）。不要编造，不要把路人或用户算进来；每个源角色最多 3 位。',
     '可选 initialPost 是这位 NPC 合理的首条简短朋友圈；不合适就省略。',
-    'JSON：{"npcs":[{"sourceCharacterId":"...","name":"...","relationLabel":"...","bio":"不超过120字","initialPost":"可选，不超过300字"}]}',
+    'JSON：{"npcs":[{"sourceCharacterId":"必须原样使用下方角色 id","name":"...","relationLabel":"...","bio":"不超过120字","initialPost":"可选，不超过300字"}]}',
     `角色人设：${JSON.stringify(args.characters.map(character => ({ id: character.id, name: character.name, description: character.description, systemPrompt: character.systemPrompt })))}`,
   ].join('\n');
   const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
@@ -241,12 +241,20 @@ export async function planMomentsNpcProfiles(args: { config: MomentsApiConfig; c
   }, 0, 90_000, { appName: '朋友圈', purpose: '提取明确 NPC' });
   const root = parseJsonObject(extractContent(data));
   const validSources = new Set(args.characters.map(character => character.id));
+  const sourceIdByName = new Map(args.characters.map(character => [character.name.trim(), character.id]));
   const used = new Set<string>();
   const raw = Array.isArray(root.npcs) ? root.npcs : [];
   return raw.flatMap((item): MomentsNpcPlan[] => {
     if (!item || typeof item !== 'object') return [];
     const row = item as Record<string, unknown>;
-    const sourceCharacterId = typeof row.sourceCharacterId === 'string' ? row.sourceCharacterId : '';
+    // 一些模型会把人物名字写到 sourceCharacterName/source，而不是严格回填长 id；
+    // 在可验证地匹配现有角色名时接受它，避免“已识别的明确 NPC 被整批过滤掉”。
+    const rawSource = typeof row.sourceCharacterId === 'string'
+      ? row.sourceCharacterId.trim()
+      : typeof row.sourceCharacterName === 'string'
+        ? row.sourceCharacterName.trim()
+        : typeof row.source === 'string' ? row.source.trim() : '';
+    const sourceCharacterId = validSources.has(rawSource) ? rawSource : (sourceIdByName.get(rawSource) || '');
     const name = typeof row.name === 'string' ? row.name.trim().slice(0, 24) : '';
     const relationLabel = typeof row.relationLabel === 'string' ? row.relationLabel.trim().slice(0, 40) : '';
     const bio = typeof row.bio === 'string' ? row.bio.trim().slice(0, 180) : '';

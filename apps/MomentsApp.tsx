@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Camera, CaretRight, ChatCircleText, Check, DotsThree, Heart, ImageSquare, LockKey, Plus, Trash, UsersThree, X, PaperPlaneTilt, ArrowsClockwise, UserPlus, Sparkle } from '@phosphor-icons/react';
+import { ArrowLeft, Camera, CaretRight, ChatCircleText, Check, DotsThree, Heart, ImageSquare, LockKey, Plus, Trash, UsersThree, X, PaperPlaneTilt, ArrowsClockwise, UserPlus, Sparkle, GearSix } from '@phosphor-icons/react';
 import { useOS } from '../context/OSContext';
 import { DB } from '../utils/db';
 import { putImageBlob } from '../utils/blobRef';
@@ -114,6 +114,7 @@ const MomentsApp: React.FC = () => {
   const [friends, setFriends] = useState<MomentsProfile[]>([]);
   const [npcProfiles, setNpcProfiles] = useState<MomentsProfile[]>([]);
   const [tempStrangers, setTempStrangers] = useState<MomentsTempStranger[]>([]);
+  const [strangerListOpen, setStrangerListOpen] = useState(false);
   const [activeStranger, setActiveStranger] = useState<MomentsProfile | null>(null);
   const [strangerTranscript, setStrangerTranscript] = useState<MomentsTempTranscript[]>([]);
   const [strangerDraft, setStrangerDraft] = useState('');
@@ -145,6 +146,14 @@ const MomentsApp: React.FC = () => {
   const commentLongPressTriggered = useRef(false);
   const replanTimers = useRef(new Map<string, number>());
   const queuedReplans = useRef(new Map<string, { post: MomentsPost; comment: MomentsComment }>());
+  const settingsRef = useRef(settings);
+  const workerPullInFlight = useRef(false);
+  const workerPullRetryAt = useRef(0);
+  const workerSyncInFlight = useRef(false);
+  const characterPostCheckInFlight = useRef(false);
+  const characterPostCheckRetryAt = useRef(0);
+
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const loadData = useCallback(async () => {
     const [storedProfile, storedPosts, storedSettings, allGallery, storedStrangers, storedJobs, storedNpcs] = await Promise.all([
@@ -307,11 +316,14 @@ const MomentsApp: React.FC = () => {
   }, [addToast, characters, settings.jealousyForceEnabled]);
 
   const saveMomentsSettingsPatch = useCallback(async (patch: Partial<MomentsSettings>) => {
-    const next = { ...settings, ...patch, updatedAt: Date.now() };
+    // 保持这个写入器稳定：Worker 失败时若它随 settings 改变而重建，依赖它的
+    // effect 会再次拉取 Worker，容易形成失败→重渲染→再请求的循环。
+    const next = { ...settingsRef.current, ...patch, updatedAt: Date.now() };
     await DB.saveMomentsSettings(next);
+    settingsRef.current = next;
     setSettings(next);
     return next;
-  }, [settings]);
+  }, []);
 
   const createVisibilityGroup = useCallback(async () => {
     const name = visibilityGroupName.trim();
@@ -329,7 +341,8 @@ const MomentsApp: React.FC = () => {
     if (!settings.offlineSyncEnabled) return;
     const worker = workerOverride || sharedAmsgWorker;
     if (!isMomentsWorkerReady(worker)) return;
-    if (momentsApiBusy === 'sync') return;
+    if (workerSyncInFlight.current) return;
+    workerSyncInFlight.current = true;
     setMomentsApiBusy('sync');
     try {
       const [items, jobs] = await Promise.all([DB.getMomentsSyncOutbox(), DB.getMomentsPendingJobs()]);
@@ -344,13 +357,16 @@ const MomentsApp: React.FC = () => {
     } catch (error: any) {
       await saveMomentsSettingsPatch({ syncStatus: 'failed', syncError: error?.message || '同步失败' });
       setMomentsApiStatus(`Worker 同步失败：${error?.message || '网络错误'}`);
-    } finally { setMomentsApiBusy(null); }
-  }, [momentsApiBusy, saveMomentsSettingsPatch, settings.offlineSyncEnabled, sharedAmsgWorker]);
+    } finally { workerSyncInFlight.current = false; setMomentsApiBusy(null); }
+  }, [saveMomentsSettingsPatch, settings.offlineSyncEnabled, sharedAmsgWorker]);
 
   const pullMomentsWorker = useCallback(async (workerOverride?: MomentsWorkerConfig) => {
     if (!settings.offlineSyncEnabled) return;
     const worker = workerOverride || sharedAmsgWorker;
     if (!isMomentsWorkerReady(worker)) return;
+    if (workerPullInFlight.current) return;
+    if (!workerOverride && Date.now() < workerPullRetryAt.current) return;
+    workerPullInFlight.current = true;
     try {
       const userId = worker.userId?.trim() || `moments-user-${USER_PROFILE_ID}`;
       const [remoteJobs, deliveries] = await Promise.all([pullMomentsTasks(worker, userId), pullMomentsDeliveries(worker, userId)]);
@@ -376,10 +392,14 @@ const MomentsApp: React.FC = () => {
       }
       if (deliveries.length) await acknowledgeMomentsDeliveries(worker, userId, deliveries.map(item => item.id));
       setPendingJobs(await DB.getMomentsPendingJobs());
+      workerPullRetryAt.current = 0;
     } catch (error: any) {
+      // Worker/DNS 暂不可达时不要让页面每次重绘都再等 30 秒；手动「立即重试」
+      // 仍可绕过这个两分钟冷却。
+      workerPullRetryAt.current = Date.now() + 2 * 60_000;
       await saveMomentsSettingsPatch({ syncStatus: 'failed', syncError: error?.message || '拉取 Worker 任务失败' });
       setMomentsApiStatus(`Worker 任务拉取失败：${error?.message || '网络错误'}`);
-    }
+    } finally { workerPullInFlight.current = false; }
   }, [saveMomentsSettingsPatch, settings.offlineSyncEnabled, sharedAmsgWorker]);
 
   const refreshMomentsWorkerDiagnostics = useCallback(async (workerOverride?: MomentsWorkerConfig) => {
@@ -592,10 +612,17 @@ const MomentsApp: React.FC = () => {
   }, []);
 
   const runCharacterPostChecks = useCallback(async () => {
+    // 不能在一次页面渲染里把所有角色同时送进副 API。每轮只检查一位角色，
+    // 并将轮次错开 10 分钟；这是“生活化地慢慢出现”，不是打开朋友圈就集体刷屏。
+    if (characterPostCheckInFlight.current || Date.now() < characterPostCheckRetryAt.current) return;
+    characterPostCheckInFlight.current = true;
+    characterPostCheckRetryAt.current = Date.now() + 10 * 60_000;
+    try {
     const config = settings.momentsApi || momentsApiFromMain(apiConfig);
     if (!isMomentsApiReady(config)) return;
     const now = new Date();
     const dayKey = localDateKey(now);
+    let plannedOne = false;
     for (const character of characters) {
       const mode = settings.characterPostingModes?.[character.id] || 'off';
       if (mode === 'off' || mode === 'view_only') continue;
@@ -620,6 +647,8 @@ const MomentsApp: React.FC = () => {
           try { localStorage.setItem(checkKey, 'done'); } catch { /* ignore storage errors */ }
           continue;
         }
+        if (plannedOne) break;
+        plannedOne = true;
         const plan = await planMomentsCharacterPost({
           config, actor: { ...actor, bio: [character.description, character.systemPrompt].filter(Boolean).join('\n') }, mode,
           recentPosts: posts.filter(post => post.authorId === actor.id), now: Date.now(),
@@ -660,6 +689,7 @@ const MomentsApp: React.FC = () => {
         setMomentsApiStatus(`角色 ${character.name} 的朋友圈检查失败：${error?.message || '未知错误'}`);
       }
     }
+    } finally { characterPostCheckInFlight.current = false; }
   }, [apiConfig, characters, friends, planPostInteractions, posts, recordMomentsEvent, settings.characterPostingModes, settings.momentsApi]);
 
   // 到点任务先在本机落地执行；若配置了 Worker，同时把事件/任务同步到云端。
@@ -677,7 +707,11 @@ const MomentsApp: React.FC = () => {
     if (settings.offlineSyncEnabled && sharedAmsgWorker?.url) void flushMomentsWorker();
   }, [flushMomentsWorker, settings.offlineSyncEnabled, sharedAmsgWorker?.url]);
 
-  useEffect(() => { void runCharacterPostChecks(); }, [runCharacterPostChecks]);
+  useEffect(() => {
+    void runCharacterPostChecks();
+    const timer = window.setInterval(() => { void runCharacterPostChecks(); }, 10 * 60_000);
+    return () => window.clearInterval(timer);
+  }, [runCharacterPostChecks]);
 
   const addPhotoPlaceholder = () => {
     const prompt = draftPhotoPrompt.trim();
@@ -1183,13 +1217,19 @@ const MomentsApp: React.FC = () => {
 
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden bg-[#f7f7f7] text-[#181818]">
-      <header className="flex h-[54px] shrink-0 items-center justify-between border-b border-black/[0.05] bg-[#f7f7f7] px-3">
-        <button type="button" onClick={view === 'feed' ? closeApp : () => setView('feed')} className="flex h-9 w-9 items-center justify-center rounded-full active:bg-black/[0.06]" aria-label="返回">
-          <ArrowLeft size={24} weight="regular" />
-        </button>
+      <header className="relative z-40 flex h-[56px] shrink-0 items-center justify-between border-b border-black/[0.05] bg-[#f7f7f7] px-2.5 shadow-[0_1px_1px_rgba(0,0,0,0.02)]">
+        <div className="flex items-center gap-0.5">
+          <button type="button" onClick={view === 'feed' ? closeApp : () => setView('feed')} className="flex h-11 w-11 touch-manipulation items-center justify-center rounded-full active:bg-black/[0.06]" aria-label="返回">
+            <ArrowLeft size={26} weight="regular" />
+          </button>
+          {view === 'feed' && <button type="button" onClick={() => setStrangerListOpen(true)} className="flex h-11 w-11 touch-manipulation items-center justify-center rounded-full text-[#576b95] active:bg-black/[0.06]" aria-label="摇一摇与陌生人">
+            <ArrowsClockwise size={22} weight="regular" />
+          </button>}
+        </div>
         <div className="text-[17px] font-semibold tracking-[0.02em]">{headerTitle}</div>
-        <div className="flex w-9 items-center justify-end">
-          {view === 'feed' ? <button type="button" onClick={() => { resetDraft(); setComposeOpen(true); }} className="flex h-9 w-9 items-center justify-center rounded-full active:bg-black/[0.06]" aria-label="发表朋友圈"><Camera size={22} weight="regular" /></button> : null}
+        <div className="flex min-w-[88px] items-center justify-end gap-0.5">
+          {view === 'feed' && <button type="button" onClick={() => { resetDraft(); setComposeOpen(true); }} className="flex h-11 w-11 touch-manipulation items-center justify-center rounded-full active:bg-black/[0.06]" aria-label="发表朋友圈"><Camera size={23} weight="regular" /></button>}
+          {view === 'feed' && <button type="button" onClick={() => setView('settings')} className="flex h-11 w-11 touch-manipulation items-center justify-center rounded-full text-[#1f1f1f] active:bg-black/[0.06]" aria-label="朋友圈设置"><GearSix size={23} weight="regular" /></button>}
         </div>
       </header>
 
@@ -1279,8 +1319,8 @@ const MomentsApp: React.FC = () => {
         <div className="flex-1 overflow-y-auto overscroll-contain">
           <div className="relative h-[218px] bg-[#a4b0bd]" style={displayProfile.cover?.startsWith('linear-gradient') ? { background: displayProfile.cover } : undefined}>
             {displayProfile.cover && !displayProfile.cover.startsWith('linear-gradient') ? <TokenImg value={displayProfile.cover} alt="朋友圈封面" className="h-full w-full object-cover" /> : null}
-            {view === 'profile' && displayProfile.id === USER_PROFILE_ID && <button type="button" onClick={() => coverInputRef.current?.click()} className="absolute right-3 top-3 rounded-md bg-black/35 px-2.5 py-1.5 text-[11px] text-white backdrop-blur-sm">换封面</button>}
-            {view === 'profile' && displayProfile.actorType === 'npc' && <button type="button" disabled={busy} onClick={() => void addNpcAsFriend(displayProfile)} className="absolute right-3 top-3 rounded-md bg-[#07c160] px-2.5 py-1.5 text-[11px] text-white shadow-sm disabled:opacity-50">添加好友</button>}
+            {displayProfile.id === USER_PROFILE_ID && <button type="button" onClick={() => coverInputRef.current?.click()} className="absolute bottom-3 left-3 z-20 flex h-9 touch-manipulation items-center gap-1.5 rounded-full bg-black/45 px-3 text-[11px] text-white shadow-sm backdrop-blur-sm active:bg-black/60"><ImageSquare size={16} />换封面</button>}
+            {view === 'profile' && displayProfile.actorType === 'npc' && <button type="button" disabled={busy} onClick={() => void addNpcAsFriend(displayProfile)} className="absolute bottom-3 left-3 z-20 flex h-10 touch-manipulation items-center gap-1.5 rounded-full bg-[#07c160] px-3.5 text-[12px] text-white shadow-sm disabled:opacity-50"><UserPlus size={16} />添加好友</button>}
             <div className="absolute -bottom-[41px] right-4 flex items-end gap-2.5">
               <span className="mb-1 text-[18px] font-semibold text-white drop-shadow">{displayProfile.displayName}</span>
               <button type="button" onClick={() => { setTimelineProfile(profile); setView('profile'); }} className="h-[72px] w-[72px] overflow-hidden border-[3px] border-white bg-[#ddd] shadow-sm">
@@ -1291,7 +1331,7 @@ const MomentsApp: React.FC = () => {
           <div className="h-14 bg-white" />
           <div className="border-y border-[#eeeeee] bg-white px-4 py-3 text-[13px] text-[#576b95]">
             <button type="button" onClick={() => { markSocialInboxRead(); setView('messages'); }} className="relative mr-6">消息{unreadSocialCount > 0 && <span className="absolute -right-2 -top-1 h-1.5 w-1.5 rounded-full bg-[#fa5151]" />}</button>
-            <button type="button" onClick={() => setView('settings')}>朋友圈设置</button>
+            <span className="text-[#a4a4a4]">设置在右上角</span>
           </div>
 
           {view === 'feed' && friends.length > 0 && <div className="border-b border-[#ededed] bg-white px-4 py-3">
@@ -1299,11 +1339,9 @@ const MomentsApp: React.FC = () => {
             <div className="flex gap-3 overflow-x-auto pb-0.5">
               {friends.map(friend => <button type="button" key={friend.id} onClick={() => { setTimelineProfile(friend); setView('profile'); }} className="w-11 shrink-0 text-center"><div className="h-10 w-10 overflow-hidden bg-[#e8e8e8]">{friend.avatar ? <TokenImg value={friend.avatar} alt={friend.displayName} className="h-full w-full object-cover" /> : <span className="flex h-full items-center justify-center">🙂</span>}</div><div className="mt-1 truncate text-[10px] text-[#555]">{friend.displayName}</div></button>)}
               {npcProfiles.map(npc => <button type="button" key={npc.id} onClick={() => { setTimelineProfile(npc); setView('profile'); }} className="w-11 shrink-0 text-center"><div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded-full bg-[#eef1f6] text-[15px]">{npc.avatar ? <TokenImg value={npc.avatar} alt={npc.displayName} className="h-full w-full object-cover" /> : '◌'}</div><div className="mt-1 truncate text-[10px] text-[#555]">{npc.displayName}</div></button>)}
-              <button type="button" onClick={() => void shakeStranger()} className="w-11 shrink-0 text-center"><div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#fff4dd] text-[#dd9a2b]"><ArrowsClockwise size={20} /></div><div className="mt-1 truncate text-[10px] text-[#9b792f]">摇一摇</div></button>
             </div>
           </div>}
-          {view === 'feed' && friends.length === 0 && <div className="border-b border-[#ededed] bg-white px-4 py-3"><button type="button" onClick={() => void shakeStranger()} className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#fff8e9] py-2.5 text-[13px] font-medium text-[#9b792f]"><ArrowsClockwise size={18} />摇一摇，认识附近的陌生人</button></div>}
-          {view === 'feed' && tempStrangers.length > 0 && <div className="border-b border-[#ededed] bg-white px-4 py-3"><div className="mb-2 text-[11px] text-[#999]">最近遇到的陌生人</div><div className="flex gap-3 overflow-x-auto">{tempStrangers.slice(0, 8).map(stranger => <button type="button" key={stranger.id} onClick={() => void openSavedStranger(stranger)} className="w-12 shrink-0 text-center"><div className="flex h-10 w-10 items-center justify-center rounded-full bg-[#edf5ff] text-[#576b95]"><UserPlus size={18} /></div><div className="mt-1 truncate text-[10px] text-[#555]">{(stranger.persona || '陌生人').split('，')[0]}</div></button>)}</div></div>}
+          {view === 'feed' && friends.length === 0 && <div className="border-b border-[#ededed] bg-white px-4 py-3"><button type="button" onClick={() => setStrangerListOpen(true)} className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#fff8e9] py-2.5 text-[13px] font-medium text-[#9b792f]"><ArrowsClockwise size={18} />摇一摇，认识附近的陌生人</button></div>}
 
           <main className="bg-white">
             {visiblePosts.length === 0 ? (
@@ -1382,7 +1420,12 @@ const MomentsApp: React.FC = () => {
       {deleteTarget && <div className="absolute inset-0 z-40 flex items-end bg-black/35 p-3"><div className="w-full overflow-hidden rounded-2xl bg-white text-center"><div className="border-b border-[#ededed] px-5 py-5"><div className="text-[16px] font-semibold">删除这条朋友圈？</div><p className="mt-2 text-[12px] leading-relaxed text-[#888]">如果其中的图片来自小手机相册，你可以选择保留或一并删除相册副本。</p></div><button type="button" disabled={busy} onClick={() => void confirmDelete(false)} className="flex w-full items-center justify-center gap-2 border-b border-[#ededed] py-4 text-[15px] text-[#576b95]"><Trash size={17} />只删动态，保留相册照片</button><button type="button" disabled={busy} onClick={() => void confirmDelete(true)} className="w-full border-b border-[#ededed] py-4 text-[15px] text-[#e15b5b]">动态和相册副本都删除</button><button type="button" onClick={() => setDeleteTarget(null)} className="w-full py-4 text-[15px] text-[#555]">取消</button></div></div>}
       {deleteCommentTarget && <div className="absolute inset-0 z-50 flex items-end bg-black/35 p-3"><div className="w-full overflow-hidden rounded-2xl bg-white text-center"><div className="border-b border-[#ededed] px-5 py-5"><div className="text-[16px] font-semibold">删除这条评论？</div><p className="mt-2 text-[12px] text-[#888]">这不会删除原动态，也不会影响其他人的评论。</p></div><button type="button" disabled={busy} onClick={() => void confirmDeleteComment()} className="w-full border-b border-[#ededed] py-4 text-[15px] text-[#e15b5b]">删除评论</button><button type="button" onClick={() => setDeleteCommentTarget(null)} className="w-full py-4 text-[15px] text-[#555]">取消</button></div></div>}
 
-      {activeStranger && <div className="absolute inset-0 z-[60] flex flex-col bg-[#f7f7f7]"><header className="flex h-[54px] shrink-0 items-center justify-between border-b border-[#ededed] bg-white px-3"><button type="button" onClick={() => setActiveStranger(null)} className="p-1.5"><ArrowLeft size={23} /></button><span className="text-[16px] font-semibold">陌生人资料</span><button type="button" disabled={strangerBusy} onClick={() => void addStrangerAsFriend()} className="flex items-center gap-1 rounded-full bg-[#07c160] px-3 py-1.5 text-[12px] text-white disabled:opacity-50"><UserPlus size={15} />加好友</button></header><div className="flex-1 overflow-y-auto"><div className="bg-white px-5 py-5"><div className="flex items-center gap-3"><div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#edf5ff] text-[#576b95]"><UserPlus size={26} /></div><div><div className="text-[18px] font-semibold text-[#333]">{activeStranger.displayName}</div><div className="mt-1 text-[12px] leading-relaxed text-[#888]">{activeStranger.bio}</div></div></div></div><section className="mt-3 bg-white px-4 py-4"><div className="mb-3 text-[13px] font-semibold text-[#555]">最近十条朋友圈</div>{!settings.strangersCanViewTen ? <p className="text-[12px] leading-relaxed text-[#999]">对方没有开放“陌生人查看十条”，暂时看不到朋友圈。</p> : strangerVisiblePosts.length === 0 ? <p className="text-[12px] text-[#999]">你还没有公开的朋友圈动态。</p> : strangerVisiblePosts.map(post => <div key={post.id} className="border-t border-[#f0f0f0] py-3"><div className="whitespace-pre-wrap text-[13px] leading-relaxed text-[#333]">{post.content || '分享了一张照片'}</div><div className="mt-1 text-[10px] text-[#aaa]">{formatMomentTime(post.createdAt)}</div></div>)}</section><section className="mt-3 bg-white px-4 py-4"><div className="mb-3 text-[13px] font-semibold text-[#555]">临时聊天</div>{strangerTranscript.length === 0 ? <p className="text-[12px] text-[#999]">还没有开始聊天。聊得来后，可以把对方正式加为角色好友。</p> : <div className="space-y-2">{strangerTranscript.map(line => <div key={line.id} className={`flex ${line.sender === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[82%] rounded-2xl px-3 py-2 text-[13px] leading-relaxed ${line.sender === 'user' ? 'bg-[#95ec69] text-[#1f3d1b]' : 'bg-[#f1f1f1] text-[#333]'}`}>{line.content}</div></div>)}</div>}</section></div><div className="flex shrink-0 items-end gap-2 border-t border-[#e5e5e5] bg-white p-3"><textarea value={strangerDraft} onChange={event => setStrangerDraft(event.target.value)} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') void sendStrangerMessage(); }} placeholder="和陌生人聊两句…" className="min-h-[40px] max-h-24 flex-1 resize-none rounded-xl bg-[#f4f4f4] px-3 py-2 text-[13px] outline-none" /><button type="button" disabled={!strangerDraft.trim() || strangerBusy} onClick={() => void sendStrangerMessage()} className="flex h-10 w-10 items-center justify-center rounded-full bg-[#07c160] text-white disabled:opacity-40"><PaperPlaneTilt size={18} weight="fill" /></button></div></div>}
+      {strangerListOpen && <div className="absolute inset-0 z-[55] flex flex-col bg-[#f7f7f7]">
+        <header className="flex h-[56px] shrink-0 items-center justify-between border-b border-[#ededed] bg-white px-2.5"><button type="button" onClick={() => setStrangerListOpen(false)} className="flex h-11 w-11 touch-manipulation items-center justify-center"><ArrowLeft size={25} /></button><span className="text-[16px] font-semibold">摇一摇</span><span className="w-11" /></header>
+        <div className="flex-1 overflow-y-auto"><div className="mt-3 bg-white px-4 py-4"><div className="text-[13px] font-semibold text-[#333]">附近的人</div><p className="mt-1 text-[11px] leading-relaxed text-[#888]">摇到的人会保留在这里，可以继续临时聊天；只有你主动添加后才会成为正式角色好友。</p><button type="button" disabled={strangerBusy} onClick={() => void shakeStranger()} className="mt-4 flex w-full touch-manipulation items-center justify-center gap-2 rounded-xl bg-[#07c160] py-3 text-[14px] font-medium text-white disabled:opacity-50"><ArrowsClockwise size={19} />{strangerBusy ? '正在摇一摇…' : '摇一摇找人'}</button></div><section className="mt-3 bg-white"><div className="px-4 py-3 text-[12px] text-[#999]">临时聊天</div>{tempStrangers.length === 0 ? <div className="border-t border-[#ededed] px-4 py-10 text-center text-[13px] text-[#999]">还没有遇到陌生人。</div> : tempStrangers.map(stranger => <button type="button" key={stranger.id} onClick={() => { setStrangerListOpen(false); void openSavedStranger(stranger); }} className="flex w-full touch-manipulation items-center gap-3 border-t border-[#ededed] px-4 py-3.5 text-left active:bg-[#f8f8f8]"><div className="flex h-11 w-11 items-center justify-center rounded-full bg-[#edf5ff] text-[#576b95]"><UserPlus size={20} /></div><span className="min-w-0 flex-1"><span className="block truncate text-[14px] text-[#333]">{(stranger.persona || '陌生人').split('，')[0]}</span><span className="mt-0.5 block truncate text-[11px] text-[#999]">点击继续临时聊天</span></span><CaretRight size={18} className="text-[#bbb]" /></button>)}</section></div>
+      </div>}
+
+      {activeStranger && <div className="absolute inset-0 z-[60] flex flex-col bg-[#f7f7f7]"><header className="flex h-[56px] shrink-0 items-center justify-between border-b border-[#ededed] bg-white px-2.5"><button type="button" onClick={() => setActiveStranger(null)} className="flex h-11 w-11 touch-manipulation items-center justify-center"><ArrowLeft size={25} /></button><span className="text-[16px] font-semibold">陌生人资料</span><div className="flex items-center"><button type="button" disabled={!strangerDraft.trim() || strangerBusy} onClick={() => void sendStrangerMessage()} className="flex h-11 w-11 touch-manipulation items-center justify-center text-[#576b95] disabled:opacity-30" aria-label="请求回复"><PaperPlaneTilt size={20} weight="fill" /></button><button type="button" disabled={strangerBusy} onClick={() => void addStrangerAsFriend()} className="flex h-9 touch-manipulation items-center gap-1 rounded-full bg-[#07c160] px-3 text-[12px] text-white disabled:opacity-50"><UserPlus size={15} />加好友</button></div></header><div className="flex-1 overflow-y-auto"><div className="bg-white px-5 py-5"><div className="flex items-center gap-3"><div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#edf5ff] text-[#576b95]"><UserPlus size={26} /></div><div><div className="text-[18px] font-semibold text-[#333]">{activeStranger.displayName}</div><div className="mt-1 text-[12px] leading-relaxed text-[#888]">{activeStranger.bio}</div></div></div></div><section className="mt-3 bg-white px-4 py-4"><div className="mb-3 text-[13px] font-semibold text-[#555]">最近十条朋友圈</div>{!settings.strangersCanViewTen ? <p className="text-[12px] leading-relaxed text-[#999]">对方没有开放“陌生人查看十条”，暂时看不到朋友圈。</p> : strangerVisiblePosts.length === 0 ? <p className="text-[12px] text-[#999]">你还没有公开的朋友圈动态。</p> : strangerVisiblePosts.map(post => <div key={post.id} className="border-t border-[#f0f0f0] py-3"><div className="whitespace-pre-wrap text-[13px] leading-relaxed text-[#333]">{post.content || '分享了一张照片'}</div><div className="mt-1 text-[10px] text-[#aaa]">{formatMomentTime(post.createdAt)}</div></div>)}</section><section className="mt-3 bg-white px-4 py-4"><div className="mb-3 text-[13px] font-semibold text-[#555]">临时聊天</div>{strangerTranscript.length === 0 ? <p className="text-[12px] text-[#999]">还没有开始聊天。聊得来后，可以把对方正式加为角色好友。</p> : <div className="space-y-2">{strangerTranscript.map(line => <div key={line.id} className={`flex ${line.sender === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[82%] rounded-2xl px-3 py-2 text-[13px] leading-relaxed ${line.sender === 'user' ? 'bg-[#95ec69] text-[#1f3d1b]' : 'bg-[#f1f1f1] text-[#333]'}`}>{line.content}</div></div>)}</div>}</section></div><div className="flex shrink-0 items-end gap-2 border-t border-[#e5e5e5] bg-white p-3"><textarea value={strangerDraft} onChange={event => setStrangerDraft(event.target.value)} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') void sendStrangerMessage(); }} placeholder="和陌生人聊两句…" className="min-h-[40px] max-h-24 flex-1 resize-none rounded-xl bg-[#f4f4f4] px-3 py-2 text-[13px] outline-none" /><button type="button" disabled={!strangerDraft.trim() || strangerBusy} onClick={() => void sendStrangerMessage()} className="flex h-10 w-10 touch-manipulation items-center justify-center rounded-full bg-[#07c160] text-white disabled:opacity-40"><PaperPlaneTilt size={18} weight="fill" /></button></div></div>}
     </div>
   );
 };

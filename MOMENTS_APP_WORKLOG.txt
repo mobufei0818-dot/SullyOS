@@ -467,3 +467,29 @@ SullyOS 二改 · 朋友圈 App 正式工作记录
      `utils/amsgInstantChat.test.ts`，100/100 通过（测试日志中已有的 AMSG 模拟网络 warn 不影响通过结果）。
    - 本段修改网页和正式合并 Worker。发布网页后，用户必须重新部署最新
      `worker/amsg/worker.bundle.js`；`worker/moments/worker.bundle.js` 仍只是预览产物，不能部署。
+二十、移动端交互与调用失控修复（2026-09-01）
+------------------------------------------------
+
+1. iOS 朋友圈操作位
+   - 顶栏改为真实微信朋友圈式的大触控目标：左侧返回、其右侧“摇一摇/临时陌生人”，右侧相机、最右设置。
+   - 用户封面上的“换封面”和 NPC 封面上的“添加好友”均改为覆盖图内的 40px 级触控按钮；用户在首页和个人时间线
+     都能更换封面，不再只能先进入某个隐藏视图。
+   - 摇一摇不再混在朋友横栏里：入口先打开“临时聊天”列表，再主动摇出新陌生人；临时聊天顶栏和输入区均有请求副 API
+     的发送入口。
+
+2. Worker D1 初始化与重试循环
+   - 已确认线上报错 `D1_EXEC_ERROR ... incomplete input` 的根因：`/moments` 路由把多条 CREATE TABLE/INDEX 语句作为
+     一个 D1 `exec` 请求执行，部分 Cloudflare D1 运行时不接受多 statement。
+   - `ensureSchema` 改为逐条 `prepare(...).run()` 的幂等建表；正式生效必须重新部署
+     `worker/amsg/worker.bundle.js`。预览产物仍不可部署。
+   - 前端 Worker 拉取增加进行中锁和两分钟失败冷却；设置写入器保持引用稳定，避免失败状态触发 effect 重建并反复拉取。
+
+3. 副 API 节流与 NPC 容错
+   - 自动角色发帖检查每轮最多请求一位角色，轮次至少间隔十分钟；页面重渲染、Strict Mode 或网络失败不会令多位角色
+     同秒调用副 API。手动发帖、手动摇一摇、手动同步 NPC 仍只在用户主动操作时调用。
+   - 明确 NPC 解析兼容模型将来源写成 `sourceCharacterName` 或 `source` 的输出；能准确匹配现有角色名时映射为稳定角色 ID，
+     不再因模型没有回填长 ID 而整批过滤。
+
+4. 验证
+   - `pnpm run build`、`node --check worker/amsg/worker.bundle.js`、`git diff --check` 通过。
+   - `utils/momentsDataSafety.test.ts` 与 `utils/momentsSync.test.ts`：4/4 通过。

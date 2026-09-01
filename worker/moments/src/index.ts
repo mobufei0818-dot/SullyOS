@@ -49,34 +49,38 @@ const safeJson = (value: unknown) => JSON.stringify(value ?? {});
 let schemaReady = false;
 async function ensureSchema(db: D1Database) {
   if (schemaReady) return;
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS moments_relationship_events (
+  // D1 的 exec 在部分运行时只接受一条 statement；把 schema 拆开执行，
+  // 否则会在第一条 CREATE TABLE 的末尾报 "incomplete input"，并令每一次
+  // /moments 请求都失败、前端不断重试。
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS moments_relationship_events (
       event_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, char_id TEXT, post_id TEXT, event_type TEXT NOT NULL,
       payload_json TEXT NOT NULL, visibility_json TEXT, thread_version INTEGER NOT NULL DEFAULT 1,
       idempotency_key TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_moments_events_user_time ON moments_relationship_events(user_id, created_at);
-    CREATE TABLE IF NOT EXISTS moments_tasks (
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_moments_events_user_time ON moments_relationship_events(user_id, created_at)`,
+    `CREATE TABLE IF NOT EXISTS moments_tasks (
       task_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, char_id TEXT, post_id TEXT, task_type TEXT NOT NULL,
       due_at INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', payload_json TEXT NOT NULL,
       thread_version INTEGER NOT NULL DEFAULT 1, idempotency_key TEXT NOT NULL UNIQUE,
       attempts INTEGER NOT NULL DEFAULT 0, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_moments_tasks_due ON moments_tasks(user_id, state, due_at);
-    CREATE TABLE IF NOT EXISTS moments_sync_receipts (
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_moments_tasks_due ON moments_tasks(user_id, state, due_at)`,
+    `CREATE TABLE IF NOT EXISTS moments_sync_receipts (
       receipt_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, post_id TEXT, char_id TEXT, state TEXT NOT NULL,
       payload_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS moments_diagnostics (
+    )`,
+    `CREATE TABLE IF NOT EXISTS moments_diagnostics (
       id TEXT PRIMARY KEY, user_id TEXT, level TEXT NOT NULL, code TEXT NOT NULL, message TEXT NOT NULL,
       detail_json TEXT, created_at INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS moments_deliveries (
+    )`,
+    `CREATE TABLE IF NOT EXISTS moments_deliveries (
       delivery_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE,
       payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, acknowledged_at INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS idx_moments_deliveries_user_time ON moments_deliveries(user_id, acknowledged_at, created_at);
-  `);
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_moments_deliveries_user_time ON moments_deliveries(user_id, acknowledged_at, created_at)`,
+  ];
+  for (const statement of statements) await db.prepare(statement).run();
   schemaReady = true;
 }
 
