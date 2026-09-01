@@ -1284,6 +1284,7 @@ const MomentsApp: React.FC = () => {
   const profileForPostAuthor = (post: MomentsPost) => post.authorId === USER_PROFILE_ID ? profile : friends.find(friend => friend.id === post.authorId) || npcProfiles.find(npc => npc.id === post.authorId) || timelineProfile;
   const headerTitle = view === 'profile' ? timelineProfile.displayName : view === 'messages' ? '消息' : view === 'settings' ? '朋友圈设置' : '朋友圈';
   const displayProfile = view === 'profile' ? timelineProfile : profile;
+  const isOwnTimeline = displayProfile.id === USER_PROFILE_ID;
   const selectedAudienceCount = unique([
     ...draftAudience,
     ...characters.filter(character => character.groupId && draftGroupIds.includes(character.groupId)).map(character => `moments:character:${character.id}`),
@@ -1410,19 +1411,20 @@ const MomentsApp: React.FC = () => {
           <p className="mt-2 text-[12px] leading-relaxed">角色和 NPC 的点赞、评论与回复会显示在这里，不会自动塞进你的私聊。</p>
         </div> : <div className="flex-1 overflow-y-auto bg-white">{socialInbox.map(item => <button type="button" key={item.id} onClick={() => { markSocialInboxRead(); const post = posts.find(candidate => candidate.id === item.postId); if (post) { setTimelineProfile(profileForPostAuthor(post)); setView('profile'); } }} className="flex w-full gap-3 border-b border-[#ededed] px-4 py-4 text-left"><div className="flex h-10 w-10 items-center justify-center rounded bg-[#edf5ff] text-[#576b95]">♥</div><div className="min-w-0 flex-1"><div className="text-[13px] text-[#576b95]">{item.actorName}</div><div className="mt-1 truncate text-[13px] text-[#555]">{item.kind}</div><div className="mt-1 text-[11px] text-[#999]">{formatMomentTime(item.createdAt)}</div></div></button>)}</div>
       ) : (
-        <div className="flex-1 overflow-y-auto overscroll-contain">
+        <>
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-40 flex items-center justify-between px-2.5" style={{ paddingTop: 'calc(var(--chrome-top, var(--safe-top, 0px)) + 8px)' }}>
+            <div className="flex items-center gap-1">
+              <button type="button" onClick={view === 'feed' ? closeApp : () => setView('feed')} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label={view === 'feed' ? '退出朋友圈' : '返回朋友圈'}><ArrowLeft size={27} /></button>
+              {view === 'feed' && <button type="button" onClick={() => setStrangerListOpen(true)} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="摇一摇与陌生人"><ArrowsClockwise size={23} /></button>}
+            </div>
+            {view === 'feed' && <div className="flex items-center gap-1">
+              <button type="button" onClick={() => { resetDraft(); setComposeOpen(true); }} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="发表朋友圈"><Camera size={24} /></button>
+              <button type="button" onClick={() => setView('settings')} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="朋友圈设置"><GearSix size={24} /></button>
+            </div>}
+          </div>
+          <div className="flex-1 overflow-y-auto overscroll-contain">
           <div className="relative min-h-[268px] bg-[#a4b0bd]" style={displayProfile.cover?.startsWith('linear-gradient') ? { background: displayProfile.cover } : undefined}>
             {displayProfile.cover && !displayProfile.cover.startsWith('linear-gradient') ? <TokenImg value={displayProfile.cover} alt="朋友圈封面" className="absolute inset-0 h-full w-full object-cover" /> : null}
-            <div className="pointer-events-none absolute inset-x-0 top-0 z-30 flex items-center justify-between px-2.5" style={{ paddingTop: 'calc(var(--chrome-top, var(--safe-top, 0px)) + 8px)' }}>
-              <div className="flex items-center gap-1">
-                <button type="button" onClick={view === 'feed' ? closeApp : () => setView('feed')} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="返回"><ArrowLeft size={27} /></button>
-                {view === 'feed' && <button type="button" onClick={() => setStrangerListOpen(true)} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="摇一摇与陌生人"><ArrowsClockwise size={23} /></button>}
-              </div>
-              {view === 'feed' && <div className="flex items-center gap-1">
-                <button type="button" onClick={() => { resetDraft(); setComposeOpen(true); }} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="发表朋友圈"><Camera size={24} /></button>
-                <button type="button" onClick={() => setView('settings')} className="pointer-events-auto flex h-11 w-11 touch-manipulation items-center justify-center rounded-full bg-black/30 text-white shadow-sm backdrop-blur-md active:bg-black/50" aria-label="朋友圈设置"><GearSix size={24} /></button>
-              </div>}
-            </div>
             {displayProfile.id === USER_PROFILE_ID && <button type="button" onClick={() => coverInputRef.current?.click()} className="absolute bottom-3 left-3 z-20 flex h-9 touch-manipulation items-center gap-1.5 rounded-full bg-black/45 px-3 text-[11px] text-white shadow-sm backdrop-blur-sm active:bg-black/60"><ImageSquare size={16} />换封面</button>}
             {view === 'profile' && displayProfile.actorType === 'npc' && <button type="button" disabled={busy} onClick={() => void addNpcAsFriend(displayProfile)} className="absolute bottom-3 left-3 z-20 flex h-10 touch-manipulation items-center gap-1.5 rounded-full bg-[#07c160] px-3.5 text-[12px] text-white shadow-sm disabled:opacity-50"><UserPlus size={16} />添加好友</button>}
             <div className="absolute -bottom-[41px] right-4 flex items-end gap-2.5">
@@ -1433,9 +1435,9 @@ const MomentsApp: React.FC = () => {
             </div>
           </div>
           <div className="h-14 bg-white" />
-          <div className="border-y border-[#eeeeee] bg-white px-4 py-3 text-[13px] text-[#576b95]">
+          {isOwnTimeline && <div className="border-y border-[#eeeeee] bg-white px-4 py-3 text-[13px] text-[#576b95]">
             <button type="button" onClick={() => { markSocialInboxRead(); setView('messages'); }} className="relative mr-6">消息{unreadSocialCount > 0 && <span className="absolute -right-2 -top-1 h-1.5 w-1.5 rounded-full bg-[#fa5151]" />}</button>
-          </div>
+          </div>}
 
           {view === 'feed' && friends.length > 0 && <div className="border-b border-[#ededed] bg-white px-4 py-3">
             <div className="mb-2 text-[11px] text-[#999]">我的朋友</div>
@@ -1450,7 +1452,7 @@ const MomentsApp: React.FC = () => {
             {visiblePosts.length === 0 ? (
               <div className="px-8 py-16 text-center">
                 <div className="text-[15px] text-[#555]">还没有朋友圈动态</div>
-                <button type="button" onClick={() => { resetDraft(); setComposeOpen(true); }} className="mt-4 rounded-md bg-[#07c160] px-4 py-2 text-[13px] font-medium text-white">发表第一条</button>
+                {isOwnTimeline ? <button type="button" onClick={() => { resetDraft(); setComposeOpen(true); }} className="mt-4 rounded-md bg-[#07c160] px-4 py-2 text-[13px] font-medium text-white">发表第一条</button> : <p className="mt-2 text-[12px] leading-relaxed text-[#999]">你可以在私聊里要求 {displayProfile.displayName} 发朋友圈。</p>}
               </div>
             ) : visiblePosts.map(post => (
               <article key={post.id} className="relative flex gap-2.5 border-b border-[#ededed] px-4 py-4">
@@ -1481,7 +1483,8 @@ const MomentsApp: React.FC = () => {
               </article>
             ))}
           </main>
-        </div>
+          </div>
+        </>
       )}
 
       <input ref={fileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={event => { void addUploadedMedia(event.target.files); event.currentTarget.value = ''; }} />
