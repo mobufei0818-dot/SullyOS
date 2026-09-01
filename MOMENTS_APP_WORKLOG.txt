@@ -1,0 +1,469 @@
+SullyOS 二改 · 朋友圈 App 正式工作记录
+=====================================
+
+状态：阶段 4 正在实施；已完成副 API、预写互动、本地队列、Worker 同步与私聊生活线，仍待补记忆宫殿事件盒、真正离线投递/推送、关闭页面后的自主发帖互动（阶段 5 不进入）
+创建日期：2026-09-01
+实施基线：MOMENTS_APP_IMPLEMENTATION_PLAN.txt
+讨论来源：MOMENTS_APP_DISCUSSION_DRAFT.txt
+
+一、项目边界（不可破坏）
+----------------------
+
+1. 新朋友圈只替换 Duck Dock 内 AppID.Social 的入口，不新增第二个 Dock 图标。
+2. 设置页“实时感知小红书”完全是另一条 XHS 功能线；不得删除、重命名、迁移其配置或数据。
+3. 历史 Spark/小红书 App 源码 apps/SocialApp.tsx 与 IndexedDB 的 social_posts 保留原样。
+   新朋友圈不能读取、清空、迁移或覆盖旧数据。若要回退，只需将 AppID.Social 映射切回 SocialApp。
+4. 外卖 App 已从运行时删除，本项目不得借用、恢复或改写外卖逻辑。
+5. 角色社交、记忆、离线任务必须分阶段接入；没有完成权限与删除级联前，绝不能让 Worker 自动
+   生成/派发朋友圈内容。
+
+二、阶段 0 审计结论（已完成）
+----------------------------
+
+1. Dock
+   - constants.tsx: DOCK_APPS 已含 AppID.Social；旧标题为 Spark。
+   - components/PhoneShell.tsx 与 components/os/appPreload.ts 各自通过 AppID.Social 懒加载旧
+     apps/SocialApp.tsx。
+   - 因此可以保持 AppID 不变，仅改两处加载映射，旧数据不会被触及。
+
+2. 数据与备份
+   - 主 IndexedDB：AetherOS_Data；本次前 schema 为 v71。
+   - 历史 Spark 使用 social_posts；新朋友圈独立升至 v72，并拥有 moments_* 自己的表。
+   - 完整备份由 DB.exportFullData / importFullData 统一负责。新字段为 momentsData，旧备份没有
+     该字段时跳过，不会报格式错误；恢复 momentsData 时只清 朋友圈自己的表。
+
+3. 图片
+   - 项目用 blobref 令牌 + blob_assets 保存图片；TokenImg 能正确渲染 blobref/data/http。
+   - 聊天照片已与相册共用同一图片引用。朋友圈也只保存 URL/blobref 引用，不复制二进制。
+   - 删除朋友圈会明确让用户选择“保留相册副本”或“同时删除关联相册副本”。
+
+4. 生图 / API / 记忆 / Worker
+   - 已确认聊天生图共用 utils/imageGeneration.ts；默认不应直接耦合到朋友圈首版。
+   - 设置已有 OpenAI 兼容与 NovelAI 生图配置、拉取模型、测试连接；朋友圈专属副 API 留至阶段 4。
+   - 记忆宫殿已有 event box、memory source/index 基础；朋友圈需在阶段 3 建立独立 event ledger
+     与按角色视角写入，不能把点赞逐条塞进私聊。
+   - 主动消息 Worker 已有关系值、诊断和排程；朋友圈的 D1 同步/醋意强制联系留至阶段 4–5，
+     禁止在阶段 1 直接改 Worker。
+
+三、阶段 1：本地朋友圈外壳与用户发帖（已完成，待后续合并发布）
+--------------------------------------------------------------
+
+本阶段实际完成：
+
+1. Dock 映射
+   - AppID.Social 桌面名称改为“朋友圈”。
+   - PhoneShell 与 appPreload 改为按需加载 apps/MomentsApp.tsx。
+   - 旧 apps/SocialApp.tsx 仍保留，未删除。
+
+2. 独立数据域（IndexedDB v72）
+   建立以下表：
+   - moments_profiles
+   - moments_posts
+   - moments_media_refs
+   - moments_visibility_snapshots
+   - moments_reactions
+   - moments_comments
+   - moments_seen_receipts
+   - moments_shares
+   - moments_temp_strangers
+   - moments_temp_transcripts
+   - moments_event_ledger
+   - moments_settings
+   - moments_pending_jobs
+   - moments_sync_outbox
+   - moments_memory_index
+
+   已添加首批安全读写 API：帖子、帖子图片引用、个人资料、朋友圈设置。
+   数据模型预留 actor/user/character/npc/stranger、冻结可见范围、媒体、置顶、任务、同步、记忆
+   索引等字段，后续无需碰旧 Spark 表。
+
+3. 完整备份
+   - FullBackupData 新增可选 momentsData（schemaVersion 1）。
+   - 导出会带全部 moments_* 表；导入只在备份确实带该字段时恢复。
+   - 导入时不清 social_posts、聊天、相册或其它 App；图片仍走既有 blobref 备份机制。
+
+4. 已可使用 UI
+   - 微信朋友圈式顶栏、封面、头像、个人时间线、垂直动态流。
+   - 用户可发表纯文字或最多九张图片。
+   - 图片可从当前小手机相册选取，或本地上传；上传图压缩后直接存 Blob 引用。
+   - 可换个人封面、查看自己的时间线、置顶/取消置顶动态。
+   - 删除动态时，若图片来自相册，明确选择“只删动态、保留相册照片”或“动态和相册副本都删除”。
+   - “消息”页与“朋友圈设置”页已占位；陌生人看十条开关已做成本地真实设置。
+   - 还未启用任何角色自动内容、API 调用、聊天卡片、Worker 同步或关系值改动。
+
+四、阶段 2：权限、角色资料与本地互动（已完成，暂停点）
+----------------------------------------------------
+
+本轮已完成的阶段 2 本地层：
+
+1. “谁可以看”不再只是展示文案。发帖可选：公开、部分可见、不给谁看、仅自己。
+2. 部分可见/不给谁看会复用既有角色分组，并允许再逐个补充角色；发帖时把分组立即展开为
+   最终角色 ID 写进该帖自己的 visibility snapshot。以后改角色分组不会回头改变旧帖的实际受众。
+3. 现有正式角色会同步成 moments_profiles 的好友基础档案（名字/头像/角色 ID），只用于
+   朋友圈展示；不会创建消息、不会写记忆、不会调用 API，也不会改角色本身。
+4. 首页已有“我的朋友”快速查看栏；点击角色头像/名字会进入对应角色的独立时间线。角色/NPC
+   自动发帖仍未开放。
+5. 点赞、评论与回复已经使用 moments_reactions / moments_comments 本地保存；它们不会自动塞进
+   私聊或记忆。自己的评论支持长按删除（桌面端同时支持右键），删除动态会清理关联的本地互动。
+6. 朋友圈图片使用应用内大图预览，能正确显示既有 blobref 图片，不再依赖无法识别 blobref 的
+   浏览器新窗口。
+7. 朋友圈设置已加入逐角色“关闭 / 低 / 中 / 高 / 只看不发”档位并持久化；此刻只是保存用户
+   偏好，自动发帖 Worker 还没有接入，避免半成品在后台擅自发内容。
+8. 已完成“手动转发给角色”入口：只有用户主动选择角色时，才生成一张简洁的朋友圈转发 HTML
+   快照并写入该角色私聊；它会作为用户主动分享的聊天内容参与后续上下文/记忆，而非由朋友圈
+   自动污染聊天框。
+   - 原本对该角色可见：写 moments_seen_receipts = delivered，后续可视为已送达、可互动。
+   - 原本被屏蔽：写 moments_seen_receipts = screened_out，只发送讨论用快照；以后不得反推为
+     该角色看过原帖，更不能让他对原帖点赞评论。
+   - 每次转发也独立写 moments_shares，保留快照文字、首图引用、实际可见性和时间。
+9. “消息”页已经按非用户点赞/评论建立数据驱动的通知列表与红点基础；本阶段还没有自动角色
+   互动，因此新安装时保持空状态，绝不会凭空制造角色反应。
+
+五、阶段 3：图片占位、摇一摇与本地记忆事件（已完成，暂停点）
+----------------------------------------------------------------
+
+本阶段只接入本地能力，不调用朋友圈副 API、不改主动消息 Worker、不实现自动角色发帖/自动互动。
+
+1. 朋友圈照片占位与点击生图
+   - 用户发帖编辑器新增“添加照片占位”；占位卡固定显示照片描述，不会在发表时自动调用模型。
+   - 动态中的占位卡只有用户点击后才调用已有 `utils/imageGeneration.ts` 的生图配置；生成中、失败、
+     成功均写回 `moments_media_refs.generationStatus`，失败信息写入 `generationError`。
+   - 成功图片原位替换占位卡，并以确定性的媒体 ID 写入原有相册；重复点击不会并发重复请求。
+   - 编辑器中的待合成图片也使用同一占位卡样式，不会把内部 pending 标记当作破图地址显示。
+   - 角色作者动态未来也复用同一渲染/生成入口；角色出镜照才允许按既有身份参考规则生成，普通场景不注入角色外貌。
+
+2. 摇一摇陌生人
+   - 首页新增“摇一摇”入口；当前阶段使用本地多样化模板生成临时档案，不产生 API 消耗。
+   - 临时陌生人独立存入 `moments_temp_strangers` 与 `moments_profiles`，可长期保留最近遇到的人。
+   - 临时聊天原文逐条存入 `moments_temp_transcripts`，可继续聊天；不创建正式角色、不进入正式记忆宫殿，
+     也不会污染普通私聊。
+   - 陌生人只能在用户打开设置并允许时查看用户最近十条公开动态；临时阶段不能点赞、评论或回复。
+   - 点击“加好友”会创建正式 `CharacterProfile`，迁移临时聊天为一条角色记忆，并保留逐条迁移标记与索引，
+     朋友圈资料同步切换为正式好友。
+
+3. 事件账本与记忆索引
+   - 用户发帖、点赞、评论、转发都会写入独立 `moments_event_ledger`，同时为有权角色写入
+     `moments_memory_index`，保存稳定 sourceId/postId 和可见对象快照。
+   - 删除动态时同步清理对应媒体引用、点赞评论、事件账本与直接派生的朋友圈记忆索引；不删除普通聊天正文。
+   - 这些记录尚未接入角色上下文检索或记忆宫殿事件盒；阶段 4 已为必要事件增加独立 sync outbox，见下一节。
+
+六、第四批第一段：朋友圈副 API、统一互动规划与 Worker（本段完成，第四批继续）
+----------------------------------------------------------------------------
+
+本轮仍只改朋友圈独立数据域和新增适配层，不改原版 AMSG Worker 的核心逻辑，也不恢复外卖模块。
+
+1. 朋友圈副 API 设置
+   - `apps/MomentsApp.tsx` 的“朋友圈设置”新增独立副 API 区域，可跟随主聊天 API、选择已有预设，或自定义 URL/Key/模型。
+   - 支持“拉取模型”“测试连接”“保存副 API”；测试只请求 `/models`，不制造帖子或消耗聊天生成额度。
+   - `utils/momentsApi.ts` 统一规范 OpenAI-compatible URL、鉴权、模型列表与错误提示；副 API 失败不会回滚用户帖子。
+
+2. 一次规划、错峰执行和评论重排
+   - 用户发布动态后，副 API 一次性返回首轮点赞/评论名单、评论正文、dueAt、threadVersion、幂等信息；最多 8 条评论，允许少于 8 条。
+   - 未发生用户评论时，不按角色人数重复调用 API；到点由本地任务执行器落地点赞/评论。
+   - 用户新增评论/回复后，仅取消未发送任务并调用一次统一重排，最多规划 3 条新回复；已经发出的互动不可改写。
+   - `MomentsPendingJob` 保存 `payload/threadVersion/remoteTaskId`，按稳定任务 ID 去重，失败保留 `error` 供排查。
+
+3. 角色自动发帖判断
+   - 低/中/高发帖档位在副 API 已配置且自动行为开启时生效；模型根据人设、近期动态和当前时间判断是否“确实值得发”，不强行凑数。
+   - 关闭/只看不发/没有副 API 时不发、不调用；睡眠时间由提示词约束不发。
+   - 每个角色每天有本地检查幂等标记，避免刷新页面重复生成同一条日常动态。
+
+4. 本地队列与离线同步
+   - `utils/db.ts` 新增 pending jobs 与 sync outbox 读写；每 30 秒执行到期任务，重新打开朋友圈时继续执行。
+   - `utils/momentsSync.ts` 将事件与任务分开同步到现有 AMSG Worker 的 `/moments/*` 路由；成功删除 outbox，失败保留并在设置显示错误，可手动重试。
+   - Worker 只保存结构化事件/任务摘要，不接触朋友圈副 API Key；本地应用仍是生成与实际互动执行者。
+
+5. 挂载到现有主动消息 2.0 Worker 的朋友圈路由
+   - 路由源码：`worker/moments/src/index.ts`，由 fork 的 `worker/amsg/src/index.ts` 以 `/moments/*` wrapper 引入。
+   - 正式部署 bundle：`worker/amsg/worker.bundle.js`（已把 AMSG 原有逻辑和朋友圈路由打在同一个 bundle）；
+     `worker/moments/worker.bundle.js` 仅作独立预览/测试，不能拿它覆盖正式 AMSG Worker。
+   - 建表脚本：`worker/moments/schema.sql`；正式运行时在已有 `DB` 中幂等创建 `moments_*` 表，不需要新建 D1。
+   - 配置/部署说明：`worker/moments/README.md`。用户只需在已有 AMSG Worker Dashboard 的 Edit code 中替换
+     `worker/amsg/worker.bundle.js` 并 Deploy，保留原来的 DB、Cron、AMSG_MASTER_KEY、VAPID、Durable Object
+     和 `AMSG_SERVER_TOKEN`。
+   - 路由：`GET /moments/health`、`POST /moments/sync`、`GET /moments/tasks`、`POST /moments/tasks/claim`、
+     `POST /moments/tasks/complete`、`GET /moments/diagnostics`。
+   - `AMSG_SERVER_TOKEN` 通过 `X-Client-Token` 同时保护 AMSG 和朋友圈路由；`MOMENTS_TOKEN` 仅为独立预览兼容。
+     前端从“主动消息 2.0”全局配置读取 Worker URL、userId、serverToken，不再保存或填写第二套配置。
+   - Worker 只负责朋友圈队列/同步、幂等、诊断和 stale running 任务回收，不替换 AMSG，不直接调用聊天模型，
+     不在云端直接发聊天消息；原版 AMSG 核心处理和 scheduled 流程未改。
+
+七、阶段 4 验证记录（2026-09-01）
+----------------------------------
+
+- `pnpm run build`：通过；`MomentsApp`、`imageGeneration` 生产 chunk 正常生成，5 个正式 Worker 与 1 个朋友圈预览 bundle 均构建正常。
+- `git diff --check`：通过。
+- `pnpm exec esbuild worker/moments/src/index.ts --format=esm --outfile=/tmp/sully-moments-worker.js`：通过，Worker 源码可独立转译。
+- `worker/moments/worker.bundle.js`：通过 `node --check`，并用最小 D1 mock 验证 Worker 模块的健康路由返回 200、OPTIONS 返回 204。
+- `pnpm exec tsc --noEmit --pretty false`：没有发现 `MomentsApp`、`momentsApi`、`momentsSync` 或 `worker/moments` 新增诊断；仓库仍有既有无关类型错误，未宣称全库类型检查通过。
+- 本地浏览器桌面验收：从手机 Dock 打开“朋友圈”→进入“朋友圈设置”，副 API 的跟随主 API/自定义、模型输入、拉取模型、测试连接、保存按钮，以及“复用主动消息 2.0 Worker”的只读状态、重新读取配置、立即重试同步均可见；控制台 error 日志为空。
+- 本地页面当前不会自动调用副 API：默认角色发帖档位为关闭，副 API Key 为空；只有用户主动配置并打开相应设置才会产生规划调用。
+
+八、当前边界与下一步
+----------------------
+
+- 第四批第一段已完成；网页尚未发布到 GitHub Pages。本轮没有创建独立朋友圈 Worker；运行中的 AMSG Worker
+  需要用户将新版 `worker/amsg/worker.bundle.js` 替换并 Deploy 后，`/moments/*` 路由才会在线。
+- 用户部署的最短流程见 `worker/moments/README.md`：在已有 AMSG Worker Dashboard 的 Edit code 中全选替换
+  `worker/amsg/worker.bundle.js` 并 Deploy；不新建 D1、不新建 Worker、不在朋友圈设置填写 URL/令牌。
+- 阶段 5（朋友圈事件接入关系层、醋意 0–100、醋意 >=80 强制 AMSG）仍未实施；不要将阶段 4 队列误称为主动消息或醋意功能。
+- 以后原版更新时，先比较原版与 fork；朋友圈新增文件/字段和 `/moments/*` 路由模块按边界合并，不覆盖原版 AMSG。
+
+九、后续阶段
+-------------
+
+阶段 5（朋友圈事件接入关系层、醋意 0–100、醋意 >=80 强制主动消息）尚未实施。继续开发前应先更新本记录、
+实施方案和总档，再按阶段 5 的权限、记忆、限流和原版 AMSG 边界执行。
+
+十、Worker 配置纠偏与源码核对（2026-09-01）
+-----------------------------------------------
+
+此前阶段 4 的初稿把朋友圈 Worker 写成了独立服务，并在朋友圈设置中增加独立 URL/令牌输入；这与用户
+已经部署的主动消息 2.0 Worker 不一致。本次已按原版仓库与现有二改源码重新核对并纠正：
+
+1. 上游核对
+   - 当前 `upstream/master`（`qegj567-cloud/SullyOS`，同步检查到 `2b6af21f`）的 `worker/amsg`
+     没有朋友圈代码、`worker/moments` 目录或 `/moments` 路由。
+   - 上游仓库只读；本次没有向原版提交或覆盖任何代码。
+
+2. 二改源码边界
+   - `worker/amsg/src/index.ts` 仅新增一个 fork-only 路由分流：路径为 `/moments` 或 `/moments/*`
+     时调用 `worker/moments/src/index.ts`；其它 fetch 路径、原版 AMSG handler 和 `scheduled()` 主流程
+     保持原有顺序。朋友圈的 stale 任务清理由同一每分钟 Cron 以隔离 try/catch 执行，失败不阻断 AMSG。
+   - `worker/moments/src/index.ts` 只使用同一个 `DB` 创建 `moments_*` 表；鉴权优先兼容独立预览令牌，
+     正式挂载时复用 `AMSG_SERVER_TOKEN`，请求头统一支持 `X-Client-Token`。
+   - `utils/momentsSync.ts` 的同步地址已固定为 `${现有Worker地址}/moments/sync`，拉取任务使用
+     `/moments/tasks`，不再请求根路径 `/sync`。
+   - `apps/MomentsApp.tsx` 通过 `ActiveMsgStore.getGlobalConfig()` 读取主动消息 2.0 已保存的
+     `workerUrl/userId/serverToken`；朋友圈设置改为只读状态和“重新读取配置/立即重试同步”，不保存第二套凭据。
+     `MomentsSettings.worker` 字段仅为旧备份兼容保留，不再作为运行时来源。
+
+3. 正式部署结论
+   - 用户只需重新构建并把 `worker/amsg/worker.bundle.js` 全选替换到现有 Cloudflare AMSG Worker 后
+     Deploy；保留同一 DB、Cron、AMSG_MASTER_KEY、VAPID、Durable Object、AMSG_SERVER_TOKEN 与 Worker URL。
+   - `worker/moments/worker.bundle.js` 仅供模块预览/测试，不能覆盖正式 AMSG Worker；不新建第二个 Worker、
+     D1、URL 或共享密钥。详细步骤已同步到 `worker/moments/README.md`、实施方案和总交接档。
+
+4. 本次重新验证
+   - `pnpm run build`：通过，包含更新后的 `worker/amsg/worker.bundle.js`、朋友圈预览 bundle 与网页构建。
+   - `node --check worker/amsg/worker.bundle.js`、`node --check worker/moments/worker.bundle.js`：通过。
+   - `git diff --check`：通过。
+   - `pnpm exec tsc --noEmit`：未出现 Moments 或 Worker 路由新增诊断；输出中的其它错误均为仓库既有问题。
+   - 本次仅生成待部署 bundle，没有替用户操作 Cloudflare，也没有声称线上 Worker 已更新。
+
+十一、数据安全第一批（2026-09-01，本地完成，待发布/部署）
+------------------------------------------------------
+
+本批严格对应 `MOMENTS_APP_AUDIT_BASELINE_2026-09-01.txt` 的第一优先级问题，
+不进入角色互动、NPC、记忆宫殿或醋意功能。
+
+1. 完整备份修复
+   - `context/OSContext.tsx` 的系统 ZIP 导出清单与字段映射新增全部 16 个 `moments_*` 表，
+     统一写入 `FullBackupData.momentsData`。
+   - 此前“完整备份已包含朋友圈数据”的记录不准确；从本批开始才在真实设置导出路径成立。
+
+2. 快照与删帖修复
+   - IndexedDB 升至 v73，补齐 visibility snapshot 的稳定 `id/postId`；旧备份导入自动兼容补键。
+   - 新帖子会同时写入冻结 visibility 与独立快照记录。
+   - 删帖改为级联删除帖子派生数据；仅当图库图片在其他朋友圈、聊天或旧动态中均无引用时才删除。
+   - 删除完成后写 delete tombstone；`worker/moments/src/index.ts` 收到后取消该帖未完成任务。
+
+3. 验证与发布注意
+   - 新增 `utils/momentsDataSafety.test.ts`，覆盖旧快照导入和同图多帖引用的删帖保护；2/2 通过。
+   - `pnpm run build`、`git diff --check` 通过。
+   - 需要发布网页，并把最新 `worker/amsg/worker.bundle.js` 部署到既有 AMSG Worker；
+   不要部署 `worker/moments/worker.bundle.js` 预览产物。
+
+十二、可靠互动第二批（2026-09-01，本地完成，待发布/重新部署 Worker）
+----------------------------------------------------------------
+
+本批只解决任务重复/丢失、评论重排、未读和远端可观测性；不进入 NPC、角色生活线、记忆宫殿或醋意。
+
+1. Worker 认领与回执
+   - `utils/momentsSync.ts` 新增 claim、complete、diagnostics 客户端。
+   - 到期任务先 claim；另一设备已认领则本机不执行。claim 网络错误保留 pending，等待下一轮，
+     不把同步失败误写成内容生成失败。
+   - 完成/失败向 Worker 回执；pull 保留远端 running，终态不被旧状态覆盖。
+
+2. 同步安全
+   - events/tasks 每批最多 200 条；Worker 返回逐项确认 ID，前端仅删除确认过的 outbox。
+   - Worker task upsert 改为状态单调：旧 pending 不覆盖 running，done/cancelled 不会被旧同步复活。
+
+3. 互动和消息
+   - 本地按好友数先筛选互动候选：≤3 全部、≤5 约 80%、≤10 约 65%、>10 50%；随后一次副 API 统一规划。
+   - 用户连续评论 700ms 合并重排；已发互动角色被排除，首轮最多 8 评论、重排最多 3 条。
+   - 消息页记录 lastInboxReadAt；红点只显示真正未读。动态作者可删除自己动态下任意评论。
+   - 朋友圈设置新增 Worker 诊断读取按钮，展示任务状态数量和最近诊断，不泄露凭据。
+
+4. 验证
+   - 新增 `utils/momentsSync.test.ts` 覆盖 200 条分批和互动 outbox 占用任务批次；2/2 通过。
+   - 连同第一批 `utils/momentsDataSafety.test.ts`，共 4/4 通过；`pnpm run build`、`git diff --check` 通过。
+   - 本地浏览器手机壳：朋友圈设置页的诊断入口正确显示；未配 AMSG Worker 时按钮禁用且页面无运行时错误。
+   - 本批修改 Worker，正式生效需要再次部署最新 `worker/amsg/worker.bundle.js`。
+
+十三、第二批 Worker 部署确认（2026-09-01）
+------------------------------------------
+
+- 用户已确认：已将本批生成的 `worker/amsg/worker.bundle.js` 部署到既有 Cloudflare AMSG Worker。
+- 因此本批的 `/moments/*` 任务认领、完成回执、同步确认 ID、状态单调更新与诊断接口，已具备线上 Worker 侧代码。
+- 仍需与网页端第二批代码一并发布后，手机端才会实际调用这些接口；不需要新建第二个 Worker、D1、URL 或令牌。
+
+十四、第三批第一段：角色生活节奏与临时陌生人（2026-09-01，本地完成，待网页发布）
+--------------------------------------------------------------------------
+
+本段对应审计第三批的角色发帖/摇一摇/可见性基础，不包含阶段 5 醋意或关系 Worker 改动。
+
+1. 角色发帖
+   - 修复原先“自动点赞与评论”总开关会错误阻止角色自主发帖的问题；两者现已分离。
+   - 低频按稳定日期抽取每周约 3 次机会；中频每天 1 次；高频每天分早/中/晚最多 3 次机会。
+     每次仍由副 API 判断是否真的值得发，绝不为凑次数强发。
+   - 读取已有角色日程；当前时段活动明确为睡眠/休息时，不做自主发帖检查。
+   - 每角色新增独立互动方式：正常互动、只点赞、不自动互动；不改变其发帖频率。
+
+2. 摇一摇与临时聊天
+   - 摇一摇优先用朋友圈副 API 生成临时陌生人的名字、稳定简介和第一句问候；未配置/不可用时保留本地候选兜底。
+   - 临时聊天优先走同一副 API，且只携带固定人设和最近 12 句临时原文；未加好友前不写入正式角色或记忆宫殿。
+   - 添加好友的既有显式迁移流程保持不变。
+
+3. 朋友圈专用分组基础
+   - 设置数据新增 `visibilityGroups`，独立于系统角色分组；发帖时会冻结展开后的成员 ID。
+   - 在“谁可以看”后可对已单独勾选的朋友保存为朋友圈分组，并在编辑器中复用；不影响其他 App。
+
+4. 验证与部署
+   - `pnpm exec vitest run utils/momentsDataSafety.test.ts utils/momentsSync.test.ts --reporter=dot`：4/4 通过。
+   - `pnpm run build`、`git diff --check`：通过。
+   - 本段没有修改 Worker；只需随网页端代码发布到 GitHub Pages，不需要再次部署 Cloudflare Worker。
+
+十五、第三批第二段：明确 NPC 的朋友圈主体（2026-09-01，本地完成，待网页发布）
+--------------------------------------------------------------------
+
+1. 从人设提取
+   - 朋友圈设置新增“从角色人设同步 NPC”。它以一次朋友圈副 API 调用读取当前角色的人设，
+     只接受有姓名或稳定身份关系的 NPC；不编造一次性路人，每个来源角色最多三位。
+   - NPC 是轻量 `MomentsProfile`：名字、关系、简短身份、封面兜底与可选首条动态；不创建完整
+     CharacterProfile，不建立临时私聊，也不提前写入正式记忆。
+
+2. 动态与互动
+   - 提取结果的可选首条动态写入独立朋友圈数据；NPC 进入好友横栏，可打开自己的时间线。
+   - 自动互动中，NPC 不计入正式角色人数比例；每帖最多补充三位，且与正式角色一样使用稳定 ID、
+     可见性判断、计划任务和去重。
+   - NPC 的可见资格继承其来源角色：若来源角色被单帖/分组屏蔽，NPC 也不能看到、点赞或评论，
+     不会绕过隐私。
+
+3. 升级为好友
+   - NPC 主页可“添加好友”。此时才创建正式角色、迁移其已有朋友圈动态到新角色身份，并写入一条
+     可追溯的认识摘要；此前不进入正式聊天或记忆系统。
+
+4. 验证与部署
+   - `pnpm run build` 与 `git diff --check` 通过。
+   - 本段只改网页与本地 IndexedDB 读写，没有修改 Worker；网页发布即可生效，不需要重新部署 Worker。
+
+十六、第四批第一段：朋友圈事实进入私聊生活线（2026-09-01，本地完成，待网页发布）
+-------------------------------------------------------------------------
+
+1. 角色视角与隐私
+   - 新增 `utils/momentsContext.ts`。聊天请求在浏览器本地构造 system prompt 时，读取当前角色的
+     最近朋友圈事实，作为一个小型“近期朋友圈生活线”注入易变尾段。
+   - 只取三类事实：角色自己发布/点赞/评论，或该角色已有 `delivered`、`seen`、
+     `selected_for_interaction` 回执的动态。单纯“对该帖有可见权”不等同于已看见，绝不注入。
+   - 朋友圈的自动互动规划会同时写 `selected_for_interaction` 已阅回执；因此角色之后可自然理解
+     自己参与过的动态，刷新不会造成第二次事实。
+
+2. 与原版聊天和 Worker 的边界
+   - 生活线通过浏览器端动态导入，仅在 ChatApp 主私聊构造中读取 IndexedDB；失败只记 warn，
+     不阻断正常回复。
+   - 它不把完整朋友圈数据、图片或副 API Key 上传给 Worker；原版 AMSG Worker、定时任务与主动消息
+     主链路保持不变。
+   - 关闭小手机时，现有 `/moments/*` Worker 继续保留已同步的预写任务、认领/完成状态与诊断；
+     重新打开时拉回本地消费。Worker 不在云端擅自调用副 API 生成帖子或聊天消息，避免凭据泄露与
+     关闭页面后失控生成。
+
+3. 验证
+   - `utils/momentsDataSafety.test.ts`、`utils/momentsSync.test.ts`、`utils/chatRequestPayload.test.ts`
+     共 14/14 通过；`pnpm run build`、`git diff --check` 通过。
+   - 本段没有改 Worker；发布网页即可生效，不需要重新部署 Cloudflare Worker。
+   - 本段不代表第四批完成：记忆宫殿事件盒、真正离线投递/推送与关闭页面后的自主发帖/互动仍待实施；
+     阶段五（醋意、阈值 80、强制主动联系）也明确未进入。
+
+十七、第四批第二段：记忆宫殿与真正离线投递（2026-09-01，本地完成，待网页发布/重新部署 Worker）
+--------------------------------------------------------------------------------------------------------
+
+1. 朋友圈事实进入记忆宫殿
+   - 新增 `utils/momentsMemoryPalace.ts`。正式角色实际发布、点赞、评论，或收到用户手动转发时，
+     都会以稳定的 `sourceId` 写入 Memory Palace 的 `MemoryNode`，并按“角色 + 帖子”聚合进一个 EventBox。
+   - 自动互动计划中的 `selected_for_interaction` 代表角色实际刷到该动态；该“看见”也进入同一 EventBox。
+     仅有可见权限、但没有实际送达/选中/互动的角色仍不会获得记忆。
+   - 删帖前读取 `moments_memory_index.memoryNodeId`，只删除本桥创建且 sourceId 属于该帖的节点，并回收空 EventBox；
+     不会删除正常聊天记忆或其他帖子的事件盒。
+
+2. 关闭页面后的离线投递
+   - 角色发帖和互动都在前台用朋友圈副 API 一次性预写；角色动态先成为尚未发表的 `post` 任务，互动任务保证晚于正文。
+   - Worker Cron 到点将 pending 任务原子转换为 `moments_deliveries`，并把任务标为 done；不在云端调用副 API，
+     不保存 API Key，也不临时编造角色内容。
+   - 朋友圈重新打开时读取 `/moments/deliveries`，将预写动态/互动写回 IndexedDB 后 ack；稳定 sourceId 和本地去重
+     防止同一条内容重复出现。Worker 会在已有 VAPID 和推送订阅可用时尽力发“朋友圈有新动态”通知，失败只写 Worker 诊断。
+   - 设置新增“关闭小手机后继续投递”开关。关闭时完全保持本机队列；打开后立即同步，并复用主动消息 2.0 的同一 Worker、D1、
+     用户 ID、共享密钥和推送凭据。
+
+3. 部署与验证
+   - 本段修改了 `worker/moments/src/index.ts`，必须重新构建并由用户将最新正式产物
+     `worker/amsg/worker.bundle.js` 替换到既有 Cloudflare AMSG Worker 后 Deploy；绝不能部署预览产物
+     `worker/moments/worker.bundle.js`。
+   - `pnpm run build`、`pnpm exec tsc --noEmit` 中与朋友圈相关的新增诊断、`git diff --check` 均通过；
+     `utils/momentsDataSafety.test.ts`、`utils/momentsSync.test.ts`、`utils/chatRequestPayload.test.ts` 共 14/14 通过。
+   - 阶段五（醋意值、阈值 80、强制主动消息）仍完全未改。
+
+十八、第四批第三段：原始朋友圈事件账本收口（2026-09-01，本地完成，待网页发布）
+---------------------------------------------------------------------------------------------
+
+1. 统一事实模型
+   - `MomentsEventLedgerEntry` 升级为原始事实账本：每条新事件具有稳定 `eventId`、递增 `sequence`、
+     `sourceType='moments'`、参与者快照、冻结的 visibility snapshot、active/deleted 状态与删除目标。
+   - 旧备份不含新字段仍可读取；首次写入会补默认 eventId/sourceType/sequence，不会中断导入。
+
+2. 覆盖范围与即时生活线
+   - 帖子、每张图片、点赞、评论、评论回复、转发、已阅/选中刷到、删除帖子、删除评论都写为独立事件。
+   - 聊天请求直接读取账本与已阅回执生成近期生活线，发生后无需等待 EventBox 或记忆压缩；仅有可见权但没有
+     实际刷到/投递/互动的角色仍不会被写成“已经看见”。
+
+3. 删除与审计
+   - 删帖不再物理删除旧账本事实；关联历史事件标记为 deleted 并保留稳定顺序，随后另写删除事件。
+     私聊生活线忽略 deleted 事实，记忆宫殿桥仍按前一段规则删除对应节点/空盒。
+   - 本段只改前端/IndexedDB 事实模型，不增加 Worker 密钥、不会触碰原版主动消息逻辑；网页发布即可生效。
+
+十九、阶段五：醋意关系层与强制主动联系（2026-09-01，本地完成，待网页发布/重新部署 Worker）
+----------------------------------------------------------------------------------------------------
+
+1. 事实来源与去重
+   - 新增结构化 `RelationshipJealousySignal`。每项以稳定 eventId、类型、1–30 强度、原因摘要和时间组成；
+     Worker 仅保存加密关系状态中的最近 128 项，不保存朋友圈/私聊完整正文。
+   - 朋友圈端只有角色实际 `seen` / `selected_for_interaction` / `delivered`，或被用户直接回复时，才会生成
+     角色视角醋意事实。没有实际刷到的可见角色不会增长。
+   - 私聊同步增加明确的“偏爱其他已添加角色、比较/冷落、安抚”事实；消息 ID 使刷新、重试和反复打开聊天
+     不会重复增减。普通回复不再自动降低醋意。
+
+2. Worker 关系状态
+   - `worker/amsg/src/relationshipEngine.ts` 增加 `/relationship/jealousy` 批量路由、事件去重、角色性格/好感
+     系数、`criticalPendingTaskUuid`、critical latch、失败重试时间和可诊断的最近原因。
+   - 前端旧快照不再每次同步覆盖 Worker 的醋意账本；明确安抚才回落，低于 70 才重新武装下一轮临界触发。
+   - 关系卡继续显示醋意数值；诊断同时显示普通 pending 与 critical pending，不暴露正文或凭据。
+
+3. 醋意强制联系
+   - 朋友圈设置新增默认开启的“醋意强制联系”开关。关闭时仍计算、展示和同步，只有强制投递被禁止；
+     改开关会批量同步已有角色状态。
+   - 醋意 >=80 时浏览器请求会立即建立 `jealousy-critical` 原版 AMSG 任务，不等普通 Cron；Cron 亦会在网络
+     失败后的五分钟重试。该路径越过普通思念阈值、每日目标、最短间隔、免打扰和常规关系层开关，但仍走原版
+     AMSG fire-time 生成，因此不会本地伪造聊天消息。
+   - 同一轮达到阈值后 latch，防止每分钟重复排任务；真正发送不会自动降醋意，用户后续明确安抚才会合理回落。
+
+4. 第四批同步补齐
+   - 角色自主发帖采纳副 API 的计划时间并设置最小错峰，不再无视 dueAt；副 API 可以在候选角色范围内选择
+     公开或低调排除对象，结果冻结在帖子 visibility snapshot。
+   - `moments_memory_index` 不再为所有“有可见权”的角色预写记忆；只为真实参与/已阅/转发送达角色写索引。
+
+5. 验证与部署
+   - `pnpm run build`、`node --check worker/amsg/worker.bundle.js`、`git diff --check` 通过。
+   - 定向回归：`utils/momentsDataSafety.test.ts`、`utils/momentsSync.test.ts`、`utils/relationshipChat.test.ts`、
+     `utils/amsgInstantChat.test.ts`，100/100 通过（测试日志中已有的 AMSG 模拟网络 warn 不影响通过结果）。
+   - 本段修改网页和正式合并 Worker。发布网页后，用户必须重新部署最新
+     `worker/amsg/worker.bundle.js`；`worker/moments/worker.bundle.js` 仍只是预览产物，不能部署。

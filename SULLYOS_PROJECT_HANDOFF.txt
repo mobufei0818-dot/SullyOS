@@ -1,0 +1,340 @@
+SullyOS 二改：项目总交接档案
+============================
+
+用途
+----
+这是用户 xuaimin 的“糯米机 / SullyOS”二改项目的总入口记录。
+
+以后新开 Codex 对话、需要继续开发、同步原版、修 bug、发布页面或找回项目上下文时，
+应先阅读本文件；再按涉及功能读取下方指定的专题工作记录。用户不需要重新复述完整需求。
+
+本文件不记录 API Key、Token、密码、私人聊天内容、角色照片、完整备份内容或其他敏感信息。
+
+
+一、三个最重要的地址
+----------------------
+
+1. 原版上游仓库（仅用于读取、对比和同步；绝对不可写入）：
+   https://github.com/qegj567-cloud/SullyOS
+
+2. 用户自己的二改 fork（唯一允许推送代码的仓库）：
+   https://github.com/mobufei0818-dot/SullyOS
+
+3. 用户实际游玩的二改页面（唯一允许提供给用户的页面）：
+   https://mobufei0818-dot.github.io/SullyOS/
+
+当前已发布版本（2026-08-31，build 与 deploy 均已成功）：
+https://mobufei0818-dot.github.io/SullyOS/?v=7bd1c86
+
+说明：链接中的 ?v=<短提交 SHA> 只用于避开浏览器缓存，仍是同一个用户二改页面。
+任何修改都不可发布到原版 qegj567-cloud.github.io/SullyOS/。
+
+
+二、本地项目位置与 Git / 发布状态
+----------------------------
+
+本地项目根目录：
+/Users/xuaimin/Documents/小手机
+
+常用远端：
+- origin   = https://github.com/mobufei0818-dot/SullyOS.git
+- upstream = https://github.com/qegj567-cloud/SullyOS.git
+
+用户 fork 的实际发布分支：
+- master
+
+最近一次大规模原版同步：
+- 合并提交：c56ba93ede07e0c3503d42fbcf5777ed5b4387e5
+- 同步分支：codex/sync-upstream-20260831（临时独立工作区完成，未碰用户原本的脏工作树）
+- 上游合并基准：qegj567-cloud/SullyOS 的 master（2b6af21）
+- 原版 12 个历史提交所含的主动消息重试、收藏搜索、协同文件柜与 Android 修复，已确认当前
+  二改源码内容中已有对应实现；本次实际新增运行代码为约会页面批量工具栏避让修复。
+- 重点复查：Chat、ChatModals、MessageItem、activeMsgRuntime、生图与备份关键代码均未被覆盖。
+- GitHub Pages Actions：33342069472（build 与 deploy 均为 success）。
+
+当前功能最新发布（不是新的仓库，只是同一 Pages 的缓存刷新参数）：
+- 远端提交：c56ba93ede07e0c3503d42fbcf5777ed5b4387e5
+- Actions：33342069472（build 与 deploy 均为 success）
+- 内容：同步上游至 2b6af21；保留此前照片卡即时刷新、原子保存与身份参考全部修复。
+
+重要的本地 Git 现实：
+- 近期多个文件使用 GitHub Contents API 直接写入 origin/master，以规避本机网络推送不稳定；
+  因而本地分支/`git diff` 可能仍显示“已在线发布”的改动，不能把它当成待发布清单直接 git push。
+- 每次继续开发前都要先读取远端目标文件的 sha，再精确发布本次修改；不得因为本地工作树很脏而
+  使用 reset、checkout、force push 或覆盖远端。
+
+注意：项目根目录可能长期有用户自己的未跟踪文件，例如：
+- TAKEOUT_APP_WORKLOG.txt
+- IMAGE_GENERATION_WORKLOG.txt
+- BACKUP_IMPORT_WORKLOG.txt
+- SULLYOS_PROJECT_HANDOFF.txt（本文件）
+- AI视觉作品集_可编辑/、output/、tmp/、脚本文件等
+
+它们不是待删除文件。提交源码时只精确 git add 本次相关文件，禁止 git add -A 或把这些内容
+误提交到公开 GitHub 仓库。
+
+
+三、当前二改范围与专题记录
+----------------------------
+
+1. 外卖 App（已下线，仅保留设计档案）
+--------------------------------------
+专题记录：
+/Users/xuaimin/Documents/小手机/TAKEOUT_APP_WORKLOG.txt
+
+当前状态：外卖应用、地址簿、订单服务、聊天订单卡解析与外卖上下文注入均已从运行源码删除。
+这是用户明确要求的稳定性恢复，不是暂时隐藏；桌面不应再出现外卖入口，也不应自动生成外卖 HTML。
+
+TAKEOUT_APP_WORKLOG.txt 是历史、失败复盘与未来重建规范。若用户以后要求恢复外卖，
+必须先读该文件第十三至十五节：不能从历史代码整段复制回来，必须按“唯一订单服务 + eventId
+幂等 + 唯一小票渲染器 + 主动消息仅作后续副作用”的架构重新做。
+
+2. 聊天生图
+-----------
+专题记录：
+/Users/xuaimin/Documents/小手机/IMAGE_GENERATION_WORKLOG.txt
+
+已包含：
+- 设置 → 其他 API 内的 OpenAI 兼容 / NovelAI 生图设置；
+- 模型拉取、连接测试、尺寸/质量/格式、全局画风提示词；
+- 神经连接内的角色外貌补充、脸部参考图、可编辑身份锚点、身份参考/强参考复刻模式；
+- 聊天照片占位卡：只允许用户点击后从浏览器前端合成；已移除“收到就自动生图”；
+- `<角色照片>`（角色出镜，注入身份锚点）与 `<照片>`（纯场景/物品，禁止额外人物）分流；
+- 原位替换、长按编辑/重生成/删除、即时转圈与原子落库；
+- API 调用记录、可读错误详情和参考图兼容约束。
+
+后续修改生图前必须先读 IMAGE_GENERATION_WORKLOG.txt，尤其是第八节（身份/场景分流）和
+第九节（照片卡即时状态与原子保存）。
+
+3. 完整备份与恢复
+-----------------
+专题记录：
+/Users/xuaimin/Documents/小手机/BACKUP_IMPORT_WORKLOG.txt
+
+已处理：
+- 兼容原版 formatVersion 2 与 3；
+- 恢复 v3 zip 的 blobs/index.json 和 blobs/<id> 二进制图片；
+- 处理 blobref 令牌，使聊天角色头像、用户头像、桌面方图和小组件在旧 UI 中也能显示；
+- 对大型向量数据跳过无意义深遍历，避免导入卡死。
+
+重要：这部分非常容易因上游 Blob 存储改动而回归。同步原版或改动以下文件时，必须阅读专题记录：
+- utils/backupFormat.ts
+- context/OSContext.tsx
+- utils/blobRef.ts
+- utils/db.ts
+- utils/lsMirror.ts
+
+4. 原版更新巡查
+---------------
+已加到用户二改页面：打开糯米机时自动读取原版公开 GitHub 最新提交。
+
+行为：
+- 首次启用只记住当前上游版本，不弹历史提醒；
+- 后续原版 SHA 改变时，页面展示“系统更新巡查”常驻通知卡；
+- 用户在电脑上说“检查原版更新并同步二改”后，Codex 执行安全合并；
+- 网页关闭时不运行、不联网、不打扰用户；
+- 旧的 Codex 对话内每日巡检自动化已暂停，避免重复提醒。
+
+主要代码：
+- components/UpstreamUpdateMonitor.tsx
+- App.tsx（组件挂载入口）
+
+5. 主动消息 2.0：关系主动消息后端版
+----------------------------------
+专题记录（此功能的唯一详细依据）：
+/Users/xuaimin/Documents/小手机/ACTIVE_MESSAGE_RELATIONSHIP_BACKEND_2026-08-31.txt
+
+这是在原版主动消息 2.0 之上增加的关系层，不替换原版的任务、生成、推送或聊天写入流程。
+关系层以 Cloudflare Worker + D1 保存每个角色的思念值、下一阈值、好感度、醋意、心声、
+每日已送达数和 pending 任务；达到条件时只创建一条原版 AMSG 任务，实际消息仍由原版
+fire-time 流程根据当时上下文决定是否发送。
+
+目前已包含：
+- 点击角色消息旁头像打开的关系卡（无额外爱心装饰）；
+- 思念值 / 阈值 0–100 手动校正，实际写入 Worker/D1，之后自动计算以校正值为基础继续；
+- 克制、自然、粘人三档思念增长；高频互动小幅回落、久别回复较明显回落；
+- 仅在原版确认消息真正送达后，才回落思念值并以回落后的数值 +30 重设下一阈值；
+- 承诺后的自然跟进、每日次数、免打扰、最短间隔与排程诊断；
+- `lastTickAt` 与 `next_tick_at` 分离，避免聊天页同步把 Cron 检查不断往后推。
+
+发布边界：GitHub Pages 与 Cloudflare Worker 是两次独立发布。网页已发布不代表 Worker 已更新；
+凡涉及 `worker/amsg/worker.bundle.js` 的修改，必须由用户在 Cloudflare Dashboard 将最新 bundle
+替换并 Deploy。当前 Worker 地址和部署步骤均在专题记录中，不能记录或公开任何密钥。
+
+多人边界：当前 Worker 只按单个用户的个人部署验证；在完成用户隔离、任务诊断和凭据策略的
+专门加固前，不应把 Worker 地址/共享凭据提供给朋友共用。
+
+6. 云端即时对话：可停止生成（2026-08-31）
+-------------------------------------------
+
+适用范围：角色回复正通过主动消息云端链路生成、聊天中出现 pending 气泡时。
+
+- pending 气泡会显示“云端生成中”和“停止生成”入口；用户可随时中止这一次等待；
+- 点击后调用既有的 `cancel-message` 任务取消接口。接口确认取消（含任务已被消费的正常情形）后，
+  本地立即结束生成态并清除暂存通知；
+- 已取消任务的 UUID 会在网页端保留 24 小时。即使云端模型已经算完、随后补发推送或 outbox 回填，
+  聊天运行层也会拦截并确认该迟到回复，绝不再写入聊天记录；
+- 若取消请求本身因网络或鉴权失败，保留生成态并显示错误，不假装已经取消，避免把可能即将成功的回复吞掉；
+- 这是前端/网页端补丁，复用现有 Worker 接口，**不需要重新部署 Cloudflare Worker**。它不能承诺
+  让上游模型的物理计算瞬间停止，但能让用户立刻脱离等待，并确保迟到结果不再显示；
+- 仅作用于这条云端 pending 回复，不改变浏览器本地直连生成逻辑，也不影响原版主动消息任务逻辑。
+
+7. 朋友圈 App（阶段 1–5 本地实现完成，待网页发布与最新 Worker 部署）
+-------------------------------------------
+专题记录：
+/Users/xuaimin/Documents/小手机/MOMENTS_APP_WORKLOG.txt
+
+朋友圈已替换 Duck 栏原“小红书”入口，独立使用 `moments_*` IndexedDB 数据域；阶段 1/2/3 与第四批第一段能力已
+在源码中落地并通过生产构建。当前包含微信式朋友圈用户发帖/图片/权限快照/评论互动、角色时间线、
+朋友圈消息与设置、图片文字占位及点击后调用既有生图并归档相册、摇一摇临时陌生人、临时聊天、加好友迁移、
+事件账本/记忆索引和删帖级联清理，以及阶段 4 的副 API 配置、一次性互动规划、评论后统一重排、本地任务队列和复用现有 AMSG Worker 的 `/moments/*` 同步。
+
+阶段 4 Worker 路由文件位于 `worker/moments/`：源码 `src/index.ts`、独立预览 bundle `worker.bundle.js`、表结构 `schema.sql`、部署说明 `README.md`；
+`worker/amsg/src/index.ts` 只增加 fork-only 的 `/moments/*` wrapper，正式部署产物是合并后的 `worker/amsg/worker.bundle.js`。
+它只负责朋友圈事件/任务的幂等存储、诊断和 stale 任务回收；手机打开时拉回并由本地执行，不保存副 API Key，
+不替换原版主动消息 Worker，也不直接生成聊天消息。用户只需替换现有 AMSG Worker 的 bundle 并 Deploy，继续使用原来的 DB、Cron、环境变量和共享密钥，
+无需新建 Worker/D1，也无需在朋友圈设置重复填写地址/令牌。
+
+当前严格边界：用户此前部署的既有 AMSG Worker bundle 已含早期 `/moments/*` 路由；第四批第二段新增了 EventBox 记忆桥、
+`/moments/deliveries` 到点投递/ack 和尽力推送；阶段五又新增 `/relationship/jealousy`、醋意事实去重、80 阈值
+`jealousy-critical` 原版 AMSG 任务、critical 锁和强制联系总开关。因此必须再次部署最新正式产物
+`worker/amsg/worker.bundle.js`。网页端也仍需发布到 GitHub Pages。
+
+醋意规则：只有角色实际看见/参与/被定向投递的朋友圈事实，或在自己的私聊中接到明确“偏爱他人、比较/冷落、安抚”
+信号，才会影响该角色的 0–100 醋意。普通回复不下降；明确安抚才回落，低于 70 才解除本轮 latch。达到 80 且朋友圈
+设置“醋意强制联系”开启时，立即建立一条高优先级原版主动消息机会，越过常规思念、每日限额、最短间隔、免打扰和常规
+关系开关；同一轮只会创建一次，内容仍由原版 fire-time 生成。关闭开关后仍计算和显示，但不强制投递。
+
+
+四、每次改代码后的发布铁则
+----------------------------
+
+用户明确要求：每次真实修改后，必须更新 GitHub Pages，不能只改本地后口头说完成。
+
+标准流程：
+1. 检查 git status 与 git diff --check，避免碰用户未跟踪资料。
+2. 读取目标远端文件的当前 sha，确认不会覆盖用户/上游的新改动。
+3. 只发布本次涉及的文件到 origin/master；本机 Git 历史与远端不同步时，优先使用 gh Contents API
+   精确 PUT，不能直接推送整个工作树。
+4. 推送/PUT 会触发 GitHub Actions 工作流“Deploy to GitHub Pages”；不要为了同一批改动重复手动
+   触发多个部署。
+5. 等待并确认 build 和 deploy 均为 success。
+6. 最后才提供：
+   https://mobufei0818-dot.github.io/SullyOS/?v=<最新远端短 SHA>
+
+常用命令（执行前要确认当前目录和远端）：
+
+检查远端 master：
+  /opt/homebrew/bin/gh api repos/mobufei0818-dot/SullyOS/commits/master --jq '.sha'
+
+查看最新部署：
+  /opt/homebrew/bin/gh run list --repo mobufei0818-dot/SullyOS --workflow 'Deploy to GitHub Pages' --limit 1
+
+等待部署：
+  /opt/homebrew/bin/gh run watch <run-id> --repo mobufei0818-dot/SullyOS --exit-status
+
+GitHub 网络偶尔会使普通 git push 卡住。已验证可用的发布方式：
+- 定向小改动：用 gh Contents API 逐文件 PUT；更新前必须读取该远端文件的 sha，避免覆盖他人；
+- 大型上游合并：先在独立同步分支完成并核对，再谨慎推送。若默认 HTTP/2 卡住，可用：
+  git -c http.version=HTTP/1.1 push --progress origin <local-branch>:master
+
+不要因为网络慢使用 force push；不要使用 gh repo sync --force；两者都可能毁掉二改历史。
+
+
+五、同步原版的正确流程
+------------------------
+
+用户会说：
+- “原版更新了，帮我同步”；
+- “检查原版更新并同步二改”；
+- “帮我 fork 一下”（此处通常指把原版更新合入其已有 fork，并非重新创建新 fork）。
+
+正确流程：
+1. 只读对比 origin/master 与 upstream/master，确认上游领先多少、最新提交内容及影响范围。
+2. 不可直接强制同步或覆盖用户 fork；用户 fork 含外卖、生图、备份修复。
+3. 基于 origin/master 新建临时同步分支，例如：
+   git fetch origin master
+   git fetch upstream master
+   git switch -c codex/sync-upstream-YYYYMMDD origin/master
+   git merge --no-commit --no-ff upstream/master
+4. 逐一解决冲突：原则是“保留用户二改 + 接入上游新逻辑”，不能无脑选 ours/theirs。
+5. 对二改关键交叉点重点复查：
+   - apps/Chat.tsx
+   - apps/Settings.tsx
+   - apps/Character.tsx
+   - components/chat/ChatModals.tsx
+   - components/chat/MessageItem.tsx
+   - context/OSContext.tsx
+   - types.ts
+   - utils/backupFormat.ts
+   - utils/blobRef.ts
+   - utils/safeApi.ts
+   - utils/context.ts
+   - utils/activeMsgClient.ts / utils/amsg2Tasks.ts
+   - utils/imageGeneration.ts / utils/visionApi.ts
+6. 完成 merge commit 后推送 origin/master。
+7. 必须让 GitHub Pages CI 构建并部署成功；如失败，读取日志后修复，不要让用户使用坏链接。
+
+同步前建议提醒用户自行导出完整备份；代码同步通常不清用户浏览器数据，但备份是安全网。
+
+
+六、用户数据与安全边界
+------------------------
+
+- SullyOS 主要是 local-first：聊天、角色、API 设置、主题等存浏览器 IndexedDB/localStorage。
+- 发布网页新版本不会主动清除用户数据。
+- 导入备份、清除浏览器站点数据、重置系统才可能改变本地数据；执行前必须谨慎。
+- API Key、NovelAI Token、高德 Key、Cloudflare 权限、GitHub Token 不得写入源码、日志或工作记录。
+- GitHub Pages 是纯前端：任何直接填入前端的 Key 都会存在用户浏览器中，不能当作服务器密钥。
+- 高德等敏感服务要配域名白名单、额度限制；需要真正隐藏密钥时再使用 Cloudflare Worker secret。
+
+
+七、每次继续工作的简短指令示例
+-------------------------------
+
+用户可直接这样说：
+- “读取总交接档案和外卖记录，按重建规范重新做外卖。”
+- “读取总交接档案和生图记录，修复生图 API。”
+- “读取总交接档案和备份记录，检查导入问题。”
+- “检查原版更新并同步二改。”
+- “在现有二改基础上新增 XXX；每次完成后发布到我的链接。”
+
+Codex 应：
+1. 先读本文件；
+2. 按功能再读专题记录；
+3. 检查当前 Git 状态和远端 master；
+4. 保留已有二改与用户数据；
+5. 发布成功后给带 ?v= 的专属链接。
+
+
+八、绝对不要做的事情
+----------------------
+
+1. 不修改 qegj567-cloud/SullyOS 或其 GitHub Pages。
+2. 不把用户二改改到新的、不熟悉的链接或仓库。
+3. 不在未完成 GitHub Pages build/deploy 时声称已上线。
+4. 不用假数据假装 API 已调用；生图未配置 API 时应给原版风格错误提示。外卖当前已下线，
+   不得在没有用户明确重建授权时重新接回任何相关调用。
+5. 不将用户工作记录、备份、私人素材或 API Key 推进公开仓库。
+6. 不用强制同步覆盖 45+ 个二改提交。
+7. 不删除未跟踪工作记录、作品集或用户资料。
+
+
+九、当前确认状态
+----------------
+
+截至 2026-08-31（本档案本次更新）：
+- 用户 fork master 已同步至原版 2b6af21；打开小手机会自动检查上游公开仓库是否出现后续提交。
+- 外卖模块已从运行代码彻底下线；其 TXT 保留为历史与未来安全重建设计，不得误认为在线功能。
+- 聊天生图、v3 完整备份图片恢复、原版更新巡查均已保留。
+- 聊天生图当前采用“用户点击才合成”“角色出镜与纯场景分流”“身份锚点与强参考可选”规则；
+  照片卡状态已修复为即时刷新、原子保存、抗旧读取覆盖。
+- 聊天生图成功后会自动进入对应角色的原有相册；同一张照片卡重抽或编辑后重生成时按消息 ID
+  覆盖相册中的旧图，只保留最新一张。相册保留同角色的“让 TA 点评照片”和当时对话上下文功能。
+- 用户当前应使用：
+  https://mobufei0818-dot.github.io/SullyOS/?v=d241f8e
+- 关系主动消息后端版已另有完整专题记录；继续处理主动消息、Worker、D1、Cron 或关系卡前，
+  必须先读 `ACTIVE_MESSAGE_RELATIONSHIP_BACKEND_2026-08-31.txt`，不得只依赖本总档案的摘要。
+- 最近三次定向发布：`36d2d64` 为“仅在原版确认实际送达后才结算思念值/阈值”的关系闭环；
+  `7bd1c86` 为主动消息设置中共享凭据的复制按钮；`d241f8e` 为云端即时对话的停止生成与迟到回复拦截。
+  这三次均为网页前端发布，不包含新的 Worker 部署。

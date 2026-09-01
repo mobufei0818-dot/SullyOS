@@ -72,6 +72,8 @@ vi.mock('./activeMsgStore', () => ({
 
 import { ActiveMsgClient } from './activeMsgClient';
 import {
+  abandonInstantChatPending,
+  AMSG_INSTANT_CHAT_CANCELLED_LS_KEY,
   AMSG_INSTANT_CHAT_PENDING_LS_KEY,
   AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY,
   AMSG_OUTBOX_ADOPTED_LS_KEY,
@@ -81,6 +83,7 @@ import {
   drainOutbox,
   failInstantChatPending,
   getInstantChatPending,
+  isInstantChatCancelled,
   getStagedInstantChatExpiredNotices,
   isInstantChatReady,
   resetInstantChatReprobeCooldown,
@@ -123,6 +126,7 @@ const mockInstantChatFetch = (status: number, body: unknown) => {
 };
 
 beforeEach(() => {
+  localStorage.removeItem(AMSG_INSTANT_CHAT_CANCELLED_LS_KEY);
   localStorage.removeItem(AMSG_INSTANT_CHAT_PENDING_LS_KEY);
   localStorage.removeItem(AMSG_INSTANT_CHAT_STAGED_NOTICES_LS_KEY);
   localStorage.removeItem(AMSG_OUTBOX_ADOPTED_LS_KEY);
@@ -594,6 +598,18 @@ describe('待收记录（「正在输入…」那盏灯的唯一依据）', () =
     expect(clearInstantChatPending('char-a')).toBe(true);
     expect(clearInstantChatPending('char-a')).toBe(false);
     expect(getInstantChatPending('char-a')).toBeNull();
+  });
+
+  it('用户停止生成：熄等待灯，并为迟到的云端回复保留一天拦截标记', () => {
+    setInstantChatPending('char-a', 'uuid-stop', 1_000);
+    stageInstantChatExpiredNotices('char-a', 'uuid-stop', ['notice-1']);
+
+    expect(abandonInstantChatPending('char-a', 'uuid-stop')).toBe(true);
+    expect(getInstantChatPending('char-a')).toBeNull();
+    expect(isInstantChatCancelled('char-a', 'uuid-stop')).toBe(true);
+    expect(isInstantChatCancelled('char-other', 'uuid-stop')).toBe(false);
+    // 这轮没真正送达，随它上云的作废回执仍须留给下一轮重新注入。
+    expect(getStagedInstantChatExpiredNotices('char-a')).toBeNull();
   });
 
   it('存储里躺着坏数据时当没有，不能把整条路带崩', () => {

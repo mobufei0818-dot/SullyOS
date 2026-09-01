@@ -369,15 +369,15 @@ const Chat: React.FC = () => {
     // 每次正常互动或设置变化，把「不含正文」的关系摘要同步到 Worker。
     // Worker/D1 才是离线增长和阈值判断的唯一来源，前端不再自行创建关系任务，避免双发。
     useEffect(() => {
-        if (!char || !relationshipFallbackPulse || !getRelationshipConfig(char).enabled) return;
+        if (!char || !relationshipFallbackPulse) return;
         let cancelled = false;
         const timer = window.setTimeout(() => {
-            void syncRelationshipBackend(char, messages, relationshipFallbackPulse)
+            void syncRelationshipBackend(char, messages, relationshipFallbackPulse, characters)
                 .then(pulse => { if (!cancelled && pulse) setRelationshipBackendPulse(pulse); })
                 .catch(error => console.warn('[relationship] 后端状态同步失败', error));
         }, 350);
         return () => { cancelled = true; window.clearTimeout(timer); };
-    }, [char, messages, relationshipFallbackPulse]);
+    }, [char, characters, messages, relationshipFallbackPulse]);
 
     useEffect(() => {
         if (!char || !getRelationshipConfig(char).enabled) return;

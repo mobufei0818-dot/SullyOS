@@ -434,6 +434,17 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
     // 本地语境分析只在 ChatApp 主回复使用：它告诉主模型“这句话此刻在做什么”，
     // 不指定具体记忆答案、不改变角色人格，也不进入其他 App 的专属写作提示。
     if (input.recallEntryPoint === 'chat_app') {
+        // 朋友圈账本只在浏览器本地读取；Worker 端没有 IndexedDB，且不能把完整朋友圈数据上云。
+        // 动态 import 保证此分支不影响原版主动消息/其它世界 App 的运行环境。
+        if (typeof indexedDB !== 'undefined') {
+            try {
+                const { buildMomentsLifeLine } = await import('./momentsContext');
+                volatileTail += await buildMomentsLifeLine(char.id);
+            } catch (error) {
+                // 朋友圈是附加生活线，读取失败绝不能阻断正常私聊。
+                console.warn('[moments] 读取角色朋友圈生活线失败（主聊天不受影响）', error);
+            }
+        }
         volatileTail += renderLocalContextGuidance(recallTrace.contextAnalyzer);
         volatileTail += renderInteractionAdaptationGuidance(recallTrace.interactionAdaptation?.analysis);
         const engagementTrace = recallTrace.deepEngagement;

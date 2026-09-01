@@ -9,7 +9,8 @@ import {
     LifeSimState, HandbookEntry, Tracker, TrackerEntry, HotNewsSnapshot,
     LifeRecord, MedPlan, LifeRecordSettings, CharacterGroup,
     VRWorldNovel, VRNovelAnnotation, CustomCreatorPart, VRMusicRoomState, VRGuestbookState, VRScript, VRStagedPlay, VRLetter,
-    WorldProfile, WorldEpisode, StoryTheaterEntry, StoryTheaterPreset, StoryTheaterMask
+    WorldProfile, WorldEpisode, StoryTheaterEntry, StoryTheaterPreset, StoryTheaterMask,
+    MomentsPost, MomentsProfile, MomentsMediaRef, MomentsSettings, MomentsBackupData, MomentsReaction, MomentsComment, MomentsSeenReceipt, MomentsShare, MomentsTempStranger, MomentsTempTranscript, MomentsEventLedgerEntry, MomentsMemoryIndexEntry, MomentsPendingJob, MomentsSyncOutboxItem, MomentsVisibilitySnapshot
 } from '../types';
 import { exportPostOfficeLocal, importPostOfficeLocal } from './vrWorld/postOffice';
 import { exportSignalLocal, importSignalLocal } from './vrWorld/signal';
@@ -27,7 +28,8 @@ const DB_NAME = 'AetherOS_Data';
 // v69：见面·剧情条目与糯米机原生预设。正文继续复用 messages 表，避免再造会话存储。
 // v70：剧场面具箱（原创人物面具）；角色面具仍只存 characterId，不复制神经链接资料。
 // v71：角色小红书伪主页；发帖归属与可删除的自由活动日志分离。
-const DB_VERSION = 71;
+// v72：朋友圈（Moments）独立数据域；不复用历史 Spark/小红书 social_posts。
+const DB_VERSION = 73;
 
 const STORE_CHARACTERS = 'characters';
 const STORE_CHAR_GROUPS = 'character_groups'; // 角色分组定义（角色通过 groupId 指向；与群聊 groups 无关）
@@ -85,6 +87,22 @@ const STORE_LIFE_SETTINGS = 'life_record_settings'; // 生活记录设置单例�
 const STORE_STORY_THEATERS = 'story_theaters';       // 见面·剧情条目（消息用 story-theater:${id}）
 const STORE_STORY_THEATER_PRESETS = 'story_theater_presets'; // 糯米机原生剧情预设
 const STORE_STORY_THEATER_MASKS = 'story_theater_masks'; // 剧场原创人物面具
+// 朋友圈的每个逻辑面各自成表，避免日后关闭/回退朋友圈时误伤聊天、相册或旧 Spark 数据。
+const STORE_MOMENTS_PROFILES = 'moments_profiles';
+const STORE_MOMENTS_POSTS = 'moments_posts';
+const STORE_MOMENTS_MEDIA_REFS = 'moments_media_refs';
+const STORE_MOMENTS_VISIBILITY = 'moments_visibility_snapshots';
+const STORE_MOMENTS_REACTIONS = 'moments_reactions';
+const STORE_MOMENTS_COMMENTS = 'moments_comments';
+const STORE_MOMENTS_SEEN = 'moments_seen_receipts';
+const STORE_MOMENTS_SHARES = 'moments_shares';
+const STORE_MOMENTS_TEMP_STRANGERS = 'moments_temp_strangers';
+const STORE_MOMENTS_TEMP_TRANSCRIPTS = 'moments_temp_transcripts';
+const STORE_MOMENTS_EVENT_LEDGER = 'moments_event_ledger';
+const STORE_MOMENTS_SETTINGS = 'moments_settings';
+const STORE_MOMENTS_PENDING_JOBS = 'moments_pending_jobs';
+const STORE_MOMENTS_SYNC_OUTBOX = 'moments_sync_outbox';
+const STORE_MOMENTS_MEMORY_INDEX = 'moments_memory_index';
 
 // API 调用记录：保留近 5 天，超期丢弃；再加一个硬上限防止异常情况撑爆
 const API_CALL_LOG_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1000;
@@ -353,6 +371,74 @@ export const openDB = (): Promise<IDBDatabase> => {
       createStore(STORE_STORY_THEATERS, { keyPath: 'id' });
       createStore(STORE_STORY_THEATER_PRESETS, { keyPath: 'id' });
       createStore(STORE_STORY_THEATER_MASKS, { keyPath: 'id' });
+
+      // v72：朋友圈。从第一版开始把数据域拆开，旧 Spark/social_posts 不参与。
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_PROFILES)) {
+          const store = db.createObjectStore(STORE_MOMENTS_PROFILES, { keyPath: 'id' });
+          store.createIndex('actorType', 'actorType', { unique: false });
+          store.createIndex('characterId', 'characterId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_POSTS)) {
+          const store = db.createObjectStore(STORE_MOMENTS_POSTS, { keyPath: 'id' });
+          store.createIndex('authorId', 'authorId', { unique: false });
+          store.createIndex('createdAt', 'createdAt', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_MEDIA_REFS)) {
+          const store = db.createObjectStore(STORE_MOMENTS_MEDIA_REFS, { keyPath: 'id' });
+          store.createIndex('postId', 'postId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_VISIBILITY)) {
+          const store = db.createObjectStore(STORE_MOMENTS_VISIBILITY, { keyPath: 'id' });
+          store.createIndex('postId', 'postId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_REACTIONS)) {
+          const store = db.createObjectStore(STORE_MOMENTS_REACTIONS, { keyPath: 'id' });
+          store.createIndex('postId', 'postId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_COMMENTS)) {
+          const store = db.createObjectStore(STORE_MOMENTS_COMMENTS, { keyPath: 'id' });
+          store.createIndex('postId', 'postId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_SEEN)) {
+          const store = db.createObjectStore(STORE_MOMENTS_SEEN, { keyPath: 'id' });
+          store.createIndex('postId', 'postId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_SHARES)) {
+          const store = db.createObjectStore(STORE_MOMENTS_SHARES, { keyPath: 'id' });
+          store.createIndex('postId', 'postId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_TEMP_STRANGERS)) {
+          db.createObjectStore(STORE_MOMENTS_TEMP_STRANGERS, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_TEMP_TRANSCRIPTS)) {
+          const store = db.createObjectStore(STORE_MOMENTS_TEMP_TRANSCRIPTS, { keyPath: 'id' });
+          store.createIndex('strangerId', 'strangerId', { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_EVENT_LEDGER)) {
+          const store = db.createObjectStore(STORE_MOMENTS_EVENT_LEDGER, { keyPath: 'id' });
+          store.createIndex('postId', 'postId', { unique: false });
+          store.createIndex('createdAt', 'createdAt', { unique: false });
+      }
+      createStore(STORE_MOMENTS_SETTINGS, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_PENDING_JOBS)) {
+          const store = db.createObjectStore(STORE_MOMENTS_PENDING_JOBS, { keyPath: 'id' });
+          store.createIndex('dueAt', 'dueAt', { unique: false });
+      }
+      createStore(STORE_MOMENTS_SYNC_OUTBOX, { keyPath: 'id' });
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_MEMORY_INDEX)) {
+          const store = db.createObjectStore(STORE_MOMENTS_MEMORY_INDEX, { keyPath: 'id' });
+          store.createIndex('sourceId', 'sourceId', { unique: false });
+      }
+
+      // v73：朋友圈删帖需要按 postId 做完整、可恢复的级联清理；首版只给部分表建了索引。
+      // 对已经存在的 v72 表补索引，不改 keyPath，避免破坏用户已有数据。
+      const ensureMomentsIndex = (storeName: string, indexName: string, keyPath: string) => {
+          const store = (event.target as IDBOpenDBRequest).transaction?.objectStore(storeName);
+          if (store && !store.indexNames.contains(indexName)) store.createIndex(indexName, keyPath, { unique: false });
+      };
+      ensureMomentsIndex(STORE_MOMENTS_MEDIA_REFS, 'galleryImageId', 'galleryImageId');
+      ensureMomentsIndex(STORE_MOMENTS_PENDING_JOBS, 'postId', 'postId');
+      ensureMomentsIndex(STORE_MOMENTS_MEMORY_INDEX, 'postId', 'postId');
 
       createStore(STORE_HOTNEWS, { keyPath: 'id' });
 
@@ -1045,6 +1131,534 @@ export const DB = {
       const db = await openDB();
       const transaction = db.transaction(STORE_SOCIAL_POSTS, 'readwrite');
       transaction.objectStore(STORE_SOCIAL_POSTS).clear();
+  },
+
+  // ─── 朋友圈（Moments）───
+  // 仅由 MomentsApp 调用；永远不读取/覆写 social_posts（旧 Spark）。
+  getMomentsPosts: async (): Promise<MomentsPost[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_POSTS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_POSTS, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_POSTS).getAll();
+          req.onsuccess = () => resolve((req.result as MomentsPost[] || []).filter(post => !post.deletedAt));
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  saveMomentsPost: async (post: MomentsPost): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_POSTS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_POSTS).put(post);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsPost transaction aborted'));
+      });
+  },
+
+  deleteMomentsPost: async (id: string): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_POSTS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_POSTS).delete(id);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('deleteMomentsPost transaction aborted'));
+      });
+  },
+
+  getMomentsMediaByPostId: async (postId: string): Promise<MomentsMediaRef[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_MEDIA_REFS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_MEDIA_REFS, 'readonly');
+          const index = tx.objectStore(STORE_MOMENTS_MEDIA_REFS).index('postId');
+          const req = index.getAll(postId);
+          req.onsuccess = () => resolve(req.result as MomentsMediaRef[] || []);
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  saveMomentsMediaRefs: async (items: MomentsMediaRef[]): Promise<void> => {
+      if (items.length === 0) return;
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_MEDIA_REFS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          const store = tx.objectStore(STORE_MOMENTS_MEDIA_REFS);
+          items.forEach(item => store.put(item));
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsMediaRefs transaction aborted'));
+      });
+  },
+
+  deleteMomentsMediaByPostId: async (postId: string): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_MEDIA_REFS)) return;
+      const items = await DB.getMomentsMediaByPostId(postId);
+      if (items.length === 0) return;
+      const tx = db.transaction(STORE_MOMENTS_MEDIA_REFS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          const store = tx.objectStore(STORE_MOMENTS_MEDIA_REFS);
+          items.forEach(item => store.delete(item.id));
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('deleteMomentsMedia transaction aborted'));
+      });
+  },
+
+  saveMomentsVisibilitySnapshot: async (snapshot: MomentsVisibilitySnapshot): Promise<void> => {
+      const db = await openDB();
+      const normalized: MomentsVisibilitySnapshot = {
+          ...snapshot,
+          id: snapshot.id || `moments-visibility-${snapshot.postId || Date.now()}`,
+      };
+      const tx = db.transaction(STORE_MOMENTS_VISIBILITY, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_VISIBILITY).put(normalized);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsVisibilitySnapshot transaction aborted'));
+      });
+  },
+
+  /**
+   * 仅在用户主动选择“同时删相册副本”时调用。聊天历史不保存 galleryImageId，
+   * 所以额外用图片 URL 扫描聊天/旧动态；宁可误判为仍在使用而保留，也绝不误删。
+   */
+  getGalleryImageUsage: async (galleryImageId: string, excludingMomentsPostId?: string): Promise<{
+      momentsPostIds: string[];
+      chatMessageIds: number[];
+      socialPostIds: string[];
+  }> => {
+      const db = await openDB();
+      const image = await DB.getGalleryImageById(galleryImageId);
+      const storeNames = [STORE_MOMENTS_MEDIA_REFS, STORE_MESSAGES, STORE_SOCIAL_POSTS]
+          .filter(name => db.objectStoreNames.contains(name));
+      if (!storeNames.length) return { momentsPostIds: [], chatMessageIds: [], socialPostIds: [] };
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(storeNames, 'readonly');
+          const getAll = (name: string) => new Promise<any[]>((done, fail) => {
+              const request = tx.objectStore(name).getAll();
+              request.onsuccess = () => done(request.result || []);
+              request.onerror = () => fail(request.error || tx.error);
+          });
+          Promise.all([
+              getAll(STORE_MOMENTS_MEDIA_REFS),
+              getAll(STORE_MESSAGES),
+              getAll(STORE_SOCIAL_POSTS),
+          ]).then(([media, messages, socialPosts]) => {
+              const url = image?.url;
+              const includesUrl = (value: unknown) => Boolean(url) && JSON.stringify(value).includes(url!);
+              resolve({
+                  momentsPostIds: Array.from(new Set((media as MomentsMediaRef[])
+                      .filter(item => item.galleryImageId === galleryImageId && item.postId !== excludingMomentsPostId)
+                      .map(item => item.postId))),
+                  chatMessageIds: (messages as Message[]).filter(includesUrl).map(message => message.id),
+                  socialPostIds: (socialPosts as Array<{ id: string }>).filter(includesUrl).map(post => post.id),
+              });
+          }).catch(reject);
+          tx.onerror = () => reject(tx.error || new Error('getGalleryImageUsage transaction failed'));
+          tx.onabort = () => reject(tx.error || new Error('getGalleryImageUsage transaction aborted'));
+      });
+  },
+
+  /** 删除一条朋友圈的本地派生数据；同步删除事件由调用方在级联完成后单独写入。 */
+  deleteMomentsPostCascade: async (postId: string): Promise<void> => {
+      const db = await openDB();
+      const stores = [
+          STORE_MOMENTS_POSTS, STORE_MOMENTS_MEDIA_REFS, STORE_MOMENTS_VISIBILITY,
+          STORE_MOMENTS_REACTIONS, STORE_MOMENTS_COMMENTS, STORE_MOMENTS_SEEN,
+          STORE_MOMENTS_SHARES, STORE_MOMENTS_EVENT_LEDGER, STORE_MOMENTS_PENDING_JOBS,
+          STORE_MOMENTS_MEMORY_INDEX, STORE_MOMENTS_SYNC_OUTBOX,
+      ].filter(name => db.objectStoreNames.contains(name));
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(stores, 'readwrite');
+          const deleteByPostId = (storeName: string) => {
+              const store = tx.objectStore(storeName);
+              if (!store.indexNames.contains('postId')) return;
+              const request = store.index('postId').openCursor(IDBKeyRange.only(postId));
+              request.onsuccess = () => { const cursor = request.result; if (cursor) { cursor.delete(); cursor.continue(); } };
+          };
+          tx.objectStore(STORE_MOMENTS_POSTS).delete(postId);
+          [
+              STORE_MOMENTS_MEDIA_REFS, STORE_MOMENTS_VISIBILITY, STORE_MOMENTS_REACTIONS,
+              STORE_MOMENTS_COMMENTS, STORE_MOMENTS_SEEN, STORE_MOMENTS_SHARES,
+              STORE_MOMENTS_EVENT_LEDGER, STORE_MOMENTS_PENDING_JOBS, STORE_MOMENTS_MEMORY_INDEX,
+          ].filter(name => name !== STORE_MOMENTS_EVENT_LEDGER).forEach(deleteByPostId);
+          // 原始事实账本不能因删帖而物理丢失：把同帖历史事件标成 deleted，保留 eventId/sequence 供审计与同步端理解。
+          const ledgerStore = tx.objectStore(STORE_MOMENTS_EVENT_LEDGER);
+          if (ledgerStore.indexNames.contains('postId')) {
+              const ledgerCursor = ledgerStore.index('postId').openCursor(IDBKeyRange.only(postId));
+              ledgerCursor.onsuccess = () => {
+                  const cursor = ledgerCursor.result;
+                  if (!cursor) return;
+                  cursor.update({ ...(cursor.value as MomentsEventLedgerEntry), status: 'deleted', deletedAt: Date.now(), deletedSourceId: postId });
+                  cursor.continue();
+              };
+          }
+          // outbox 无 postId 索引，且 payload 是旧格式兼容对象；删掉属于该帖的旧同步项，
+          // 之后由调用方写入唯一的 delete tombstone，避免远端把旧内容复活。
+          const outbox = tx.objectStore(STORE_MOMENTS_SYNC_OUTBOX).openCursor();
+          outbox.onsuccess = () => {
+              const cursor = outbox.result;
+              if (!cursor) return;
+              const payload = (cursor.value as MomentsSyncOutboxItem).payload;
+              if (payload?.postId === postId) cursor.delete();
+              cursor.continue();
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('deleteMomentsPostCascade transaction failed'));
+          tx.onabort = () => reject(tx.error || new Error('deleteMomentsPostCascade transaction aborted'));
+      });
+  },
+
+  getMomentsReactionsByPostId: async (postId: string): Promise<MomentsReaction[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_REACTIONS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_REACTIONS, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_REACTIONS).index('postId').getAll(postId);
+          req.onsuccess = () => resolve(req.result as MomentsReaction[] || []);
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  saveMomentsReaction: async (reaction: MomentsReaction): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_REACTIONS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_REACTIONS).put(reaction);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsReaction transaction aborted'));
+      });
+  },
+
+  deleteMomentsReaction: async (id: string): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_REACTIONS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_REACTIONS).delete(id);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('deleteMomentsReaction transaction aborted'));
+      });
+  },
+
+  getMomentsCommentsByPostId: async (postId: string): Promise<MomentsComment[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_COMMENTS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_COMMENTS, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_COMMENTS).index('postId').getAll(postId);
+          req.onsuccess = () => resolve((req.result as MomentsComment[] || []).filter(comment => !comment.deletedAt).sort((a, b) => a.createdAt - b.createdAt));
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  saveMomentsComment: async (comment: MomentsComment): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_COMMENTS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_COMMENTS).put(comment);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsComment transaction aborted'));
+      });
+  },
+
+  deleteMomentsComment: async (id: string): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_COMMENTS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_COMMENTS).delete(id);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('deleteMomentsComment transaction aborted'));
+      });
+  },
+
+  saveMomentsSeenReceipt: async (receipt: MomentsSeenReceipt): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_SEEN, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_SEEN).put(receipt);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsSeenReceipt transaction aborted'));
+      });
+  },
+
+  saveMomentsShare: async (share: MomentsShare): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_SHARES, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_SHARES).put(share);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsShare transaction aborted'));
+      });
+  },
+
+  getMomentsProfile: async (id: string): Promise<MomentsProfile | null> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_PROFILES)) return null;
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_PROFILES, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_PROFILES).get(id);
+          req.onsuccess = () => resolve((req.result as MomentsProfile | undefined) || null);
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  getMomentsProfilesByActorType: async (actorType: MomentsProfile['actorType']): Promise<MomentsProfile[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_PROFILES)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_PROFILES, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_PROFILES).getAll();
+          req.onsuccess = () => resolve(((req.result as MomentsProfile[]) || []).filter(profile => profile.actorType === actorType));
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  saveMomentsProfile: async (profile: MomentsProfile): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_PROFILES, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_PROFILES).put(profile);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsProfile transaction aborted'));
+      });
+  },
+
+  getMomentsSettings: async (): Promise<MomentsSettings | null> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_SETTINGS)) return null;
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_SETTINGS, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_SETTINGS).get('main');
+          req.onsuccess = () => resolve((req.result as MomentsSettings | undefined) || null);
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  saveMomentsSettings: async (settings: MomentsSettings): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_SETTINGS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_SETTINGS).put(settings);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsSettings transaction aborted'));
+      });
+  },
+
+  getMomentsPendingJobs: async (): Promise<MomentsPendingJob[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_PENDING_JOBS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_PENDING_JOBS, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_PENDING_JOBS).getAll();
+          req.onsuccess = () => resolve((req.result as MomentsPendingJob[] || []).sort((a, b) => a.dueAt - b.dueAt));
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  saveMomentsPendingJob: async (job: MomentsPendingJob): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_PENDING_JOBS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_PENDING_JOBS).put(job);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsPendingJob transaction aborted'));
+      });
+  },
+
+  deleteMomentsPendingJob: async (id: string): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_PENDING_JOBS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_PENDING_JOBS).delete(id);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('deleteMomentsPendingJob transaction aborted'));
+      });
+  },
+
+  getMomentsSyncOutbox: async (): Promise<MomentsSyncOutboxItem[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_SYNC_OUTBOX)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_SYNC_OUTBOX, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_SYNC_OUTBOX).getAll();
+          req.onsuccess = () => resolve((req.result as MomentsSyncOutboxItem[] || []).sort((a, b) => a.createdAt - b.createdAt));
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  saveMomentsSyncOutboxItem: async (item: MomentsSyncOutboxItem): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_SYNC_OUTBOX, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_SYNC_OUTBOX).put(item);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsSyncOutbox transaction aborted'));
+      });
+  },
+
+  deleteMomentsSyncOutboxItem: async (id: string): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_SYNC_OUTBOX, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_SYNC_OUTBOX).delete(id);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('deleteMomentsSyncOutbox transaction aborted'));
+      });
+  },
+
+  getMomentsTempStrangers: async (): Promise<MomentsTempStranger[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_TEMP_STRANGERS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_TEMP_STRANGERS, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_TEMP_STRANGERS).getAll();
+          req.onsuccess = () => resolve((req.result as MomentsTempStranger[] || []).sort((a, b) => b.lastMetAt - a.lastMetAt));
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  saveMomentsTempStranger: async (stranger: MomentsTempStranger): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_TEMP_STRANGERS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_TEMP_STRANGERS).put(stranger);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsTempStranger transaction aborted'));
+      });
+  },
+
+  getMomentsTempTranscripts: async (strangerId: string): Promise<MomentsTempTranscript[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_TEMP_TRANSCRIPTS)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_TEMP_TRANSCRIPTS, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_TEMP_TRANSCRIPTS).index('strangerId').getAll(strangerId);
+          req.onsuccess = () => resolve((req.result as MomentsTempTranscript[] || []).sort((a, b) => a.createdAt - b.createdAt));
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  saveMomentsTempTranscript: async (transcript: MomentsTempTranscript): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_TEMP_TRANSCRIPTS, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_TEMP_TRANSCRIPTS).put(transcript);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsTempTranscript transaction aborted'));
+      });
+  },
+
+  saveMomentsEventLedger: async (entry: MomentsEventLedgerEntry): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_EVENT_LEDGER, 'readwrite');
+      return new Promise((resolve, reject) => {
+          const store = tx.objectStore(STORE_MOMENTS_EVENT_LEDGER);
+          const existingReq = store.get(entry.id);
+          existingReq.onsuccess = () => {
+              const existing = existingReq.result as MomentsEventLedgerEntry | undefined;
+              // 新事件顺序严格递增；同 id 重试保留原序号，保证同步/重开不会改写历史顺序。
+              const next = (value: number) => store.put({
+                  ...entry,
+                  eventId: entry.eventId || entry.id,
+                  sequence: existing?.sequence || entry.sequence || value,
+                  sourceType: 'moments',
+                  participantActorIds: Array.from(new Set(entry.participantActorIds || [entry.actorId, ...entry.visibleToActorIds])),
+                  status: entry.status || (entry.type === 'delete' ? 'deleted' : 'active'),
+              } satisfies MomentsEventLedgerEntry);
+              if (existing?.sequence || entry.sequence) { next(existing?.sequence || entry.sequence!); return; }
+              const allReq = store.getAll();
+              allReq.onsuccess = () => next(((allReq.result as MomentsEventLedgerEntry[]) || []).reduce((max, item) => Math.max(max, item.sequence || 0), 0) + 1);
+              allReq.onerror = () => reject(allReq.error || tx.error);
+          };
+          existingReq.onerror = () => reject(existingReq.error || tx.error);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsEventLedger transaction aborted'));
+      });
+  },
+
+  getMomentsEventLedger: async (): Promise<MomentsEventLedgerEntry[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_EVENT_LEDGER)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_EVENT_LEDGER, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_EVENT_LEDGER).getAll();
+          req.onsuccess = () => resolve((req.result as MomentsEventLedgerEntry[] || []).sort((a, b) => (a.sequence || a.createdAt) - (b.sequence || b.createdAt)));
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  getMomentsSeenReceiptsByActorId: async (actorId: string): Promise<MomentsSeenReceipt[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_SEEN)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_SEEN, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_SEEN).getAll();
+          req.onsuccess = () => resolve(((req.result as MomentsSeenReceipt[]) || []).filter(item => item.actorId === actorId));
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  getMomentsMemoryIndexesByPostId: async (postId: string): Promise<MomentsMemoryIndexEntry[]> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_MEMORY_INDEX)) return [];
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(STORE_MOMENTS_MEMORY_INDEX, 'readonly');
+          const req = tx.objectStore(STORE_MOMENTS_MEMORY_INDEX).getAll();
+          req.onsuccess = () => resolve(((req.result as MomentsMemoryIndexEntry[]) || []).filter(item => item.postId === postId));
+          req.onerror = () => reject(req.error || tx.error);
+      });
+  },
+
+  deleteMomentsLedgerByPostId: async (postId: string): Promise<void> => {
+      const db = await openDB();
+      if (!db.objectStoreNames.contains(STORE_MOMENTS_EVENT_LEDGER)) return;
+      const storeNames = [STORE_MOMENTS_EVENT_LEDGER];
+      if (db.objectStoreNames.contains(STORE_MOMENTS_MEMORY_INDEX)) storeNames.push(STORE_MOMENTS_MEMORY_INDEX);
+      const tx = db.transaction(storeNames, 'readwrite');
+      return new Promise((resolve, reject) => {
+          const ledger = tx.objectStore(STORE_MOMENTS_EVENT_LEDGER).index('postId');
+          const req = ledger.openCursor(IDBKeyRange.only(postId));
+          req.onsuccess = () => { const cursor = req.result; if (cursor) { cursor.delete(); cursor.continue(); } };
+          if (storeNames.includes(STORE_MOMENTS_MEMORY_INDEX)) {
+              const memory = tx.objectStore(STORE_MOMENTS_MEMORY_INDEX).index('sourceId');
+              const memoryReq = memory.openCursor();
+              memoryReq.onsuccess = () => { const cursor = memoryReq.result; if (cursor) { const value = cursor.value as MomentsMemoryIndexEntry; if (value.postId === postId) cursor.delete(); cursor.continue(); } };
+          }
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('deleteMomentsLedger transaction aborted'));
+      });
+  },
+
+  saveMomentsMemoryIndex: async (entry: MomentsMemoryIndexEntry): Promise<void> => {
+      const db = await openDB();
+      const tx = db.transaction(STORE_MOMENTS_MEMORY_INDEX, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_MEMORY_INDEX).put(entry);
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('saveMomentsMemoryIndex transaction aborted'));
+      });
   },
 
   getEmojis: async (): Promise<Emoji[]> => {
@@ -3137,7 +3751,7 @@ export const DB = {
           });
       };
 
-      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, storyTheaters, storyTheaterPresets, storyTheaterMasks, novels, bankTx, bankData, xhsActivities, xhsOwnedPosts, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings] = await Promise.all([
+      const [characters, characterGroups, messages, themes, emojis, emojiCategories, assets, galleryImages, userProfiles, diaries, tasks, anniversaries, roomTodos, roomNotes, groups, journalStickers, socialPosts, courses, games, worldbooks, storyTheaters, storyTheaterPresets, storyTheaterMasks, novels, bankTx, bankData, xhsActivities, xhsOwnedPosts, xhsStockImages, songs, quizzes, guidebookSessions, scheduledMessages, lifeSimStates, handbooks, trackers, trackerEntries, hotNewsSnapshots, vrNovels, vrAnnotations, customCreatorParts, vrMusic, vrGuestbook, vrScripts, vrStagedPlays, vrPresets, vrLetters, vrSettings, worlds, worldEpisodes, lifeRecords, medPlans, lifeRecordSettings, momentsProfiles, momentsPosts, momentsMediaRefs, momentsVisibility, momentsReactions, momentsComments, momentsSeen, momentsShares, momentsTempStrangers, momentsTempTranscripts, momentsLedger, momentsSettings, momentsPendingJobs, momentsSyncOutbox, momentsMemoryIndex] = await Promise.all([
           getAllFromStore(STORE_CHARACTERS),
           getAllFromStore(STORE_CHAR_GROUPS),
           getAllFromStore(STORE_MESSAGES),
@@ -3191,6 +3805,21 @@ export const DB = {
           getAllFromStore(STORE_LIFE_RECORDS),
           getAllFromStore(STORE_MED_PLANS),
           getAllFromStore(STORE_LIFE_SETTINGS),
+          getAllFromStore(STORE_MOMENTS_PROFILES),
+          getAllFromStore(STORE_MOMENTS_POSTS),
+          getAllFromStore(STORE_MOMENTS_MEDIA_REFS),
+          getAllFromStore(STORE_MOMENTS_VISIBILITY),
+          getAllFromStore(STORE_MOMENTS_REACTIONS),
+          getAllFromStore(STORE_MOMENTS_COMMENTS),
+          getAllFromStore(STORE_MOMENTS_SEEN),
+          getAllFromStore(STORE_MOMENTS_SHARES),
+          getAllFromStore(STORE_MOMENTS_TEMP_STRANGERS),
+          getAllFromStore(STORE_MOMENTS_TEMP_TRANSCRIPTS),
+          getAllFromStore(STORE_MOMENTS_EVENT_LEDGER),
+          getAllFromStore(STORE_MOMENTS_SETTINGS),
+          getAllFromStore(STORE_MOMENTS_PENDING_JOBS),
+          getAllFromStore(STORE_MOMENTS_SYNC_OUTBOX),
+          getAllFromStore(STORE_MOMENTS_MEMORY_INDEX),
       ]);
 
       const userProfile = userProfiles.length > 0 ? {
@@ -3242,6 +3871,24 @@ export const DB = {
           mcpLocal: exportMcpLocal(),             // 通用 MCP 服务器配置（存 localStorage）
           amsg2GlobalConfig: await exportAmsg2GlobalConfig(), // 主动消息 2.0 全局配置（存独立的 ActiveMsg 库）
           desktopSkinLocal: await exportDesktopSkinLocal(), // 桌面皮肤：界面配色 + 看板 banner（看板图令牌解析为 data URL）
+          momentsData: {
+              schemaVersion: 1,
+              profiles: momentsProfiles,
+              posts: momentsPosts,
+              mediaRefs: momentsMediaRefs,
+              visibilitySnapshots: momentsVisibility,
+              reactions: momentsReactions,
+              comments: momentsComments,
+              seenReceipts: momentsSeen,
+              shares: momentsShares,
+              tempStrangers: momentsTempStrangers,
+              tempTranscripts: momentsTempTranscripts,
+              eventLedger: momentsLedger,
+              settings: momentsSettings,
+              pendingJobs: momentsPendingJobs,
+              syncOutbox: momentsSyncOutbox,
+              memoryIndex: momentsMemoryIndex,
+          } satisfies MomentsBackupData,
       };
   },
 
@@ -3280,6 +3927,10 @@ export const DB = {
           STORE_MED_PLANS,
           STORE_LIFE_SETTINGS,
           STORE_HOTNEWS,
+          STORE_MOMENTS_PROFILES, STORE_MOMENTS_POSTS, STORE_MOMENTS_MEDIA_REFS, STORE_MOMENTS_VISIBILITY,
+          STORE_MOMENTS_REACTIONS, STORE_MOMENTS_COMMENTS, STORE_MOMENTS_SEEN, STORE_MOMENTS_SHARES,
+          STORE_MOMENTS_TEMP_STRANGERS, STORE_MOMENTS_TEMP_TRANSCRIPTS, STORE_MOMENTS_EVENT_LEDGER,
+          STORE_MOMENTS_SETTINGS, STORE_MOMENTS_PENDING_JOBS, STORE_MOMENTS_SYNC_OUTBOX, STORE_MOMENTS_MEMORY_INDEX,
           STORE_VR_NOVELS, STORE_VR_ANNOTATIONS, STORE_CC_PARTS, STORE_VR_MUSIC, STORE_VR_GUESTBOOK, STORE_VR_SCRIPTS, STORE_VR_PLAYS, STORE_VR_PRESETS, STORE_VR_LETTERS, STORE_VR_SETTINGS,
           STORE_WORLDS, STORE_WORLD_EPISODES,
           'memory_nodes', 'memory_vectors', 'memory_links', 'topic_boxes', 'anticipations', 'event_boxes',
@@ -3336,6 +3987,7 @@ export const DB = {
           data.roomNotes !== undefined,
           data.groups !== undefined,
           data.socialPosts !== undefined,
+          data.momentsData !== undefined,
           data.courses !== undefined,
           data.games !== undefined,
           data.worldbooks !== undefined,
@@ -3603,6 +4255,46 @@ export const DB = {
           await clearAndAdd(STORE_SOCIAL_POSTS, data.socialPosts, '动态帖子', true);
           data.socialPosts = undefined as any;
       }, data.socialPosts?.length || 0);
+      await runSection('朋友圈', data.momentsData !== undefined, async () => {
+          const moments = data.momentsData;
+          if (!moments) return;
+          // v72 草稿里的独立快照对象没有 id / postId，但这张表以 id 为主键。
+          // 恢复旧备份时补齐稳定键，避免一个历史快照让整份导入事务中止。
+          const posts = (moments.posts || []).map(post => ({
+              ...post,
+              visibility: post.visibility ? {
+                  ...post.visibility,
+                  id: post.visibility.id || `moments-visibility-${post.id}`,
+                  postId: post.visibility.postId || post.id,
+              } : post.visibility,
+          }));
+          const visibilitySnapshots = (moments.visibilitySnapshots || []).map((snapshot, index) => ({
+              ...snapshot,
+              id: snapshot.id || `moments-visibility-import-${snapshot.postId || index}`,
+          }));
+          // 全量备份恢复时，朋友圈只清自己的 16 张表；旧 Spark、聊天、相册都不受影响。
+          const entries: Array<[string, any[] | undefined, string, boolean?]> = [
+              [STORE_MOMENTS_PROFILES, moments.profiles || [], '朋友圈资料'],
+              [STORE_MOMENTS_POSTS, posts, '朋友圈帖子', true],
+              [STORE_MOMENTS_MEDIA_REFS, moments.mediaRefs || [], '朋友圈图片引用', true],
+              [STORE_MOMENTS_VISIBILITY, visibilitySnapshots, '朋友圈可见范围'],
+              [STORE_MOMENTS_REACTIONS, moments.reactions || [], '朋友圈点赞'],
+              [STORE_MOMENTS_COMMENTS, moments.comments || [], '朋友圈评论'],
+              [STORE_MOMENTS_SEEN, moments.seenReceipts || [], '朋友圈已读'],
+              [STORE_MOMENTS_SHARES, moments.shares || [], '朋友圈转发'],
+              [STORE_MOMENTS_TEMP_STRANGERS, moments.tempStrangers || [], '朋友圈陌生人'],
+              [STORE_MOMENTS_TEMP_TRANSCRIPTS, moments.tempTranscripts || [], '朋友圈临时聊天'],
+              [STORE_MOMENTS_EVENT_LEDGER, moments.eventLedger || [], '朋友圈事件账本'],
+              [STORE_MOMENTS_SETTINGS, moments.settings || [], '朋友圈设置'],
+              [STORE_MOMENTS_PENDING_JOBS, moments.pendingJobs || [], '朋友圈待执行任务'],
+              [STORE_MOMENTS_SYNC_OUTBOX, moments.syncOutbox || [], '朋友圈同步队列'],
+              [STORE_MOMENTS_MEMORY_INDEX, moments.memoryIndex || [], '朋友圈记忆索引'],
+          ];
+          for (const [store, items, label, restoreAssets] of entries) {
+              await clearAndAdd(store, items || [], label, restoreAssets ?? false);
+          }
+          data.momentsData = undefined as any;
+      }, data.momentsData ? 1 : 0);
       await runSection('学习课程', data.courses !== undefined, async () => {
           await clearAndAdd(STORE_COURSES, data.courses, '学习课程', false);
           data.courses = undefined as any;

@@ -32,7 +32,9 @@ const JournalApp = lazyApp(() => import('../apps/JournalApp'));
 const ScheduleApp = lazyApp(() => import('../apps/ScheduleApp'));
 const RoomApp = lazyApp(() => import('../apps/RoomApp'));
 const CheckPhone = lazyApp(() => import('../apps/CheckPhone'));
-const SocialApp = lazyApp(() => import('../apps/SocialApp'));
+// Dock 的 social 入口升级为朋友圈；旧 Spark/SocialApp 及 social_posts 保留在源码和本地库中，
+// 绝不做破坏性迁移，出现问题可单独切回。
+const SocialApp = lazyApp(() => import('../apps/MomentsApp'));
 const StudyApp = lazyApp(() => import('../apps/StudyApp'));
 const FAQApp = lazyApp(() => import('../apps/FAQApp'));
 const GameApp = lazyApp(() => import('../apps/GameApp'));

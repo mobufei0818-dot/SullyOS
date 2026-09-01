@@ -3917,6 +3917,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 生活记录（档案 App：生理期/药盒/锻炼 + 药盒计划 + 设置；记账走 bank_transactions）
               // 导入端 importFullData 已支持恢复，这里必须同步登记，否则备份不含生活记录。
               'life_records', 'med_plans', 'life_record_settings'
+              ,
+              // 朋友圈独立 16 表：系统设置里的 ZIP 才是用户实际使用的完整备份入口，
+              // 必须与 DB.exportFullData / importFullData 同步，不能只在直调 DB 导出里存在。
+              'moments_profiles', 'moments_posts', 'moments_media_refs', 'moments_visibility_snapshots',
+              'moments_reactions', 'moments_comments', 'moments_seen_receipts', 'moments_shares',
+              'moments_temp_strangers', 'moments_temp_transcripts', 'moments_event_ledger', 'moments_settings',
+              'moments_pending_jobs', 'moments_sync_outbox', 'moments_memory_index'
           ];
 
           if (mode === 'full') {
@@ -4100,6 +4107,16 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
               // 桌面电子宠物主题的主色调偏好（账号级 localStorage）。room_card 涓流卡片本身
               // 是普通消息、随 messages store 一起导出，这里只补带走这个纯外观偏好。
               gotchiAccentHue: (mode === 'text_only' || mode === 'full') ? (() => { try { const s = localStorage.getItem('tama_accent_hue'); return s !== null ? s : undefined; } catch { return undefined; } })() : undefined,
+          };
+          const ensureMomentsBackupData = () => {
+              if (!backupData.momentsData) {
+                  backupData.momentsData = {
+                      schemaVersion: 1, profiles: [], posts: [], mediaRefs: [], visibilitySnapshots: [],
+                      reactions: [], comments: [], seenReceipts: [], shares: [], tempStrangers: [],
+                      tempTranscripts: [], eventLedger: [], settings: [], pendingJobs: [], syncOutbox: [], memoryIndex: [],
+                  };
+              }
+              return backupData.momentsData;
           };
 
           // 主动消息 2.0 的全局配置（Worker 地址 / 密钥 / 即时对话开关）。它存在独立的
@@ -4520,6 +4537,21 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   case 'life_records': backupData.lifeRecords = processedData; break;
                   case 'med_plans': backupData.medPlans = processedData; break;
                   case 'life_record_settings': backupData.lifeRecordSettings = processedData; break;
+                  case 'moments_profiles': ensureMomentsBackupData().profiles = processedData; break;
+                  case 'moments_posts': ensureMomentsBackupData().posts = processedData; break;
+                  case 'moments_media_refs': ensureMomentsBackupData().mediaRefs = processedData; break;
+                  case 'moments_visibility_snapshots': ensureMomentsBackupData().visibilitySnapshots = processedData; break;
+                  case 'moments_reactions': ensureMomentsBackupData().reactions = processedData; break;
+                  case 'moments_comments': ensureMomentsBackupData().comments = processedData; break;
+                  case 'moments_seen_receipts': ensureMomentsBackupData().seenReceipts = processedData; break;
+                  case 'moments_shares': ensureMomentsBackupData().shares = processedData; break;
+                  case 'moments_temp_strangers': ensureMomentsBackupData().tempStrangers = processedData; break;
+                  case 'moments_temp_transcripts': ensureMomentsBackupData().tempTranscripts = processedData; break;
+                  case 'moments_event_ledger': ensureMomentsBackupData().eventLedger = processedData; break;
+                  case 'moments_settings': ensureMomentsBackupData().settings = processedData; break;
+                  case 'moments_pending_jobs': ensureMomentsBackupData().pendingJobs = processedData; break;
+                  case 'moments_sync_outbox': ensureMomentsBackupData().syncOutbox = processedData; break;
+                  case 'moments_memory_index': ensureMomentsBackupData().memoryIndex = processedData; break;
                   case 'hotnews_snapshots': backupData.hotNewsSnapshots = processedData; break;
                   case 'memory_nodes': backupData.memoryNodes = processedData; break;
                   // memory_vectors 走二进制旁路（上面已 continue），不在此 switch 落 backupData

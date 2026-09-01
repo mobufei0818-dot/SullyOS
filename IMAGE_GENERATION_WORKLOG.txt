@@ -1,0 +1,534 @@
+SullyOS 二改：聊天生图模块工作记录
+====================================
+
+用途
+----
+这是用户 xuaimin 的 SullyOS fork（二改）中“聊天生图”功能的完整交接记录。
+以后用户提到“调用生图记录”“继续改生图”“聊天照片功能”时，先阅读本文件，再检查
+当前源码、Git 状态与线上版本。它和 TAKEOUT_APP_WORKLOG.txt（外卖 App）相互独立。
+
+安全规则：本文件不得写入任何 API Key、NovelAI Token、GitHub Token、角色照片、用户聊天内容
+或备份文件。
+
+
+一、项目、仓库与部署
+----------------------
+
+原版上游仓库：
+https://github.com/qegj567-cloud/SullyOS
+
+用户 fork（唯一允许写入的仓库）：
+https://github.com/mobufei0818-dot/SullyOS
+
+用户线上专属页面（唯一允许发布的页面）：
+https://mobufei0818-dot.github.io/SullyOS/
+
+项目目录：
+/Users/xuaimin/Documents/小手机
+
+部署铁则：
+1. 绝不修改 qegj567-cloud/SullyOS 原版仓库或其 Pages 链接。
+2. 每次真实改动都应同步到 mobufei0818-dot/SullyOS 的 master。
+3. 手动触发 GitHub Actions 工作流“Deploy to GitHub Pages”（deploy-pages.yml）。
+4. 只有 build 和 deploy 都显示 success，才能告诉用户已经更新。
+5. 最终给用户的链接固定为：
+   https://mobufei0818-dot.github.io/SullyOS/?v=<最新远端提交短 SHA>
+   其中 ?v= 用于绕过浏览器缓存，不代表另一个网站。
+
+历史说明：GitHub API 在本机偶尔响应慢。若 git push 不稳定，可用已登录 gh 的 Contents API
+逐文件 PUT 到用户 fork 的 master；更新已有文件前必须读取远端 sha，以避免覆盖其他改动。
+
+
+二、用户的原始需求（完整）
+----------------------------
+
+用户要在“已经二改过的糯米机”上新增生图，而不是另做独立工具或独立聊天页面。
+
+A. 设置 → 其他 API
+- 新增“生图 API”区，风格与语音 API 相近。
+- 支持两种后端：
+  1) OpenAI 兼容；
+  2) NovelAI。
+- 需要填写/保留：URL（OpenAI 兼容）、Key、模型、图片尺寸、图片质量、输出格式。
+- 必须有“拉取模型”功能和“测试连接”功能。
+- 生图 API 调用要接入原版“API 调用记录”和错误提示机制。
+- 用户配置什么兼容模型由用户自行决定，程序不能擅自限制其模型选择。
+
+B. 统一画风/提示词
+- 设置页有一个可编辑的“统一画风提示词”。
+- 用户最初提供了 gpt-image-2 提示词适配规则；经讨论后采用“默认真实自然”的版本。
+- 它是全局基础约束，而非把所有图片强行变成单一滤镜。
+- 用户可随时手动改写；留空时使用内置默认。
+- 默认原则：保留用户意图；现实可信；人物比例、手部、光影自然；除非明确要求，不出现
+  动漫、3D、塑料皮肤、无关文字、水印、Logo；输出为自然语言生图描述。
+
+C. 神经连接 → 角色设定
+- 在角色语音音色附近新增“聊天生图 · 外貌参考”。
+- 用户可上传角色面部照片，作用仅为辅助稳定五官和发型，不替代文字外貌设定。
+- 上传区旁边必须有一个可自由手写的“角色外貌特征”文本框。
+- 页面要显示小字提醒：
+  “仅对支持图片输入的模型生效；部分 OpenAI 兼容中转站不支持。参考图会和外貌提示词
+   一起作为辅助约束。”
+- 若模型/中转不支持参考图，不能偷偷改成假装已参考；应按请求报错提示。NovelAI 不使用该
+  参考图时，仍可正常纯文生图。
+
+D. 聊天设置（模仿语音消息）
+- 在“语音消息”“收到就自动播放”附近新增：
+  1) “生图消息”总开关：允许角色在自然聊天中主动发送照片；
+  2) “收到就自动生图”：仅在总开关开启时显示。
+- 开启“收到就自动生图”：收到角色照片描述卡后立即调用模型合成。
+- 关闭：照片卡先留在聊天中，用户点击“合成照片”后才调用模型。
+- 自动模式失败只尝试一次；不能反复自动请求、反复扣费或死循环。
+- 出错时使用原版风格的错误提示；照片卡保留，用户可在修好配置后手动点击重试。
+
+E. 角色照片消息的交互与消息形态
+- 必须沿用原版结构化消息/后处理方式，不能另建一套假聊天或浮在聊天外。
+- 角色先发送“像照片一样的 HTML 风格占位卡”，卡中央显示照片描述，整体模板固定、简洁、
+  漂亮，不要每条随机换 UI。
+- 用户点击后，真实生成的图片必须原位替换这条卡，而不是另发一条或跳出页面。
+- 已生成照片长按后，应合并进原有消息操作，支持：编辑照片提示词、重新生成、删除。
+- “重新生成”可复用编辑后的同一条提示词。
+- 角色主动发图必须自然，不是每条消息都发图；自拍、眼前场景、旅行、美食、穿搭、宠物等
+  确实值得分享的时刻才适合。
+
+
+三、当前已实现的代码结构
+--------------------------
+
+1. types.ts
+-----------
+APIConfig.imageGeneration：
+- provider: 'openai_compatible' | 'novelai'
+- baseUrl
+- apiKey
+- model
+- size
+- quality
+- outputFormat: png / jpeg / webp
+- baseStylePrompt
+
+CharacterProfile.imageProfile：
+- faceReferenceImage：角色参考脸的数据 URL。
+- appearancePrompt：用户手写角色外貌文字。
+
+CharacterProfile 聊天开关：
+- chatImageEnabled
+- chatImageAutoGenerate
+
+这些字段随原版 API 配置、角色数据、备份/恢复路径一并保存；API Key 仍仅存在用户浏览器本机
+的数据中，不能写入此工作记录或公开仓库源码。
+
+
+2. apps/Settings.tsx
+---------------------
+位置：设置 → 其他 API → 生图 API。
+
+已实现 UI：
+- OpenAI 兼容 / NovelAI 后端切换。
+- OpenAI 兼容模式显示 URL；NovelAI 固定使用官方图片 API。
+- Key 输入。
+- 模型输入或拉取后的模型下拉选择。
+- 尺寸：1024x1024、1024x1536、1536x1024。
+- 质量：低、中、高。
+- 输出：PNG、JPEG、WebP。
+- 全局基础画风提示词 textarea。
+- “拉取模型”按钮。
+- “测试生图连接”按钮。
+- 成功/失败结果卡片。
+- “保存其他 API”会把该配置写入 apiConfig.imageGeneration。
+
+拉取模型逻辑：
+- OpenAI 兼容：GET <用户 URL>/models，Authorization: Bearer <Key>。
+  从 data 或 models 数组读取 id；成功后显示下拉列表，若当前模型不在列表则选第一个。
+- NovelAI：提供内置官方模型选项：
+  nai-diffusion-4-5-full
+  nai-diffusion-4-5-curated-preview
+  nai-diffusion-4-5-full-inpainting
+
+测试逻辑（不真正生图，不消耗图片额度）：
+- OpenAI 兼容：GET <用户 URL>/models，检查网络和 Bearer 鉴权。
+- NovelAI：GET https://image.novelai.net/ai/generate-image/suggest-tags?query=portrait，
+  使用 Bearer Token，检查官方图片服务和鉴权。
+- 失败会显示 HTTP 状态或网络/CORS 信息。
+
+
+3. apps/Character.tsx
+----------------------
+位置：神经连接 → 角色编辑页，紧邻语音设定区。
+
+已实现：
+- “聊天生图 · 外貌参考”卡片。
+- 上传角色面部照片（processImage 压缩/转 data URL 后写入 imageProfile.faceReferenceImage）。
+- 手写角色外貌特征 textarea（写入 imageProfile.appearancePrompt）。
+- 移除参考图按钮。
+- 说明文案强调参考图作用与兼容性限制。
+
+
+4. components/chat/ChatModals.tsx
+---------------------------------
+位置：聊天设置弹窗。
+
+已实现：
+- 生图消息开关（chatImageEnabled）。
+- 收到就自动生图开关（chatImageAutoGenerate）。
+- 自动合成失败只提示一次、不自动反复请求的说明。
+- 已生成的聊天照片长按进入原版消息操作时，显示“编辑照片描述并重新生成”。
+- 原有删除操作仍可删除照片。
+
+
+5. utils/chatPrompts.ts
+-----------------------
+已实现角色系统提示词注入：
+- 生图开关打开时，角色可用 <照片>描述</照片> 发送一张照片。
+- 明确要求自然、少量、每轮至多一张、标签内写给生图模型的画面描述。
+- 明确禁止把历史照片记录照抄成新标签。
+- 开关关闭时明确禁止角色输出 <照片> 标签。
+
+已实现聊天历史理解：
+- 生图消息会以“系统记录：角色/用户发送了一张聊天照片，画面描述、合成状态”的文字进入
+  角色上下文，让角色知道自己发过什么，不把真实图的 data URL 塞进上下文。
+
+
+6. utils/applyAssistantPostProcessing.ts
+----------------------------------------
+这是原版角色回复后处理器，也是结构化消息融合的关键。
+
+已实现：
+- 在原版 HTML 卡片解析之后，解析 <照片>...</照片>。
+- 仅 chatImageEnabled 打开时，拆出描述，保存为 type='image' 的 assistant 消息。
+- metadata.imageGeneration 保存：
+  status: pending / generating / ready / failed
+  prompt：照片描述
+  createdAt
+  referenceApplied（生成成功后记录）
+- 普通文本继续正常展示；照片标签不会泄漏成原始字符。
+- 关闭开关时，<照片> 块降级显示为 [照片]，避免出现原始标签。
+- 该管线同时服务本机聊天、即时对话和主动消息回写，因此不是假 UI。
+
+
+7. apps/Chat.tsx
+-----------------
+已实现照片生命周期：
+- handleGeneratePhoto 只处理 imageGeneration 图片消息。
+- 未配置 API 时，用原版 showError 提醒到设置填写，不进行请求。
+- 同一 message id 用 in-flight Set 防重复点击/重复请求。
+- 点击卡片后状态 pending → generating。
+- 成功：DB.updateMessage 原位写入图片 data URL，metadata.status=ready，原消息位置不变。
+- 失败：metadata.status=failed，卡片保留，showError 显示真实错误；不自动重试。
+- 自动模式只扫描最近 60 秒内新落库的 pending 照片卡，因此打开聊天或开启自动模式不会把
+  很久以前的历史照片批量消耗生成。
+- 长按已生成图：编辑描述、保存后把状态设回 pending 并调用同一生成方法（即重新生成）。
+- 删除仍使用原版 delete message。
+
+
+8. components/chat/MessageItem.tsx
+----------------------------------
+已实现固定照片占位卡模板：
+- 白色卡片 + 柔和紫/粉渐变图片区。
+- 中央显示照片描述。
+- 底部按状态显示：点击合成照片 / 正在合成照片 / 合成失败，点击重试。
+- 点击由 Chat.tsx 处理真实 API 调用。
+- status=ready 时改用原版 image 消息渲染真实图片。
+
+
+9. utils/imageGeneration.ts
+---------------------------
+职责：统一构建提示词、判断配置、调用真实 API。
+
+OpenAI 兼容：
+- 无参考图：POST <baseUrl>/images/generations。
+- 有角色参考图：POST <baseUrl>/images/edits，使用 multipart FormData 传 image；
+  仅支持 images/edits 的官方或兼容中转可用。
+- 请求携带 model、prompt、size、quality、output_format、response_format=b64_json。
+- 支持读取 data[0].b64_json、data[0].url 或 images[0]。
+- 若兼容中转不支持 /images/edits，应显示其错误，不能静默丢弃参考图再出图。
+
+NovelAI：
+- POST https://image.novelai.net/ai/generate-image。
+- 使用用户的 Persistent API Token 作为 Bearer Token。
+- 以官方图片端点生成，读取 Blob 转 data URL。
+- 当前版本不把角色 faceReferenceImage 传给 NovelAI；因此 referenceApplied=false。
+- 角色外貌文字和本次照片描述仍会进入 prompt。
+
+提示词拼装顺序：
+1. 用户设置的全局基础画风（为空则 DEFAULT_IMAGE_STYLE_PROMPT）。
+2. 角色 appearancePrompt（如果填写）。
+3. 角色照片标签提供的本次画面描述。
+
+
+10. utils/safeApi.ts / utils/apiCallLog.ts
+------------------------------------------
+已扩展可记录的 API URL：
+- /chat/completions
+- /images/generations
+- /ai/generate-image
+
+OpenAI 兼容生图通过 safeFetchJson，metadata 标为：
+- appName: 消息
+- charId / charName
+- purpose: 聊天生图（OpenAI 兼容）
+
+NovelAI 使用 Blob 响应，因此显式 recordApiCall，purpose 为“聊天生图（NovelAI）”。
+失败同样记录。这满足用户“接原版 API 调用记录和报错配置”的要求。
+
+
+四、当前已发布状态（历史参考）
+------------------------------
+
+首次生图模块发布：
+- 本地提交：37cbd7e（feat: add chat image generation workflow）
+- Pages 成功构建：33257407248
+
+补充模型拉取与连接测试：
+- 本地提交：a488525（feat: add image api model fetch and test）
+- Pages 成功构建：33257779005
+- 对应线上链接曾使用：
+  https://mobufei0818-dot.github.io/SullyOS/?v=e6c49b1
+
+实际后续版本以 GitHub fork/master 与最新成功 Actions 为准。
+
+
+五、用户操作说明（给后续排查用）
+-------------------------------
+
+OpenAI 兼容方式：
+1. 设置 → 其他 API → 生图 API。
+2. 选择 OpenAI 兼容。
+3. 填 URL、Key。
+4. 点击“拉取模型”，选择实际支持图片生成的模型。
+5. 点击“测试生图连接”。
+6. 选择尺寸/质量/输出，保存其他 API。
+7. 神经连接 → 对应角色 → 填外貌文字；必要时上传面部参考图。
+8. 聊天设置开启“生图消息”；按需要开启“收到就自动生图”。
+
+NovelAI：
+1. 选择 NovelAI。
+2. 填 Persistent API Token（不是网站密码）。
+3. 点“拉取模型”或选择模型，点“测试生图连接”。
+4. 保存其他 API。
+5. NovelAI 当前不使用角色上传的面部参考图，但会使用角色文字外貌特征。
+
+注意：网页纯前端将 Key 保存在浏览器本机。不要将浏览器导出、截图或在线页面分享给不可信的人。
+若需要彻底隐藏密钥，应改为 Cloudflare Worker 代理，并把供应商 Key 存在 Worker Secret。
+
+
+六、后续修改与验证清单
+------------------------
+
+每次改动后：
+1. 阅读本记录和 TAKEOUT_APP_WORKLOG.txt（若改动碰到通用聊天/部署/API 文件）。
+2. git diff --check。
+3. 不覆盖用户未提交的无关文件。
+4. 发布到 mobufei0818-dot/SullyOS/master；绝不发布到上游原版。
+5. 触发 deploy-pages.yml，等待 GitHub Actions 成功。
+6. 给用户同一条 Pages 链接加新的 ?v=短 SHA。
+
+功能测试建议：
+- OpenAI 兼容填一个正确 URL/Key，拉取模型并测试连接。
+- 手动输入一个模型，测试接口失败时应有可读 HTTP 错误。
+- 打开角色生图开关后，让角色按 <照片>...</照片> 生成一张占位卡。
+- 自动关闭：点击卡片才发请求；退出页面后卡片仍在。
+- 自动开启：新到照片卡只请求一次；将 API 配错时不会循环请求。
+- 成功后图片原位替换；长按图片编辑 prompt 后能重新生成；删除消息生效。
+- 参考图：支持 images/edits 的模型应在请求里收到参考图；不支持时应报告错误而非假称成功。
+- API 调用记录应显示生图请求及目的；错误提示应该来自原版 showError 样式。
+- 手机端检查卡片、设置区、长按菜单、下拉列表不被 Home 指示条遮住且可内部滚动。
+
+
+七、已知限制 / 不要误改
+-------------------------
+
+1. OpenAI 兼容市场差异很大：有些中转支持 /images/generations，不支持 /images/edits；
+   有些不支持 output_format、quality 或 b64_json。当前应优先显示上游错误，不能悄悄
+   改成随机图或伪成功。
+
+2. “测试连接”不等同于测试某一模型真的能生成图：它验证 URL/鉴权可达而不消耗额度。
+   真正模型兼容性在第一次生成时确认。以后可增设明确标记为“生成测试图（可能消耗额度）”
+   的可选按钮，但不能冒充无消耗测试。
+
+3. NovelAI 的 API/模型列表可能更新；更新模型名称前先查官方文档。
+
+4. 当前自动生图依赖聊天页仍在运行以调用浏览器 API。用户关闭网页后，角色仍可通过
+   主动消息/即时消息落下照片占位卡，但前端不在时不会在后台生成图片；回到聊天后可手动点击。
+   这符合“不在页面等待”的要求，也避免浏览器后台隐性扣费。若以后要求后台自动出图，需将
+   生图请求放进用户自己的 Cloudflare Worker，并明确获得密钥托管授权。
+
+5. 当前照片卡技术上是原版 image 消息的固定 HTML 风格原生 React 渲染，不是 [html] iframe。
+   这样才能安全地点击、原位替换、长按编辑，并且与原版结构化后处理和消息数据库融合。
+
+6. 原版更新同步前必须先让用户通过“备份与恢复 → 整合导出”备份数据。合并上游时重点关注：
+   types.ts、apps/Settings.tsx、apps/Character.tsx、apps/Chat.tsx、ChatModals、MessageItem、
+   chatPrompts、applyAssistantPostProcessing、safeApi 及 imageGeneration.ts。
+
+
+八、当前最高优先级规则：身份参考与照片类型分流（2026-08-30）
+--------------------------------------------------------------
+
+本节覆盖本记录中所有关于“参考图每次随照片发送”“收到就自动生图”或“所有照片均附加角色外貌”的旧描述。
+若旧条目与本节冲突，以本节为准。
+
+1. 当前生图触发方式
+--------------------
+- 已移除“收到就自动生图”。照片卡只在用户点击“合成照片”后，才在浏览器前端发起一次真实生图请求。
+- 角色先输出结构化照片标签；原版后处理器把它保存为 type='image' 的照片占位卡；随后由 Chat.tsx 原位替换成真正图片。
+- 用户直接上传到聊天框的图片是普通聊天图片，不属于“聊天生图”，不会调用图片生成模型。
+
+2. 角色照片与纯场景照片必须分流
+----------------------------------
+- 角色本人出镜、自拍、人物照：角色应输出
+  <角色照片>画面描述</角色照片>
+  后处理会写 metadata.imageGeneration.includeCharacter=true。
+- 场景、物品、美食、宠物、风景、生活记录：角色应输出
+  <照片>画面描述</照片>
+  后处理会写 includeCharacter=false。
+- 每条角色回复最多一张照片。普通 <照片> 不是“弱版人物照”，而是明确的无人物/不额外加人物的场景照。
+- chatPrompts.ts 已把上述标签选择写入角色系统提示词，不能再把两种照片混回同一标签而依赖自然语言猜测。
+
+3. 提示词实际拼装逻辑
+----------------------
+所有照片均会使用：全局基础画风提示词 + 本次照片描述。
+
+仅 includeCharacter=true 的角色照片，才额外使用：
+- identityProfile（系统提取并允许用户校正的稳定身份锚点）；
+- appearancePrompt（用户自由填写的外貌补充）；
+- “不得复刻参考照表情、姿势、背景、镜头角度”的构图独立要求；
+- 若用户选择“强参考复刻”，才把原始面部参考图发送给 OpenAI 兼容接口的 /images/edits。
+
+includeCharacter=false 的普通 <照片>：
+- 不注入 identityProfile；
+- 不注入 appearancePrompt；
+- 不发送 faceReferenceImage，即使用户选了强参考复刻；
+- 额外注入“不要额外生成角色、自拍者或未明确提到的人物”的纯场景约束。
+
+目标是恢复用户原先的体验：角色分享咖啡、窗外、食物、宠物等生活物品时只生成该物品；角色自拍或出镜时才保持同一张脸和发型。
+
+4. 身份参考模式
+----------------
+- CharacterProfile.imageProfile 新字段：
+  - identityProfile：稳定身份特征文本；
+  - referenceMode：'identity'（默认）或 'strong'。
+- “身份参考（推荐）”：不在日常生图时发送参考照原图，只向提示词添加身份锚点。因此可保留同一角色的五官/发型，同时允许每次不同的表情、构图、服装和镜头。
+- “强参考复刻”：仅适用于角色出镜照；将参考照用 multipart FormData 发送至 /images/edits。它会更容易复刻参考照角度/表情，且要求中转站支持图片编辑。
+- 更换参考图时，程序会清空旧 identityProfile，并将模式重置为 identity，避免把旧脸的文字锚点带给新参考图。
+
+5. 身份特征提取与字数规则
+----------------------------
+- 角色设定页按钮：“从参考图提取身份特征”。调用用户已配置并启用的独立识图 API；不会偷用主聊天 API。
+- 提取提示词只允许记录稳定身份：脸型与轮廓、眉眼、瞳色、鼻唇、肤色、发色/发型/刘海、稳定痣/雀斑/胎记、稳定饰品与大致成年感。
+- 明确排除：参考照的表情、视线、头部角度、姿势、服装、背景、光线、滤镜、构图和情绪；也不猜测姓名、职业、身份或照片外信息。
+- identityProfile 在前端没有字数截断，也没有向识图 API 传 max_tokens 限制。识图服务本身若有其平台硬上限，属于该服务商限制；程序不会再截掉其已返回的尾句。
+- 提取结果必须显示在可编辑文本框中。用户可以删改、补足或重新提取；一次识图的误判不能静默固化。
+
+6. 相关源码与最新发布
+----------------------
+- types.ts：imageProfile.identityProfile / referenceMode。
+- apps/Character.tsx：上传参考图、提取身份特征、编辑身份锚点、模式切换。
+- utils/visionApi.ts：extractCharacterIdentityProfile，保留完整返回文本。
+- utils/chatPrompts.ts：<角色照片> 与 <照片> 的输出规则。
+- utils/applyAssistantPostProcessing.ts：解析标签并写 includeCharacter metadata。
+- apps/Chat.tsx：将 includeCharacter 传给真实生成器。
+- utils/imageGeneration.ts：按照片类型拼接提示词；只有角色出镜照才允许参考图编辑。
+
+最新发布远端提交：763986c68166e8a4df2df4cd3081cd208fd4aecd
+GitHub Pages Actions：33314708002（build 与 deploy 均为 success）
+对应链接：
+https://mobufei0818-dot.github.io/SullyOS/?v=763986c6
+
+
+九、当前最高优先级修复：照片卡即时状态与原位替换（2026-08-30）
+----------------------------------------------------------------
+
+本节记录一次已修复的聊天生图界面/数据竞争问题。以后若合并原版、重构 Chat.tsx、
+MessageItem.tsx 或 utils/db.ts，必须保留以下三项，不能只看“数据库中最后有图”就认为功能正常。
+
+一、用户可见的旧问题
+----------------------
+- 角色发出照片描述卡后，用户点击“合成照片”，当前聊天页不立刻显示右上角转圈和“正在合成”。
+- 必须退出聊天再进入，或间接刷新页面后，才会看到“正在合成”。
+- API 已成功返回图片后，卡片有时仍卡在“正在合成”，再次退出/进入才显示成图。
+
+二、根因
+----------
+1. components/chat/MessageItem.tsx 使用 React.memo 自定义比较器以降低长聊天渲染成本，
+   但比较器遗漏了 msg.metadata.imageGeneration.status/prompt/includeCharacter。照片卡的
+   pending → generating → failed 只改 metadata，React 被错误判定为“无需重画”。
+2. utils/db.ts 旧版 updateMessageMetadata 在 IndexedDB 的 store.put() 刚入队时就 resolve，
+   不等待 transaction.oncomplete。紧接着的聊天重载可以读到旧 metadata。
+3. 成图时先单独 DB.updateMessage(content)，再单独 updateMessageMetadata(status=ready)。
+   两次事务之间，聊天页或后台刷新可读到“旧正文 + 新状态”或“新正文 + 旧状态”，造成覆盖。
+4. Chat.tsx 的 reloadMessages 是异步 IndexedDB 读取；一次在点击前发起、却在点击后返回的
+   旧读取结果，会把内存里刚设置的 generating/ready 状态盖回 pending。
+
+三、已实施的修复（必须整体保留）
+------------------------------------
+- MessageItem 的 memo 比较器显式比较：
+  metadata.imageGeneration.status、prompt、includeCharacter。
+  因此点击后 pending → generating 会立刻重渲染转圈，失败也会立即显示重试状态。
+- updateMessageMetadata 改为只在 IndexedDB transaction.oncomplete 时 resolve；transaction
+  error/abort 会正确抛出，不能把未真正落盘当作成功。
+- utils/db.ts 新增 DB.updateMessageContentAndMetadata(id, content, metadata)：在同一个
+  readwrite transaction 内原子写入真实图片 data URL 与 status='ready' metadata。
+- Chat.tsx 为本地消息改动维护 messageMutationRevisionRef。reloadMessages 启动时记住 revision；
+  若读取返回前有本地照片状态改动，则丢弃该次过期读取，防止旧 pending 数据反盖新状态。
+- 生图生命周期为：点击 → 立刻 setMessages(generating) → 等待 metadata 落库 → 请求生图 →
+  原子落库图片+ready → 立刻 setMessages(ready)。失败则落库 failed 并立即渲染可重试卡。
+
+四、验证标准
+------------
+1. 不退出聊天、不切换角色：点击照片卡后应立即显示转圈与“正在合成照片”。
+2. API 成功后，同一张卡应立即原位显示图片；不应留在转圈，不应新增另一条消息。
+3. API 失败后，同一张卡应立即显示“合成失败，点击重试”，并由原版错误框展示实际错误详情。
+4. 在合成期间发生聊天重载、主动消息到达或切换后切回时，旧数据库读取不得把该卡状态倒退。
+
+五、最新发布
+--------------
+最新远端提交：f3e8a694ff36a975fcad9b7fc5d519417509cbcd
+GitHub Pages Actions：33317114507（build 与 deploy 均为 success）
+对应链接：
+https://mobufei0818-dot.github.io/SullyOS/?v=f3e8a694
+
+
+十、聊天生图自动归档至角色相册（2026-08-31）
+--------------------------------------------------
+
+一、用户确定的相册规则
+----------------------
+- 聊天中的角色照片卡成功合成后，应和用户自己发送的照片一样，自动存到小手机原有的“相册”。
+- 照片归入发出该照片的角色相册；在相册详情里点击“让 TA 点评照片”时，由同一位角色点评。
+- 同一条聊天照片卡原样重复重抽，只保留相册中的最新一张图。
+- 用户编辑该卡的生图文字后再次生成，也仍只更新原来的那一张相册图，不增加新条目。
+- 不同的聊天照片卡即使描述文字相同，仍是不同照片，各自保留一条相册记录。
+
+二、实现原则（以后不可改成按提示词去重）
+--------------------------------------------
+- 唯一归档键是聊天消息的 sourceMessageId，不是 prompt 文本。
+  同一段文字可以出现在不同聊天照片卡中，不能因此互相覆盖。
+- Chat.tsx 在生图成功后，把图片转为 blob token；聊天消息和相册条目共用该 token，避免存三份
+  base64，同时继续兼容旧的 data URL / 外链 URL。
+- 写相册前调用 DB.findGalleryImageBySourceMessageId(char.id, message.id)：
+  找到旧条目就沿用其 id 并用新图片覆盖；找不到则创建 `generated-photo-${message.id}`。
+- 相册写入是附带操作：聊天里的成图已经原子落库成功后才进行。若空间不足等原因导致相册写入失败，
+  聊天图片必须保留，并只提示“照片已合成，但没能存进相册”，绝不能误报为生图失败或回滚成图。
+- 每次重新生成都会清掉该相册条目的 review / reviewTimestamp，因为角色对上一张图的点评不应挂到
+  新图上。
+- 保存当前本地日期和最近十条对话摘要为 chatContext；相册内“让 TA 点评照片”会把它传给角色，
+  使点评保持当时的聊天语境。
+
+三、复用的原版相册能力
+------------------------
+- apps/Gallery.tsx 已具备角色相册、照片详情、查看当时对话、让角色点评、重新生成点评和删除照片。
+- 点评走角色主 API 的图片识别（Vision）调用；若用户当前主模型不支持 Vision，应显示相册原有的
+  可查错误提示，不应静默生成空点评。
+- 此次没有复制或新造第二套相册、点评或收藏数据结构；聊天生图只接入原有 GalleryImage / DB API。
+
+四、涉及源码与发布
+--------------------
+- apps/Chat.tsx：`handleGeneratePhoto` 成功分支；图片原子保存后自动 upsert 相册条目。
+- utils/db.ts：复用既有 saveGalleryImage / findGalleryImageBySourceMessageId。
+- types.ts：复用既有 GalleryImage.sourceMessageId、chatContext、review 字段。
+- apps/Gallery.tsx：复用既有“让 TA 点评照片”界面和存储，不额外改动。
+
+最新远端提交：ab3bc9ef8a2400c47ab5b6cb55110f9b484ced65
+GitHub Pages Actions：33347404851（build 与 deploy 均为 success）
+对应链接：
+https://mobufei0818-dot.github.io/SullyOS/?v=ab3bc9ef

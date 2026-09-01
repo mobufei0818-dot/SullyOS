@@ -258,6 +258,21 @@ describe('useChatAI 的分流接缝', () => {
   });
 });
 
+describe('云端即时对话的用户停止生成', () => {
+  it('聊天页只在云端待收状态提供停止入口，并先取消远端再本地销账', () => {
+    expect(chatSrc).toContain('handleStopInstantChat');
+    expect(chatSrc).toContain('ActiveMsgClient.cancelTask(pending.uuid)');
+    expect(chatSrc).toContain('abandonInstantChatPending(activeCharacterId, pending.uuid)');
+    expect(chatSrc).toContain("'停止生成'");
+  });
+
+  it('迟到的被停止任务在收件箱和 outbox 共用的落库入口被丢弃', () => {
+    const runtimeSrc = read('../utils/activeMsgRuntime.ts');
+    expect(runtimeSrc).toContain('isInstantChatCancelled(message.charId, message.taskUuid)');
+    expect(runtimeSrc).toContain('runtime-instant-chat-cancelled-dropped');
+  });
+});
+
 describe('Chat 界面的「正在输入…」', () => {
   it('灯的依据是落盘的待收记录，而不是本轮的内存状态', () => {
     expect(chatSrc).toContain('getInstantChatPending');

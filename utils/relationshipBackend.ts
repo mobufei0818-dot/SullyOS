@@ -1,8 +1,9 @@
-import type { CharacterProfile, Message, RelationshipPulse } from '../types';
+import type { CharacterProfile, Message, RelationshipJealousySignal, RelationshipPulse } from '../types';
 import { ActiveMsgStore } from './activeMsgStore';
 import { getRelationshipConfig } from './relationshipProactive';
 import { followUpDelayMs, inferFollowUpKind } from './relationshipProactive';
 import { resolveCharTimeZone } from './timezone';
+import { DB } from './db';
 
 type UserSignal = 'neutral' | 'affectionate' | 'distant';
 
@@ -36,6 +37,30 @@ const signalFrom = (message?: Message): UserSignal => {
   return 'neutral';
 };
 
+/**
+ * 私聊只上传一条已经发生的、去重的关系事实，不上传原文。
+ * 普通“喜欢/想你”属于当前角色的好感，不会误计成吃醋；只有明确偏爱他人、比较、
+ * 或对当前角色的安抚才进入醋意账本。
+ */
+const jealousySignalsFrom = (message: Message | undefined, char: CharacterProfile, knownCharacters: CharacterProfile[]): RelationshipJealousySignal[] => {
+  if (!message || message.role !== 'user') return [];
+  const text = message.content || '';
+  const createdAt = message.timestamp || Date.now();
+  const baseId = `chat-jealousy:${message.id || `${createdAt}:${char.id}`}:${char.id}`;
+  const namedOther = knownCharacters.some(other => other.id !== char.id && other.name && text.includes(other.name));
+  // CharacterProfile 本身没有“全部角色”的参数。这里从当前可见聊天原文中只判断泛化对象；
+  // 朋友圈跨角色的精确识别由 MomentsApp 的已阅账本完成。
+  const affectionateToOther = /(?:最爱|深爱|只爱|好爱|好喜欢|本命|梦中情人).{0,18}(?:他|她|ta|TA|别人|偶像|演员|人偶|纸片人|前任|男朋友|女朋友|老公|老婆|对象)|(?:偶像|演员|人偶|纸片人|前任|男朋友|女朋友|老公|老婆|对象).{0,18}(?:最爱|深爱|只爱|好爱|好喜欢|本命)/.test(text);
+  const comparison = /(?:你|你们).{0,12}(?:不如|比不上|没).{0,14}(?:他|她|别人|前任|偶像|演员)|(?:他|她|别人|前任|偶像|演员).{0,16}(?:比你|比你们).{0,12}(?:好|强|重要)/.test(text);
+  const reassurance = /(?:别吃醋|别生气|别难过|哄你|我错了|我只爱你|最爱你|只有你|没有别人)/.test(text)
+    || new RegExp(`(?:只喜欢|只爱|最爱|最在乎|选的永远是).*${char.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|${char.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.{0,14}(?:只喜欢|只爱|最爱|最在乎|别吃醋|哄你)`).test(text);
+  if (reassurance) return [{ eventId: `${baseId}:reassurance`, kind: 'reassurance', intensity: 14, reason: '用户在私聊中明确安抚或表达偏爱', createdAt }];
+  if (comparison) return [{ eventId: `${baseId}:comparison`, kind: 'chat_comparison', intensity: 19, reason: '用户在私聊中出现了明显比较或冷落信号', createdAt }];
+  if (namedOther && /(?:爱|喜欢|想|宝贝|亲亲|约会|暧昧|最爱|只爱)/.test(text)) return [{ eventId: `${baseId}:named-other`, kind: 'chat_other_affection', intensity: 15, reason: '用户在私聊中对另一位已添加角色表达了强烈偏爱', createdAt }];
+  if (affectionateToOther) return [{ eventId: `${baseId}:other-affection`, kind: 'chat_other_affection', intensity: 13, reason: '用户在私聊中对其他对象表达了强烈偏爱', createdAt }];
+  return [];
+};
+
 const endpoint = (workerUrl: string) => `${workerUrl.replace(/\/+$/, '')}/relationship/state`;
 const headers = (userId: string, token?: string) => ({
   'Content-Type': 'application/json', 'X-User-Id': userId,
@@ -66,9 +91,10 @@ const asPulse = (data: any): RelationshipPulse | null => {
 };
 
 /** 仅同步状态，不调用模型；Worker/D1 负责后续离线增长。 */
-export const syncRelationshipBackend = async (char: CharacterProfile, messages: Message[], fallback: RelationshipPulse) => {
+export const syncRelationshipBackend = async (char: CharacterProfile, messages: Message[], fallback: RelationshipPulse, knownCharacters: CharacterProfile[] = []) => {
   const global = await ActiveMsgStore.getGlobalConfig();
-  if (!global?.workerUrl || !global?.userId || !char.activeMsg2Config?.enabled) return null;
+  if (!global?.workerUrl || !global?.userId) return null;
+  const momentsSettings = await DB.getMomentsSettings().catch(() => undefined);
   const user = latest(messages, 'user');
   const assistant = latest(messages, 'assistant');
   const config = getRelationshipConfig(char);
@@ -87,12 +113,76 @@ export const syncRelationshipBackend = async (char: CharacterProfile, messages: 
       initialLonging: fallback.baselineLonging, affection: fallback.affection, jealousy: fallback.jealousy,
       innerVoice: fallback.innerVoice, lastUserAt: user?.timestamp, lastAssistantAt: assistant?.timestamp,
       userSignal: signalFrom(user),
+      jealousyEvents: jealousySignalsFrom(user, char, knownCharacters),
+      jealousyForceEnabled: momentsSettings?.jealousyForceEnabled !== false,
       ...(promise ? { promise } : {}),
     }),
   });
   const body = await response.json().catch(() => null);
   if (!response.ok || !body?.success) throw new Error(body?.error?.message || '关系状态同步失败。');
   return asPulse(body.data);
+};
+
+export interface RelationshipJealousyTarget {
+  char: CharacterProfile;
+  signals: RelationshipJealousySignal[];
+}
+
+/**
+ * 朋友圈一次事件可能被多位角色实际看见。批量提交到同一个 Worker，避免每个角色各走一套
+ * 读-改-写，也确保 Worker 以 eventId 去重并统一决定是否建立 critical AMSG 任务。
+ */
+export const reportRelationshipJealousyEvents = async (
+  targets: RelationshipJealousyTarget[],
+  forceEnabled: boolean,
+) => {
+  const nonEmpty = targets.filter(target => target.signals.length > 0);
+  if (!nonEmpty.length) return [];
+  const global = await ActiveMsgStore.getGlobalConfig();
+  if (!global?.workerUrl || !global?.userId) return [];
+  const response = await fetch(`${global.workerUrl.replace(/\/+$/, '')}/relationship/jealousy`, {
+    method: 'POST', headers: headers(global.userId, global.serverToken),
+    body: JSON.stringify({
+      forceEnabled,
+      targets: nonEmpty.map(({ char, signals }) => ({
+        charId: char.id, charName: char.name,
+        tzId: resolveCharTimeZone(char) || Intl.DateTimeFormat().resolvedOptions().timeZone,
+        credRef: `char:${char.id}/chat`, config: getRelationshipConfig(char),
+        initialLonging: char.relationshipPulse?.baselineLonging,
+        initialJealousy: char.relationshipPulse?.jealousy,
+        affection: char.relationshipPulse?.affection,
+        innerVoice: char.relationshipPulse?.innerVoice,
+        signals,
+      })),
+    }),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body?.success) throw new Error(body?.error?.message || '朋友圈醋意事实同步失败。');
+  return Array.isArray(body.data) ? body.data.map(asPulse).filter(Boolean) as RelationshipPulse[] : [];
+};
+
+/** 设置关闭时依然同步并展示醋意，但 Worker 不再强制建立 critical 联系机会。 */
+export const setRelationshipJealousyForceEnabled = async (chars: CharacterProfile[], forceEnabled: boolean) => {
+  const global = await ActiveMsgStore.getGlobalConfig();
+  if (!chars.length || !global?.workerUrl || !global?.userId) return;
+  const response = await fetch(`${global.workerUrl.replace(/\/+$/, '')}/relationship/jealousy`, {
+    method: 'POST', headers: headers(global.userId, global.serverToken),
+    body: JSON.stringify({
+      forceEnabled,
+      targets: chars.map(char => ({
+        charId: char.id, charName: char.name,
+        tzId: resolveCharTimeZone(char) || Intl.DateTimeFormat().resolvedOptions().timeZone,
+        credRef: `char:${char.id}/chat`, config: getRelationshipConfig(char),
+        initialLonging: char.relationshipPulse?.baselineLonging,
+        initialJealousy: char.relationshipPulse?.jealousy,
+        affection: char.relationshipPulse?.affection,
+        innerVoice: char.relationshipPulse?.innerVoice,
+        signals: [],
+      })),
+    }),
+  });
+  const body = await response.json().catch(() => null);
+  if (!response.ok || !body?.success) throw new Error(body?.error?.message || '醋意强制联系设置同步失败。');
 };
 
 export const fetchRelationshipBackend = async (char: CharacterProfile) => {

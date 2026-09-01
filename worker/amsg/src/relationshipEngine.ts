@@ -19,6 +19,16 @@ export interface RelationshipConfigWire {
   quietHoursEnabled: boolean;
   quietHoursStart: string;
   quietHoursEnd: string;
+  followUpPromises?: boolean;
+}
+
+export type RelationshipJealousyKind = 'moments_romance' | 'moments_intimate_comment' | 'chat_other_affection' | 'chat_comparison' | 'reassurance';
+export interface RelationshipJealousySignalWire {
+  eventId: string;
+  kind: RelationshipJealousyKind;
+  intensity: number;
+  reason: string;
+  createdAt: number;
 }
 
 interface RelationshipRecord {
@@ -52,6 +62,16 @@ interface RelationshipRecord {
   /** 最近一次带现实后续含义的话，到了合理时间窗后仅提供一次联系机会。 */
   promiseDueAt?: number;
   promiseKind?: string;
+  /** 醋意事实只保留最近一小段稳定 ID，重试/刷新不会重复加分。 */
+  jealousyEvents?: Array<{ eventId: string; kind: RelationshipJealousyKind; delta: number; reason: string; createdAt: number }>;
+  jealousyForceEnabled?: boolean;
+  /** 同一轮 >=80 只允许接管一次；跌回 70 以下才重新 armed。 */
+  jealousyCriticalLatched?: boolean;
+  criticalPendingTaskUuid?: string;
+  criticalRetryAt?: number;
+  lastJealousyEventId?: string;
+  lastJealousyReason?: string;
+  lastJealousyAt?: number;
 }
 
 export interface RelationshipSyncInput {
@@ -68,10 +88,17 @@ export interface RelationshipSyncInput {
   userSignal?: 'neutral' | 'affectionate' | 'distant';
   affection?: number;
   jealousy?: number;
+  jealousyEvents?: RelationshipJealousySignalWire[];
+  jealousyForceEnabled?: boolean;
   innerVoice?: string;
   promise?: { dueAt: number; kind: string };
   /** 用户从关系卡主动校正的数值；只改关系账本，不写进聊天正文或角色设定。 */
   manual?: { longing?: number; nextThreshold?: number };
+}
+
+interface RelationshipJealousyTarget extends Omit<RelationshipSyncInput, 'jealousyEvents' | 'jealousy'> {
+  initialJealousy?: number;
+  signals: RelationshipJealousySignalWire[];
 }
 
 export interface RelationshipEngineEnv { DB: unknown; AMSG_MASTER_KEY: string; AMSG_SERVER_TOKEN?: string; }
@@ -115,6 +142,49 @@ const canDispatchNow = (state: RelationshipRecord, now: number) => !state.pendin
   && now - state.lastDispatchAt >= minimumGapMs(state)
   && !inQuietHours(now, state.config, state.tzId);
 const sentRelief = (style: Style) => style === 'clingy' ? 6 : style === 'reserved' ? 10 : 8;
+const isCriticalDue = (state: RelationshipRecord, now: number) => Boolean(
+  state.jealousyForceEnabled
+  && state.jealousy >= 80
+  && !state.jealousyCriticalLatched
+  && !state.criticalPendingTaskUuid
+  && (!state.criticalRetryAt || state.criticalRetryAt <= now),
+);
+
+const jealousyMultiplier = (state: RelationshipRecord) => {
+  const temperament = state.config.initiativeStyle === 'clingy' ? 1.18 : state.config.initiativeStyle === 'reserved' ? 0.72 : 1;
+  // 好感越深同类事件越有分量，但不能因为 100 好感而指数膨胀。
+  return temperament * (0.78 + clamp(state.affection, 0, 100) / 220);
+};
+
+/**
+ * 账本式结算：eventId 已看过就完全无操作；“安抚”才回落，普通回复不会被误当成降醋意。
+ * 只保存原因摘要和强度，不保存帖子正文或私聊原文。
+ */
+const applyJealousySignal = (state: RelationshipRecord, raw: RelationshipJealousySignalWire) => {
+  const eventId = String(raw.eventId || '').trim();
+  if (!eventId || state.jealousyEvents?.some(item => item.eventId === eventId)) return false;
+  const intensity = clamp(Number(raw.intensity) || 0, 1, 30);
+  const positive = raw.kind !== 'reassurance';
+  const delta = positive
+    ? Math.max(1, Math.round(intensity * jealousyMultiplier(state)))
+    : -Math.max(2, Math.round(intensity * (0.75 + clamp(state.affection, 0, 100) / 250)));
+  state.jealousy = clamp(state.jealousy + delta);
+  const record = {
+    eventId, kind: raw.kind, delta,
+    reason: String(raw.reason || (positive ? '可见关系刺激' : '用户安抚')).slice(0, 120),
+    createdAt: Number(raw.createdAt) || Date.now(),
+  };
+  state.jealousyEvents = [...(state.jealousyEvents || []).filter(item => item.eventId !== eventId), record].slice(-128);
+  state.lastJealousyEventId = record.eventId;
+  state.lastJealousyReason = record.reason;
+  state.lastJealousyAt = record.createdAt;
+  // 一轮爆发只能接管一次。真正的安抚让数值回到安全线下后，才允许未来重新武装。
+  if (state.jealousy < 70) {
+    state.jealousyCriticalLatched = false;
+    state.criticalRetryAt = undefined;
+  }
+  return true;
+};
 
 const dbOf = (env: RelationshipEngineEnv): D1Like => env.DB as D1Like;
 
@@ -157,9 +227,10 @@ const save = async (env: RelationshipEngineEnv, record: RelationshipRecord) => {
     ? Math.min(normalTickAt, record.promiseDueAt)
     : normalTickAt;
   // 已超过阈值且没有明确阻塞时，下一分钟 Cron 就应尝试创建任务；不能再白等 10 分钟。
-  const shouldCheckImmediately = record.config.enabled && canDispatchNow(record, now)
+  const shouldCheckImmediately = (record.config.enabled && canDispatchNow(record, now)
     && (record.longing >= record.nextThreshold
-      || Boolean((record.config.followUpPromises || isTakeoutPromise(record.promiseKind)) && record.promiseDueAt && record.promiseDueAt <= now));
+      || Boolean((record.config.followUpPromises || isTakeoutPromise(record.promiseKind)) && record.promiseDueAt && record.promiseDueAt <= now)))
+    || isCriticalDue(record, now);
   const requestedTickAt = shouldCheckImmediately ? now : scheduledPromiseAt;
   // 关键：聊天页面的同步可每分钟发生一次，不能把已经安排好的 10 分钟检查反复推迟。
   // 仅保留「仍在未来的更早时刻」；已到期的时刻由本次保存重新排下一轮。
@@ -173,6 +244,9 @@ const save = async (env: RelationshipEngineEnv, record: RelationshipRecord) => {
 };
 
 const dispatchStatus = (state: RelationshipRecord, now = Date.now()) => {
+  if (state.criticalPendingTaskUuid) return '醋意阈值已触发：高优先级关系任务正在等待原版主动消息 2.0 结算。';
+  if (isCriticalDue(state, now)) return '醋意达到强制联系阈值，正在建立高优先级主动消息。';
+  if (state.jealousy >= 80 && !state.jealousyForceEnabled) return '醋意已达到强制阈值；“醋意强制联系”开关当前关闭，仅记录不投递。';
   if (!state.config.enabled) return '关系主动消息已关闭。';
   if (state.pendingTaskUuid) return '已有一条关系任务正在等待原版主动消息 2.0 结算。';
   if (hasReachedDailyLimit(state)) return '已达到该角色设置的每日主动消息上限。';
@@ -189,11 +263,15 @@ const publicState = (state: RelationshipRecord) => ({
   updatedAt: state.lastCalculatedAt,
   diagnostics: {
     pendingTaskUuid: state.pendingTaskUuid,
+    criticalPendingTaskUuid: state.criticalPendingTaskUuid,
     lastDispatchAt: state.lastDispatchAt || undefined,
     lastTickAt: state.lastTickAt,
     nextTickAt: state.nextTickAt,
     lastScheduleError: state.lastScheduleError,
     lastScheduleErrorAt: state.lastScheduleErrorAt,
+    lastJealousyEventId: state.lastJealousyEventId,
+    lastJealousyReason: state.lastJealousyReason,
+    jealousyCriticalLatched: state.jealousyCriticalLatched,
     status: dispatchStatus(state),
   },
 });
@@ -216,22 +294,25 @@ const replyDelta = (gapMs: number, signal: RelationshipSyncInput['userSignal']) 
   return relief + (signal === 'affectionate' ? 2 : signal === 'distant' ? 1 : 0);
 };
 
+const createRelationshipState = (userId: string, input: RelationshipSyncInput, now: number, initialJealousy?: number): RelationshipRecord => ({
+  v: 1, userId, charId: input.charId, charName: input.charName, tzId: input.tzId || 'UTC',
+  credRef: input.credRef || `char:${input.charId}/chat`, config: input.config,
+  longing: clamp(input.initialLonging ?? 20), nextThreshold: 30,
+  affection: clamp(input.affection ?? 58), jealousy: clamp(initialJealousy ?? input.jealousy ?? 8),
+  innerVoice: String(input.innerVoice || '把想说的话先悄悄留在心里。'),
+  lastCalculatedAt: now, lastUserAt: input.lastUserAt || 0, lastAssistantAt: input.lastAssistantAt || 0,
+  lastDispatchAt: 0, dailyDate: dayKey(now, input.tzId || 'UTC'), dailySent: 0,
+  jealousyForceEnabled: input.jealousyForceEnabled !== false,
+  ...((input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now
+    ? { promiseDueAt: input.promise.dueAt, promiseKind: input.promise.kind }
+    : {}),
+});
+
 export const syncRelationshipState = async (env: RelationshipEngineEnv, userId: string, input: RelationshipSyncInput) => {
   const now = Date.now();
   let state = await load(env, userId, input.charId);
   if (!state) {
-    state = {
-      v: 1, userId, charId: input.charId, charName: input.charName, tzId: input.tzId || 'UTC',
-      credRef: input.credRef || `char:${input.charId}/chat`, config: input.config,
-      longing: clamp(input.initialLonging ?? 20), nextThreshold: 30,
-      affection: clamp(input.affection ?? 58), jealousy: clamp(input.jealousy ?? 8),
-      innerVoice: String(input.innerVoice || '把想说的话先悄悄留在心里。'),
-      lastCalculatedAt: now, lastUserAt: input.lastUserAt || 0, lastAssistantAt: input.lastAssistantAt || 0,
-      lastDispatchAt: 0, dailyDate: dayKey(now, input.tzId || 'UTC'), dailySent: 0,
-      ...((input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now
-        ? { promiseDueAt: input.promise.dueAt, promiseKind: input.promise.kind }
-        : {}),
-    };
+    state = createRelationshipState(userId, input, now);
   } else {
     advance(state, now);
     const receivedNewUserMessage = (input.lastUserAt || 0) > state.lastUserAt;
@@ -242,8 +323,9 @@ export const syncRelationshipState = async (env: RelationshipEngineEnv, userId: 
     state.tzId = input.tzId || state.tzId;
     state.credRef = input.credRef || state.credRef;
     state.config = input.config;
+    if (typeof input.jealousyForceEnabled === 'boolean') state.jealousyForceEnabled = input.jealousyForceEnabled;
     if (typeof input.affection === 'number') state.affection = clamp(input.affection);
-    if (typeof input.jealousy === 'number') state.jealousy = clamp(input.jealousy);
+    // 醋意是 Worker 的事件账本状态，不能被每次聊天同步传来的旧前端快照覆盖。
     if (typeof input.innerVoice === 'string' && input.innerVoice.trim()) state.innerVoice = input.innerVoice.trim();
     if ((input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now && input.promise.dueAt - now < 3 * 60 * 60_000) {
       state.promiseDueAt = input.promise.dueAt;
@@ -253,6 +335,7 @@ export const syncRelationshipState = async (env: RelationshipEngineEnv, userId: 
   // 手动校正是 D1 账本的正式写入，不是前端展示覆写。两项都严格限制在 0–100。
   if (Number.isFinite(input.manual?.longing)) state.longing = clamp(Number(input.manual?.longing));
   if (Number.isFinite(input.manual?.nextThreshold)) state.nextThreshold = clamp(Math.round(Number(input.manual?.nextThreshold)));
+  for (const event of input.jealousyEvents || []) applyJealousySignal(state, event);
   // 兼容修复前可能已超过 100 的旧阈值，后续任意同步都会自然收敛。
   state.nextThreshold = clamp(state.nextThreshold);
   await save(env, state);
@@ -269,22 +352,94 @@ const verify = async (request: Request, env: RelationshipEngineEnv) => {
 const response = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, X-User-Id, X-Client-Token' } });
 
 /** HTTP 路由。返回 null 表示不是关系层路径，交回上游 amsg-server。 */
-export const handleRelationshipRequest = async (request: Request, env: RelationshipEngineEnv): Promise<Response | null> => {
+export const handleRelationshipRequest = async (
+  request: Request,
+  env: RelationshipEngineEnv,
+  scheduleCritical?: (state: RelationshipRecord) => Promise<{ uuid?: string; error?: string }>,
+): Promise<Response | null> => {
   const url = new URL(request.url);
-  if (!url.pathname.endsWith('/relationship/state')) return null;
+  const isStatePath = url.pathname.endsWith('/relationship/state');
+  const isJealousyPath = url.pathname.endsWith('/relationship/jealousy');
+  if (!isStatePath && !isJealousyPath) return null;
   if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type, X-User-Id, X-Client-Token' } });
   const userId = await verify(request, env);
   if (!userId) return response(401, { success: false, error: { code: 'RELATIONSHIP_AUTH_REQUIRED', message: '关系层需要有效的用户标识和共享密钥。' } });
-  if (request.method === 'GET') {
+  if (isStatePath && request.method === 'GET') {
     const charId = url.searchParams.get('charId') || '';
     const state = charId ? await load(env, userId, charId) : null;
     return response(200, { success: true, data: state ? publicState(state) : null });
   }
   if (request.method !== 'POST') return response(405, { success: false, error: { code: 'METHOD_NOT_ALLOWED', message: '只支持 GET 或 POST' } });
   try {
+    if (isJealousyPath) {
+      const body = await request.json() as { forceEnabled?: boolean; targets?: RelationshipJealousyTarget[] };
+      const targets = Array.isArray(body?.targets) ? body.targets.slice(0, 64) : [];
+      if (!targets.every(target => target?.charId && target?.config)) {
+        return response(400, { success: false, error: { code: 'INVALID_JEALOUSY_EVENTS', message: '醋意事件缺少角色或关系配置。' } });
+      }
+      const now = Date.now();
+      const results: Array<ReturnType<typeof publicState>> = [];
+      for (const target of targets) {
+        const syncInput: RelationshipSyncInput = {
+          charId: target.charId, charName: target.charName, tzId: target.tzId,
+          credRef: target.credRef, config: target.config,
+          initialLonging: target.initialLonging, affection: target.affection,
+          innerVoice: target.innerVoice,
+        };
+        let state = await load(env, userId, target.charId);
+        if (!state) state = createRelationshipState(userId, syncInput, now, target.initialJealousy);
+        else {
+          advance(state, now);
+          state.charName = target.charName || state.charName;
+          state.tzId = target.tzId || state.tzId;
+          state.credRef = target.credRef || state.credRef;
+          state.config = target.config;
+          if (typeof target.affection === 'number') state.affection = clamp(target.affection);
+          if (typeof target.innerVoice === 'string' && target.innerVoice.trim()) state.innerVoice = target.innerVoice.trim();
+        }
+        state.jealousyForceEnabled = body.forceEnabled !== false;
+        for (const signal of target.signals || []) applyJealousySignal(state, signal);
+        if (isCriticalDue(state, now) && scheduleCritical) {
+          const result = await scheduleCritical(state);
+          if (result.uuid) {
+            state.criticalPendingTaskUuid = result.uuid;
+            state.jealousyCriticalLatched = true;
+            state.criticalRetryAt = undefined;
+            state.lastScheduleError = undefined;
+            state.lastScheduleErrorAt = undefined;
+          } else {
+            state.criticalRetryAt = now + 5 * 60_000;
+            state.lastScheduleError = (result.error || '醋意高优先级任务创建没有返回任务 ID。').slice(0, 400);
+            state.lastScheduleErrorAt = now;
+          }
+        }
+        await save(env, state);
+        results.push(publicState(state));
+      }
+      return response(200, { success: true, data: results });
+    }
     const input = await request.json() as RelationshipSyncInput;
     if (!input?.charId || !input?.config) return response(400, { success: false, error: { code: 'INVALID_RELATIONSHIP_STATE', message: '缺少角色或关系配置。' } });
-    return response(200, { success: true, data: await syncRelationshipState(env, userId, input) });
+    const synced = await syncRelationshipState(env, userId, input);
+    // 私聊中的明确刺激同样不必等到下一分钟 Cron；只有跨过阈值且未锁定时才会走一次。
+    const state = await load(env, userId, input.charId);
+    if (state && isCriticalDue(state, Date.now()) && scheduleCritical) {
+      const result = await scheduleCritical(state);
+      if (result.uuid) {
+        state.criticalPendingTaskUuid = result.uuid;
+        state.jealousyCriticalLatched = true;
+        state.criticalRetryAt = undefined;
+        state.lastScheduleError = undefined;
+        state.lastScheduleErrorAt = undefined;
+      } else {
+        state.criticalRetryAt = Date.now() + 5 * 60_000;
+        state.lastScheduleError = (result.error || '醋意高优先级任务创建没有返回任务 ID。').slice(0, 400);
+        state.lastScheduleErrorAt = Date.now();
+      }
+      await save(env, state);
+      return response(200, { success: true, data: publicState(state) });
+    }
+    return response(200, { success: true, data: synced });
   } catch (error) {
     return response(400, { success: false, error: { code: 'RELATIONSHIP_STATE_FAILED', message: error instanceof Error ? error.message : '关系状态保存失败。' } });
   }
@@ -293,7 +448,7 @@ export const handleRelationshipRequest = async (request: Request, env: Relations
 /**
  * Cron 只推进分数并挑出可派发对象。真正的原版任务由 index.ts 注入的 schedule 回调创建。
  */
-export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: (state: RelationshipRecord) => Promise<{ uuid?: string; error?: string }>) => {
+export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: (state: RelationshipRecord, kind?: 'normal' | 'jealousy-critical') => Promise<{ uuid?: string; error?: string }>) => {
   await ensureTable(env);
   const rows = await dbOf(env).prepare('SELECT user_id, char_id, payload FROM sully_relationship_state WHERE next_tick_at <= ? LIMIT 200').bind(Date.now()).all<{ user_id?: string; char_id?: string; payload?: string }>();
   const now = Date.now();
@@ -306,10 +461,11 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
       const key = await deriveUserEncryptionKey(row.user_id, env.AMSG_MASTER_KEY);
       state = JSON.parse(await decryptFromStorage(row.payload, key)) as RelationshipRecord;
     } catch { continue; }
-    if (!state.config.enabled) continue;
+    const criticalDueBeforeAdvance = isCriticalDue(state, now);
+    if (!state.config.enabled && !criticalDueBeforeAdvance) continue;
     // `lastCalculatedAt` 会在前端每次同步时推进，不能拿它节流 Cron；否则打开聊天页
     // 反而会让检查永远达不到 10 分钟。Cron 专用的 lastTickAt 只在本循环成功检查后更新。
-    if (state.lastTickAt && now - state.lastTickAt < 10 * 60_000) continue;
+    if (!criticalDueBeforeAdvance && state.lastTickAt && now - state.lastTickAt < 10 * 60_000) continue;
     advance(state, now);
     state.nextThreshold = clamp(state.nextThreshold);
     state.lastTickAt = now;
@@ -320,19 +476,35 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
     const promiseDue = Boolean((state.config.followUpPromises || isTakeoutPromise(state.promiseKind)) && state.promiseDueAt && now >= state.promiseDueAt);
     // 数字目标的补足仅在自然空档中加速；无限模式严格只看阈值。
     const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
-    const canDispatch = canDispatchNow(state, now);
-    if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
-      const result = await schedule(state);
+    if (isCriticalDue(state, now)) {
+      const result = await schedule(state, 'jealousy-critical');
       if (result.uuid) {
-        state.pendingTaskUuid = result.uuid;
+        state.criticalPendingTaskUuid = result.uuid;
+        state.jealousyCriticalLatched = true;
+        state.criticalRetryAt = undefined;
         state.lastScheduleError = undefined;
         state.lastScheduleErrorAt = undefined;
-        state.promiseDueAt = undefined;
-        state.promiseKind = undefined;
         scheduled += 1;
       } else {
-        state.lastScheduleError = (result.error || '原版主动消息任务创建没有返回任务 ID。').slice(0, 400);
+        state.criticalRetryAt = now + 5 * 60_000;
+        state.lastScheduleError = (result.error || '醋意高优先级任务创建没有返回任务 ID。').slice(0, 400);
         state.lastScheduleErrorAt = now;
+      }
+    } else {
+      const canDispatch = canDispatchNow(state, now);
+      if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
+        const result = await schedule(state, 'normal');
+        if (result.uuid) {
+          state.pendingTaskUuid = result.uuid;
+          state.lastScheduleError = undefined;
+          state.lastScheduleErrorAt = undefined;
+          state.promiseDueAt = undefined;
+          state.promiseKind = undefined;
+          scheduled += 1;
+        } else {
+          state.lastScheduleError = (result.error || '原版主动消息任务创建没有返回任务 ID。').slice(0, 400);
+          state.lastScheduleErrorAt = now;
+        }
       }
     }
     await save(env, state);
@@ -345,11 +517,18 @@ export const settleRelationshipTask = async (args: { userId: string; charId: str
   const env = configuredEnv;
   if (!env || !args.userId || !args.charId || !args.taskUuid) return;
   const state = await load(env, args.userId, args.charId);
-  if (!state || state.pendingTaskUuid !== args.taskUuid) return;
+  if (!state || (state.pendingTaskUuid !== args.taskUuid && state.criticalPendingTaskUuid !== args.taskUuid)) return;
   const now = Date.now();
   advance(state, now);
-  state.pendingTaskUuid = undefined;
+  const critical = state.criticalPendingTaskUuid === args.taskUuid;
+  if (critical) state.criticalPendingTaskUuid = undefined;
+  else state.pendingTaskUuid = undefined;
   if (args.sent) {
+    if (critical) {
+      // 强势联系本身不等于被安抚。醋意只会由之后明确的安抚事实回落。
+      await save(env, state);
+      return;
+    }
     // 只有用户实际收到了角色消息，才视为角色获得一次情绪释放。
     // 以回落后的实时思念值重新设定下一个 +30 阈值，而不是沿用旧阈值累加。
     state.longing = clamp(state.longing - sentRelief(state.config.initiativeStyle));

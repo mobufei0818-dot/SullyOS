@@ -58,6 +58,14 @@ const WORKERS = [
   // public/ 副本给设置页「复制 Worker 代码」按钮 fetch。amsg-server 2.6.0-next.2 起
   // 全 Web Crypto，和 instant 一样免 nodejs_compat flag。
   { name: 'amsg', outName: 'amsg-worker.bundle.js' },
+  // 朋友圈路由的独立预览 bundle。正式部署仍使用上面 amsg 产物（其中已挂载 /moments/*），
+  // 这里不写 public/，只是让源码与测试用 preview bundle 不会漂移。
+  {
+    name: 'moments-route-preview',
+    entryPath: 'worker/moments/src/index.ts',
+    outWorker: 'worker/moments/worker.bundle.js',
+    skipPublicOut: true,
+  },
 ];
 
 // amsg-instant 0.3.0+ uses only Web Crypto (globalThis.crypto.subtle); the

@@ -498,13 +498,36 @@ export interface RelationshipPulse {
   /** 关系层只读排程诊断；不含聊天正文、地址、密钥或模型配置。 */
   diagnostics?: {
     pendingTaskUuid?: string;
+    /** 醋意阈值触发的高优先级原版 AMSG 任务；与普通思念任务分开锁定。 */
+    criticalPendingTaskUuid?: string;
     lastDispatchAt?: number;
     lastTickAt?: number;
     nextTickAt?: number;
     lastScheduleError?: string;
     lastScheduleErrorAt?: number;
+    /** 最近一次被接纳的醋意事实来源；只显示稳定 ID，不显示聊天正文。 */
+    lastJealousyEventId?: string;
+    lastJealousyReason?: string;
+    jealousyCriticalLatched?: boolean;
     status?: string;
   };
+}
+
+/** 关系层接收的结构化醋意事实。正文不入 Worker，只传必要的强度和可审计原因。 */
+export type RelationshipJealousySignalKind =
+  | 'moments_romance'
+  | 'moments_intimate_comment'
+  | 'chat_other_affection'
+  | 'chat_comparison'
+  | 'reassurance';
+
+export interface RelationshipJealousySignal {
+  eventId: string;
+  kind: RelationshipJealousySignalKind;
+  /** 1–30 的原始事件强度；Worker 再按角色风格、关系与去重结算。 */
+  intensity: number;
+  reason: string;
+  createdAt: number;
 }
 
 /** 任务「没了」的回执台账（amsg-local IDB kv，按角色一条数组）。 */
@@ -3724,6 +3747,277 @@ export interface SocialAppProfile {
     bio: string;
 }
 
+// ─── 朋友圈（Moments）───
+// Dock 上的朋友圈与历史 Spark/小红书 App 共用 AppID.Social 入口，但数据域完全隔离。
+// 旧 social_posts 永远不迁移、不清空；下面的模型只属于新朋友圈。
+export type MomentsActorType = 'user' | 'character' | 'npc' | 'stranger';
+export type MomentsVisibilityMode = 'public' | 'partial' | 'exclude' | 'private';
+export type MomentsPostingMode = 'off' | 'low' | 'medium' | 'high' | 'view_only';
+/** 角色发帖与互动是两项独立行为；只看不发不应等同于不看、不互动。 */
+export type MomentsInteractionMode = 'normal' | 'reaction_only' | 'off';
+
+/** 朋友圈文本内容专用副 API。密钥只保存在本机；默认可以跟随主聊天 API。 */
+export interface MomentsApiConfig {
+    source: 'main' | 'preset' | 'custom';
+    presetId?: string;
+    enabled: boolean;
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+}
+
+export interface MomentsWorkerConfig {
+    url: string;
+    clientToken?: string;
+    userId?: string;
+}
+
+export interface MomentsWorkerDiagnostics {
+    counts: Partial<Record<MomentsPendingJob['state'], number>>;
+    recent: Array<{ level: string; code: string; message: string; createdAt: number }>;
+    checkedAt: number;
+}
+
+export interface MomentsVisibilitySnapshot {
+    /** 独立快照表的主键；嵌入 post.visibility 时同样稳定指向该帖。 */
+    id?: string;
+    postId?: string;
+    mode: MomentsVisibilityMode;
+    /** 发帖当刻冻结的可见对象，之后改分组也不能让旧帖泄露。 */
+    allowedActorIds: string[];
+    blockedActorIds: string[];
+    groupIds: string[];
+    version: number;
+    capturedAt: number;
+}
+
+export interface MomentsPost {
+    id: string;
+    authorType: MomentsActorType;
+    authorId: string;
+    authorName: string;
+    authorAvatar?: string;
+    content: string;
+    mediaIds: string[];
+    createdAt: number;
+    updatedAt?: number;
+    visibility: MomentsVisibilitySnapshot;
+    pinned?: boolean;
+    deletedAt?: number;
+    source?: 'manual' | 'character' | 'npc' | 'stranger';
+    interactionVersion?: number;
+}
+
+export interface MomentsMediaRef {
+    id: string;
+    postId: string;
+    /** 复用 Gallery / blobref 的同一张图片，不复制二进制。 */
+    url: string;
+    galleryImageId?: string;
+    createdAt: number;
+    generated?: boolean;
+    prompt?: string;
+    generationStatus?: 'pending' | 'generating' | 'ready' | 'failed';
+    generationError?: string;
+}
+
+/** 一人对一条动态最多保留一个点赞；取消点赞会删除此记录。 */
+export interface MomentsReaction {
+    id: string;
+    postId: string;
+    actorId: string;
+    actorType: MomentsActorType;
+    actorName: string;
+    actorAvatar?: string;
+    createdAt: number;
+}
+
+/**
+ * 评论与回复都在同一张表。replyToCommentId 为空时是一级评论；不把评论正文写进帖子，
+ * 这样删除一条动态时才能精确清理相关互动和后续记忆索引。
+ */
+export interface MomentsComment {
+    id: string;
+    postId: string;
+    actorId: string;
+    actorType: MomentsActorType;
+    actorName: string;
+    actorAvatar?: string;
+    content: string;
+    replyToCommentId?: string;
+    replyToActorId?: string;
+    createdAt: number;
+    deletedAt?: number;
+    source?: 'manual' | 'planned' | 'reconcile';
+}
+
+/** 角色是否真的获得、看见、被筛中互动一条动态；隐私与醋意都只读取这份台账。 */
+export interface MomentsSeenReceipt {
+    id: string;
+    postId: string;
+    actorId: string;
+    state: 'eligible' | 'screened_out' | 'delivered' | 'seen' | 'selected_for_interaction';
+    createdAt: number;
+    updatedAt?: number;
+    reason?: string;
+}
+
+/** 手动把一条朋友圈快照发给某位角色；不把整张朋友圈卡自动塞进私聊。 */
+export interface MomentsShare {
+    id: string;
+    postId: string;
+    fromActorId: string;
+    toActorId: string;
+    visibilityAtShare: 'allowed' | 'screened_out';
+    snapshotText: string;
+    snapshotMediaUrl?: string;
+    createdAt: number;
+    deliveredAt?: number;
+}
+
+export interface MomentsTempStranger {
+    id: string;
+    profileId: string;
+    createdAt: number;
+    lastMetAt: number;
+    canViewLatestTen: boolean;
+    addedAsFriendAt?: number;
+    formalCharacterId?: string;
+    generatorSeed?: string;
+    persona?: string;
+}
+
+/** 未加好友前的陌生人临时私聊；不会进入角色上下文或记忆宫殿。 */
+export interface MomentsTempTranscript {
+    id: string;
+    strangerId: string;
+    sender: 'user' | 'stranger';
+    content: string;
+    createdAt: number;
+    migratedAt?: number;
+}
+
+/** 朋友圈原始事实账本：先于记忆宫殿存在，私聊生活线直接读取它。 */
+export type MomentsEventType = 'post' | 'media' | 'reaction' | 'comment' | 'reply' | 'share' | 'seen' | 'delete';
+export interface MomentsEventLedgerEntry {
+    /** 兼容 IndexedDB keyPath；新记录与 eventId 相同。 */
+    id: string;
+    /** 全局稳定事件标识：同一事实重试/同步不产生第二条事件。 */
+    eventId?: string;
+    postId?: string;
+    actorId: string;
+    type: MomentsEventType;
+    sourceId: string;
+    /** 同一浏览器资料内严格递增；旧备份首次读取时自动补齐。 */
+    sequence?: number;
+    sourceType?: 'moments';
+    participantActorIds?: string[];
+    /** 事件发生时冻结的可见性，不跟随后续分组变化。 */
+    visibilitySnapshot?: MomentsVisibilitySnapshot;
+    status?: 'active' | 'deleted';
+    /** 删除的是哪一个事实；删帖时通常等于 postId，删评论/图片时为原 sourceId。 */
+    deletedSourceId?: string;
+    visibleToActorIds: string[];
+    createdAt: number;
+    deletedAt?: number;
+}
+
+export interface MomentsPendingJob {
+    id: string;
+    type: 'post' | 'interaction' | 'reconcile' | 'jealousy';
+    actorId?: string;
+    postId?: string;
+    dueAt: number;
+    state: 'pending' | 'running' | 'done' | 'cancelled' | 'failed';
+    createdAt: number;
+    updatedAt?: number;
+    error?: string;
+    /** 规划阶段生成的不可变任务内容；到点只消费，不再次调用模型。 */
+    payload?: Record<string, unknown>;
+    threadVersion?: number;
+    remoteTaskId?: string;
+}
+
+export interface MomentsSyncOutboxItem {
+    id: string;
+    type: 'post' | 'visibility' | 'seen' | 'interaction' | 'delete';
+    payload: Record<string, unknown>;
+    createdAt: number;
+    sentAt?: number;
+    retryCount: number;
+}
+
+export interface MomentsMemoryIndexEntry {
+    id: string;
+    actorId: string;
+    sourceId: string;
+    postId?: string;
+    memoryNodeId?: string;
+    createdAt: number;
+    deletedAt?: number;
+}
+
+export interface MomentsProfile {
+    id: string;
+    actorType: MomentsActorType;
+    displayName: string;
+    avatar?: string;
+    cover?: string;
+    bio?: string;
+    characterId?: string;
+    /** NPC 来自哪位正式角色的人设；可见性沿用该角色，避免绕过用户分组。 */
+    parentCharacterId?: string;
+    relationLabel?: string;
+    friendshipState?: 'temporary' | 'friend';
+    updatedAt: number;
+}
+
+export interface MomentsSettings {
+    id: 'main';
+    enabled: boolean;
+    /** 摇一摇陌生人仅能否看最近十条；不能互动。 */
+    strangersCanViewTen: boolean;
+    autoInteractionEnabled: boolean;
+    offlineSyncEnabled: boolean;
+    jealousyForceEnabled: boolean;
+    /** 每个正式角色的发帖档位；没有记录时视为关闭。 */
+    characterPostingModes: Record<string, MomentsPostingMode>;
+    /** 每位正式角色独立的自动互动方式。 */
+    characterInteractionModes?: Record<string, MomentsInteractionMode>;
+    /** 朋友圈专用补充分组，不修改系统角色分组或其它 App 的筛选结果。 */
+    visibilityGroups?: Array<{ id: string; name: string; actorIds: string[]; updatedAt: number }>;
+    /** 朋友圈文本规划副 API；缺省时跟随主聊天 API。 */
+    momentsApi?: MomentsApiConfig;
+    /** 旧备份兼容字段；运行时改为复用主动消息 2.0 的全局 Worker 配置，不再单独填写。 */
+    worker?: MomentsWorkerConfig;
+    /** 本地任务最近一次同步状态，便于用户知道 Worker 是否接到。 */
+    syncStatus?: 'idle' | 'syncing' | 'synced' | 'failed';
+    syncError?: string;
+    lastSyncAt?: number;
+    /** 消息页最后一次被用户实际打开的时间；未读只统计之后到达的点赞/评论。 */
+    lastInboxReadAt?: number;
+    updatedAt: number;
+}
+
+export interface MomentsBackupData {
+    schemaVersion: 1;
+    profiles: MomentsProfile[];
+    posts: MomentsPost[];
+    mediaRefs: MomentsMediaRef[];
+    visibilitySnapshots: MomentsVisibilitySnapshot[];
+    reactions: MomentsReaction[];
+    comments: MomentsComment[];
+    seenReceipts: MomentsSeenReceipt[];
+    shares: MomentsShare[];
+    tempStrangers: MomentsTempStranger[];
+    tempTranscripts: MomentsTempTranscript[];
+    eventLedger: MomentsEventLedgerEntry[];
+    settings: MomentsSettings[];
+    pendingJobs: MomentsPendingJob[];
+    syncOutbox: MomentsSyncOutboxItem[];
+    memoryIndex: MomentsMemoryIndexEntry[];
+}
+
 export interface StudyChapter {
     id: string;
     title: string;
@@ -3953,6 +4247,9 @@ export interface FullBackupData {
         userId?: string;
         userBg?: string;
     };
+
+    /** 新朋友圈完整独立数据；缺失时视为旧备份，不影响导入。 */
+    momentsData?: MomentsBackupData;
     
     mediaAssets?: {
         charId: string;

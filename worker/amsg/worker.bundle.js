@@ -662,7 +662,7 @@ function buildMultipartPushPayloads(payload, options = {}) {
     "maxChunkBytes"
   );
   const ttlMs = resolvePositiveInteger(options.ttlMs, DEFAULT_MULTIPART_TTL_MS, "ttlMs");
-  const id = typeof options.id === "string" && options.id.trim() ? options.id.trim() : `mp_${randomUUID()}`;
+  const id2 = typeof options.id === "string" && options.id.trim() ? options.id.trim() : `mp_${randomUUID()}`;
   let serialized = typeof options.serializedPayload === "string" ? options.serializedPayload : void 0;
   if (serialized === void 0) {
     try {
@@ -690,7 +690,7 @@ function buildMultipartPushPayloads(payload, options = {}) {
       messageKind: MULTIPART_MESSAGE_KIND,
       multipart: {
         version: MULTIPART_VERSION,
-        id,
+        id: id2,
         index: i + 1,
         total,
         encoding: MULTIPART_ENCODING,
@@ -1077,12 +1077,12 @@ function assertValidDecision(decision, options = {}) {
       throw new TypeError(`pushPayloads[${i}].splitPattern is removed in 0.8.0; caller is responsible for splitting`);
     }
     if (Object.prototype.hasOwnProperty.call(p, "messageId")) {
-      const id = (
+      const id2 = (
         /** @type {{ messageId?: unknown }} */
         p.messageId
       );
-      if (typeof id !== "string" || id === "") {
-        throw new TypeError(`pushPayloads[${i}].messageId must be a non-empty string when set, got ${stringifyDecisionForError(id)}`);
+      if (typeof id2 !== "string" || id2 === "") {
+        throw new TypeError(`pushPayloads[${i}].messageId must be a non-empty string when set, got ${stringifyDecisionForError(id2)}`);
       }
     }
   }
@@ -2091,7 +2091,7 @@ function stateValueBytes(value) {
   return utf82.encode(value).length;
 }
 var warnedInvalidTtl = /* @__PURE__ */ new Set();
-function planClientStateCleanup(ttl, now) {
+function planClientStateCleanup(ttl, now2) {
   if (!ttl || typeof ttl !== "object" || Array.isArray(ttl)) return [];
   const targets = [];
   for (const [namespace, days] of Object.entries(ttl)) {
@@ -2105,7 +2105,7 @@ function planClientStateCleanup(ttl, now) {
       }
       continue;
     }
-    const updatedBefore = now - days * 24 * 60 * 60 * 1e3;
+    const updatedBefore = now2 - days * 24 * 60 * 60 * 1e3;
     targets.push({ namespace, updatedBefore });
     targets.push({ namespace: chunkNamespaceFor(namespace), updatedBefore });
   }
@@ -2184,8 +2184,8 @@ async function writeClientStateEntries({ db, userId, userKey, entries }) {
   }
   return { upserted, skipped, deleted, skippedEntries };
 }
-function createStateAccessors({ db, userId, userKey, maxStateValueBytes, now }) {
-  const nowFn = typeof now === "function" ? now : Date.now;
+function createStateAccessors({ db, userId, userKey, maxStateValueBytes, now: now2 }) {
+  const nowFn = typeof now2 === "function" ? now2 : Date.now;
   const valueCeiling = Number.isInteger(maxStateValueBytes) && maxStateValueBytes > 0 ? maxStateValueBytes : DEFAULT_MAX_STATE_VALUE_BYTES;
   const readState = async (namespace) => {
     if (typeof namespace !== "string" || !namespace.trim()) {
@@ -2391,9 +2391,9 @@ function createResultEmitter({
   sessionId,
   occurrenceMs,
   webpush,
-  now
+  now: now2
 }) {
-  const nowFn = typeof now === "function" ? now : Date.now;
+  const nowFn = typeof now2 === "function" ? now2 : Date.now;
   let emitted = 0;
   const emitResult = async (payload) => {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
@@ -5296,17 +5296,17 @@ var D1Adapter = class {
     await this._db.prepare("DROP TABLE IF EXISTS message_outbox").run();
   }
   async createTask(params) {
-    const now = this._now();
+    const now2 = this._now();
     const nextSendAt = this._iso(params.next_send_at);
     const res = await this._db.prepare(
       `INSERT INTO scheduled_messages
         (user_id, uuid, encrypted_payload, next_send_at, message_type, status, retry_count, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)`
-    ).bind(params.user_id, params.uuid, params.encrypted_payload, nextSendAt, params.message_type, now, now).run();
-    const id = res.meta.last_row_id;
+    ).bind(params.user_id, params.uuid, params.encrypted_payload, nextSendAt, params.message_type, now2, now2).run();
+    const id2 = res.meta.last_row_id;
     return this._db.prepare(
       `SELECT id, uuid, next_send_at, status, created_at FROM scheduled_messages WHERE id = ?`
-    ).bind(id).first();
+    ).bind(id2).first();
   }
   /**
    * 建新任务的同时取消旧的那条（`POST /schedule-message` 的 supersedesUuid）。
@@ -5321,7 +5321,7 @@ var D1Adapter = class {
    *   真的被删掉；false = 旧行本就不存在）
    */
   async createTaskSuperseding(params, supersedesUuid) {
-    const now = this._now();
+    const now2 = this._now();
     const nextSendAt = this._iso(params.next_send_at);
     const statements = [
       this._db.prepare(
@@ -5331,7 +5331,7 @@ var D1Adapter = class {
         `INSERT INTO scheduled_messages
           (user_id, uuid, encrypted_payload, next_send_at, message_type, status, retry_count, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?)`
-      ).bind(params.user_id, params.uuid, params.encrypted_payload, nextSendAt, params.message_type, now, now)
+      ).bind(params.user_id, params.uuid, params.encrypted_payload, nextSendAt, params.message_type, now2, now2)
     ];
     let results;
     if (typeof this._db.batch === "function") {
@@ -5341,10 +5341,10 @@ var D1Adapter = class {
       for (const stmt of statements) results.push(await stmt.run());
     }
     const superseded = (results[0].meta.changes || 0) > 0;
-    const id = results[1].meta.last_row_id;
+    const id2 = results[1].meta.last_row_id;
     const row = await this._db.prepare(
       "SELECT id, uuid, next_send_at, status, created_at FROM scheduled_messages WHERE id = ?"
-    ).bind(id).first();
+    ).bind(id2).first();
     return { ...row, superseded };
   }
   async getTaskByUuid(uuid, userId) {
@@ -5397,9 +5397,9 @@ var D1Adapter = class {
     return this._db.prepare("SELECT * FROM scheduled_messages WHERE id = ?").bind(taskId).first();
   }
   async updateTaskByUuid(uuid, userId, encryptedPayload, extraFields) {
-    const now = this._now();
+    const now2 = this._now();
     const sets = ["encrypted_payload = ?", "updated_at = ?"];
-    const values = [encryptedPayload, now];
+    const values = [encryptedPayload, now2];
     if (extraFields) {
       for (const [key, value] of Object.entries(extraFields)) {
         if (!UPDATABLE_COLUMNS.has(key)) {
@@ -5415,7 +5415,7 @@ var D1Adapter = class {
        WHERE uuid = ? AND user_id = ? AND status = 'pending'`
     ).bind(...values).run();
     if (!res.meta.changes) return null;
-    return { uuid, updated_at: now };
+    return { uuid, updated_at: now2 };
   }
   async deleteTaskById(taskId) {
     const res = await this._db.prepare("DELETE FROM scheduled_messages WHERE id = ?").bind(taskId).run();
@@ -5428,7 +5428,7 @@ var D1Adapter = class {
     return res.meta.changes > 0;
   }
   async getPendingTasks(limit = 50) {
-    const now = this._now();
+    const now2 = this._now();
     const res = await this._db.prepare(
       `SELECT ${TASK_DELIVERY_COLUMNS}
        FROM scheduled_messages
@@ -5437,7 +5437,7 @@ var D1Adapter = class {
          AND (retry_after IS NULL OR retry_after <= ?)
        ORDER BY next_send_at ASC
        LIMIT ?`
-    ).bind(now, now, now, limit).all();
+    ).bind(now2, now2, now2, limit).all();
     return res.results || [];
   }
   /**
@@ -5477,7 +5477,7 @@ var D1Adapter = class {
   async claimTask(taskId, expectedNextSendAt, leaseUntil, serializeGroup = null) {
     const expected = typeof expectedNextSendAt === "string" ? expectedNextSendAt : this._iso(expectedNextSendAt);
     const grouped = typeof serializeGroup === "string" && serializeGroup.length > 0;
-    const now = this._now();
+    const now2 = this._now();
     const sets = ["lease_until = ?"];
     const values = [this._iso(leaseUntil)];
     if (grouped) {
@@ -5485,10 +5485,10 @@ var D1Adapter = class {
       values.push(serializeGroup);
     }
     sets.push("updated_at = ?");
-    values.push(now);
+    values.push(now2);
     let where = `id = ? AND status = 'pending' AND next_send_at = ?
           AND (lease_until IS NULL OR lease_until <= ?)`;
-    values.push(taskId, expected, now);
+    values.push(taskId, expected, now2);
     if (grouped) {
       where += `
           AND NOT EXISTS (
@@ -5496,7 +5496,7 @@ var D1Adapter = class {
              WHERE busy.serialize_group = ? AND busy.id <> ?
                AND busy.status = 'pending' AND busy.lease_until > ?
           )`;
-      values.push(serializeGroup, taskId, now);
+      values.push(serializeGroup, taskId, now2);
     }
     const res = await this._db.prepare(
       `UPDATE scheduled_messages SET ${sets.join(", ")} WHERE ${where}`
@@ -5739,14 +5739,14 @@ var D1Adapter = class {
    */
   async upsertLlmCredentials(userId, entries) {
     if (!entries || entries.length === 0) return 0;
-    const now = this._now();
+    const now2 = this._now();
     const SQL = `INSERT INTO llm_credentials (user_id, cred_id, encrypted_value, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (user_id, cred_id) DO UPDATE SET
          encrypted_value = excluded.encrypted_value,
          updated_at = excluded.updated_at`;
     const statements = entries.map(
-      (entry) => this._db.prepare(SQL).bind(userId, entry.credId, entry.encryptedValue, now, now)
+      (entry) => this._db.prepare(SQL).bind(userId, entry.credId, entry.encryptedValue, now2, now2)
     );
     let results;
     if (typeof this._db.batch === "function") {
@@ -6400,7 +6400,7 @@ function createOutboxHandler(ctx) {
     if (messageIds.length > MAX_OUTBOX_ACK_IDS) {
       return err4(400, "TOO_MANY_OUTBOX_ACK_IDS", `\u5355\u6B21\u6700\u591A ack ${MAX_OUTBOX_ACK_IDS} \u6761`, { count: messageIds.length });
     }
-    if (!messageIds.every((id) => typeof id === "string" && id.trim())) {
+    if (!messageIds.every((id2) => typeof id2 === "string" && id2.trim())) {
       return err4(400, "INVALID_OUTBOX_ACK", "messageIds \u7684\u6BCF\u4E00\u9879\u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
     }
     if (typeof db.ackOutboxMessages !== "function") {
@@ -6516,25 +6516,25 @@ function jsonResponse(status, body, extraHeaders) {
 }
 var CORS_ALLOW_HEADERS = "Content-Type, X-User-Id, X-Payload-Encrypted, X-Encryption-Version, X-Response-Encrypted, X-Client-Token";
 var CORS_ALLOW_METHODS = "GET, POST, PUT, DELETE, OPTIONS";
-function corsHeadersFor(cors, requestOrigin) {
-  if (!cors || cors.origin == null) return null;
+function corsHeadersFor(cors2, requestOrigin) {
+  if (!cors2 || cors2.origin == null) return null;
   let allowOrigin;
-  if (typeof cors.origin === "function") {
+  if (typeof cors2.origin === "function") {
     try {
-      allowOrigin = cors.origin(requestOrigin) || null;
+      allowOrigin = cors2.origin(requestOrigin) || null;
     } catch (error) {
       console.warn("[amsg single-user] cors.origin \u56DE\u8C03\u629B\u9519\uFF0C\u6309\u4E0D\u653E\u884C\u5904\u7406:", error && error.message);
       allowOrigin = null;
     }
   } else {
-    allowOrigin = cors.origin;
+    allowOrigin = cors2.origin;
   }
   if (!allowOrigin) return null;
   const headers = {
     "Access-Control-Allow-Origin": allowOrigin,
     "Access-Control-Allow-Methods": CORS_ALLOW_METHODS,
-    "Access-Control-Allow-Headers": cors.allowHeaders || CORS_ALLOW_HEADERS,
-    "Access-Control-Max-Age": String(cors.maxAge ?? 86400)
+    "Access-Control-Allow-Headers": cors2.allowHeaders || CORS_ALLOW_HEADERS,
+    "Access-Control-Max-Age": String(cors2.maxAge ?? 86400)
   };
   if (allowOrigin !== "*") headers["Vary"] = "Origin";
   return headers;
@@ -6557,7 +6557,7 @@ function publicErrorCause(cause) {
     safe
   );
 }
-function internalErrorResponse(cors, cause) {
+function internalErrorResponse(cors2, cause) {
   return jsonResponse(500, {
     success: false,
     error: {
@@ -6565,7 +6565,7 @@ function internalErrorResponse(cors, cause) {
       message: "\u670D\u52A1\u5668\u5185\u90E8\u9519\u8BEF",
       ...cause ? { cause } : {}
     }
-  }, cors);
+  }, cors2);
 }
 function pathOf(request) {
   try {
@@ -6657,10 +6657,10 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
         isSameOriginCall(request, requestOrigin) ? cause : publicErrorCause(cause)
       );
     }
-    const cors = corsHeadersFor(cfg.cors, requestOrigin);
+    const cors2 = corsHeadersFor(cfg.cors, requestOrigin);
     try {
       if (method === "OPTIONS") {
-        return cors ? new Response(null, { status: 204, headers: cors }) : jsonResponse(404, { success: false, error: { code: "NOT_FOUND", message: "Unknown route" } });
+        return cors2 ? new Response(null, { status: 204, headers: cors2 }) : jsonResponse(404, { success: false, error: { code: "NOT_FOUND", message: "Unknown route" } });
       }
       const server = createSingleUserServer(cfg);
       const url = request.url;
@@ -6669,7 +6669,7 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
       let body = "";
       if (method === "POST" || method === "PUT" || method === "DELETE") {
         const read = await readRequestBody(request, { maxBytes: cfg.maxRequestBodyBytes });
-        if (!read.ok) return jsonResponse(read.error.status, read.error.body, cors);
+        if (!read.ok) return jsonResponse(read.error.status, read.error.body, cors2);
         body = read.body;
       }
       let result;
@@ -6716,12 +6716,12 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
       } else {
         result = { status: 404, body: { success: false, error: { code: "NOT_FOUND", message: "Unknown route" } } };
       }
-      return jsonResponse(result.status, result.body, cors);
+      return jsonResponse(result.status, result.body, cors2);
     } catch (error) {
       console.error("[amsg single-user] fetch() unhandled error:", error && error.message);
       const cause = summarizeErrorCause(error, "request");
       await reportError({ stage: "request", error, cause, path: pathOf(request) });
-      return internalErrorResponse(cors, cause);
+      return internalErrorResponse(cors2, cause);
     }
   }
   async function scheduled(event, env) {
@@ -6762,11 +6762,11 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
     const cfg = await resolveConfig(env);
     return getSchemaVersion(cfg.db);
   }
-  async function ensureSchema2(env) {
+  async function ensureSchema22(env) {
     const cfg = await resolveConfig(env);
     return ensureSchema(cfg.db);
   }
-  return { fetch: fetch2, scheduled, runTask: runTask2, getSchemaVersion: getSchemaVersion2, ensureSchema: ensureSchema2 };
+  return { fetch: fetch2, scheduled, runTask: runTask2, getSchemaVersion: getSchemaVersion2, ensureSchema: ensureSchema22 };
 }
 
 // utils/amsgBundleVersion.ts
@@ -7093,9 +7093,9 @@ function getFlowNarrativeKey(hour) {
   return "evening";
 }
 var PRE_DAWN_END_HOUR = 5;
-var resolveScheduleSlots = (schedule, now) => {
+var resolveScheduleSlots = (schedule, now2) => {
   if (!schedule?.slots?.length) return { current: null, next: null };
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const currentMinutes = now2.getHours() * 60 + now2.getMinutes();
   for (let i = schedule.slots.length - 1; i >= 0; i--) {
     const [h, m] = schedule.slots[i].startTime.split(":").map(Number);
     if (!Number.isFinite(h) || !Number.isFinite(m)) continue;
@@ -7108,12 +7108,12 @@ var resolveScheduleSlots = (schedule, now) => {
   }
   return { current: null, next: schedule.slots[0] };
 };
-var buildScheduleInjection = (schedule, evolvedNarrative, now = /* @__PURE__ */ new Date(), options = {}) => {
+var buildScheduleInjection = (schedule, evolvedNarrative, now2 = /* @__PURE__ */ new Date(), options = {}) => {
   if (!schedule || !schedule.slots || schedule.slots.length === 0) return "";
-  const { current: currentSlot, next: nextSlot } = resolveScheduleSlots(schedule, now);
+  const { current: currentSlot, next: nextSlot } = resolveScheduleSlots(schedule, now2);
   const withClock = options.includeClock !== false;
   const withTime = (text, startTime) => withClock ? `${text}\uFF08${startTime}\uFF09` : text;
-  const isPreDawnCarryOver = !currentSlot && now.getHours() < PRE_DAWN_END_HOUR;
+  const isPreDawnCarryOver = !currentSlot && now2.getHours() < PRE_DAWN_END_HOUR;
   let slotHeader = "";
   if (currentSlot) {
     slotHeader = withClock ? `\u5F53\u524D\u65F6\u6BB5\uFF1A${currentSlot.startTime} \u4F60\u6B63\u5728${currentSlot.activity}` : `\u5F53\u524D\u65F6\u6BB5\uFF1A\u4F60\u6B63\u5728${currentSlot.activity}`;
@@ -7133,7 +7133,7 @@ var buildScheduleInjection = (schedule, evolvedNarrative, now = /* @__PURE__ */ 
   if (evolvedNarrative) {
     narrative = evolvedNarrative;
   } else if (schedule.flowNarrative && Object.keys(schedule.flowNarrative).length > 0) {
-    const key = isPreDawnCarryOver ? "evening" : getFlowNarrativeKey(now.getHours());
+    const key = isPreDawnCarryOver ? "evening" : getFlowNarrativeKey(now2.getHours());
     narrative = schedule.flowNarrative[key] || schedule.flowNarrative["evening"] || schedule.flowNarrative["afternoon"] || schedule.flowNarrative["morning"] || "";
   } else if (currentSlot?.innerThought) {
     narrative = currentSlot.innerThought;
@@ -7527,13 +7527,13 @@ var plateConsolidateHandler = {
       await discardJob(ctx.writeState, jobId);
       throw new Error(message);
     };
-    let json;
+    let json2;
     try {
-      json = await unpackStateValue(row.value);
+      json2 = await unpackStateValue(row.value);
     } catch (error) {
       return discardAndFail(`\u95E8\u724C\u6574\u7406 job ${jobId} \u7684\u8F93\u5165\u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09\uFF1A${String(error)}`);
     }
-    const job = parsePlateJobInput(json);
+    const job = parsePlateJobInput(json2);
     if (!job) return discardAndFail(`\u95E8\u724C\u6574\u7406 job ${jobId} \u7684\u8F93\u5165\u89E3\u6790\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09`);
     if (job.charId !== charId) {
       return discardAndFail(`\u95E8\u724C\u6574\u7406 job ${jobId} \u7684 charId \u4E0E\u4EFB\u52A1\u5BF9\u4E0D\u4E0A`);
@@ -8237,9 +8237,9 @@ var LUNAR_FESTIVAL_DATES = {
   "2035-10-09": "\u91CD\u9633\u8282"
 };
 var checkSpecialDates = (tz, nowMs) => {
-  const now = nowInTimeZone(tz, nowMs == null ? void 0 : new Date(nowMs));
-  const monthDay = `${(now.getMonth() + 1).toString().padStart(2, "0")}-${now.getDate().toString().padStart(2, "0")}`;
-  const fullDate = `${now.getFullYear()}-${monthDay}`;
+  const now2 = nowInTimeZone(tz, nowMs == null ? void 0 : new Date(nowMs));
+  const monthDay = `${(now2.getMonth() + 1).toString().padStart(2, "0")}-${now2.getDate().toString().padStart(2, "0")}`;
+  const fullDate = `${now2.getFullYear()}-${monthDay}`;
   const special = [];
   if (SPECIAL_DATES[monthDay]) {
     special.push(SPECIAL_DATES[monthDay]);
@@ -8609,9 +8609,9 @@ var isEncryptedEnvelope2 = (value) => {
   return typeof env.iv === "string" && typeof env.authTag === "string" && typeof env.encryptedData === "string";
 };
 var handleInstantChat = async (args) => {
-  const { request, env, upstream: upstream2, json } = args;
+  const { request, env, upstream: upstream2, json: json2 } = args;
   const stateBackoffMs = args.stateBackoffMs ?? STATE_FORWARD_BACKOFF_MS;
-  const fail2 = (status, code, message, extra) => json(status, { success: false, error: { code, message, ...extra ?? {} } });
+  const fail2 = (status, code, message, extra) => json2(status, { success: false, error: { code, message, ...extra ?? {} } });
   const token = (env.AMSG_SERVER_TOKEN ?? "").trim();
   const clientToken = request.headers.get("X-Client-Token") ?? "";
   if (token) {
@@ -8680,7 +8680,7 @@ var handleInstantChat = async (args) => {
     if (stateResponse.status < 500) break;
   }
   if (!stateResponse.ok) {
-    return json(stateResponse.status, {
+    return json2(stateResponse.status, {
       success: false,
       error: {
         code: "INSTANT_CHAT_STATE_FAILED",
@@ -8693,7 +8693,7 @@ var handleInstantChat = async (args) => {
   }
   const skippedEntries = stateBody?.data?.skippedEntries;
   if (Array.isArray(skippedEntries) && skippedEntries.some((entry) => entry?.key === AMSG_FIRE_PACK_KEY)) {
-    return json(409, {
+    return json2(409, {
       success: false,
       error: {
         code: "INSTANT_CHAT_STATE_STALE",
@@ -8713,7 +8713,7 @@ var handleInstantChat = async (args) => {
   const taskBody = await readBody(taskResponse);
   if (!taskResponse.ok) {
     const taskCause = readUpstreamCause(taskResponse.status, taskBody);
-    return json(taskResponse.status, {
+    return json2(taskResponse.status, {
       success: false,
       error: {
         code: "INSTANT_CHAT_TASK_FAILED",
@@ -8733,7 +8733,7 @@ var handleInstantChat = async (args) => {
   const kicked = await kickInstantTick(env, uuid);
   if (!kicked.ok && kicked.reason === "missing-binding") {
     console.error("[amsg:instant-chat] \u6CA1\u6709 INSTANT_TICK \u7ED1\u5B9A\uFF1A\u8FD9\u53F0 Worker \u662F\u65E7\u7248\u672C\uFF0C\u9700\u8981\u66F4\u65B0");
-    return json(503, {
+    return json2(503, {
       success: false,
       error: {
         code: "INSTANT_CHAT_WORKER_OUTDATED",
@@ -8746,7 +8746,7 @@ var handleInstantChat = async (args) => {
   if (!kicked.ok) {
     console.warn("[amsg:instant-chat] \u53EB\u9192 DO \u5931\u8D25\uFF08\u7B49 cron \u515C\u5E95\uFF09", kicked.error);
   }
-  return json(202, { status: "accepted", uuid });
+  return json2(202, { status: "accepted", uuid });
 };
 
 // worker/amsg/src/selfUpdate.ts
@@ -8999,10 +8999,10 @@ var inQuietHours = (time, config, tzId) => {
     const minute = Number(part.find((item) => item.type === "minute")?.value || 0);
     const [sh = "0", sm = "0"] = config.quietHoursStart.split(":");
     const [eh = "0", em = "0"] = config.quietHoursEnd.split(":");
-    const now = hour * 60 + minute;
+    const now2 = hour * 60 + minute;
     const start = Number(sh) * 60 + Number(sm);
     const end = Number(eh) * 60 + Number(em);
-    return start < end ? now >= start && now < end : now >= start || now < end;
+    return start < end ? now2 >= start && now2 < end : now2 >= start || now2 < end;
   } catch {
     return false;
   }
@@ -9012,8 +9012,39 @@ var hasReachedDailyLimit = (state) => {
   const limit = Math.max(0, state.config.dailyLimit || 0);
   return limit > 0 && state.dailySent >= limit;
 };
-var canDispatchNow = (state, now) => !state.pendingTaskUuid && !hasReachedDailyLimit(state) && now - state.lastDispatchAt >= minimumGapMs(state) && !inQuietHours(now, state.config, state.tzId);
+var canDispatchNow = (state, now2) => !state.pendingTaskUuid && !hasReachedDailyLimit(state) && now2 - state.lastDispatchAt >= minimumGapMs(state) && !inQuietHours(now2, state.config, state.tzId);
 var sentRelief = (style) => style === "clingy" ? 6 : style === "reserved" ? 10 : 8;
+var isCriticalDue = (state, now2) => Boolean(
+  state.jealousyForceEnabled && state.jealousy >= 80 && !state.jealousyCriticalLatched && !state.criticalPendingTaskUuid && (!state.criticalRetryAt || state.criticalRetryAt <= now2)
+);
+var jealousyMultiplier = (state) => {
+  const temperament = state.config.initiativeStyle === "clingy" ? 1.18 : state.config.initiativeStyle === "reserved" ? 0.72 : 1;
+  return temperament * (0.78 + clamp(state.affection, 0, 100) / 220);
+};
+var applyJealousySignal = (state, raw) => {
+  const eventId = String(raw.eventId || "").trim();
+  if (!eventId || state.jealousyEvents?.some((item) => item.eventId === eventId)) return false;
+  const intensity = clamp(Number(raw.intensity) || 0, 1, 30);
+  const positive = raw.kind !== "reassurance";
+  const delta = positive ? Math.max(1, Math.round(intensity * jealousyMultiplier(state))) : -Math.max(2, Math.round(intensity * (0.75 + clamp(state.affection, 0, 100) / 250)));
+  state.jealousy = clamp(state.jealousy + delta);
+  const record = {
+    eventId,
+    kind: raw.kind,
+    delta,
+    reason: String(raw.reason || (positive ? "\u53EF\u89C1\u5173\u7CFB\u523A\u6FC0" : "\u7528\u6237\u5B89\u629A")).slice(0, 120),
+    createdAt: Number(raw.createdAt) || Date.now()
+  };
+  state.jealousyEvents = [...(state.jealousyEvents || []).filter((item) => item.eventId !== eventId), record].slice(-128);
+  state.lastJealousyEventId = record.eventId;
+  state.lastJealousyReason = record.reason;
+  state.lastJealousyAt = record.createdAt;
+  if (state.jealousy < 70) {
+    state.jealousyCriticalLatched = false;
+    state.criticalRetryAt = void 0;
+  }
+  return true;
+};
 var dbOf = (env) => env.DB;
 var ensureTable = (env) => {
   if (schemaReady) return schemaReady;
@@ -9043,23 +9074,26 @@ var load = async (env, userId, charId) => {
 var save = async (env, record) => {
   const key = await deriveUserEncryptionKey(record.userId, env.AMSG_MASTER_KEY);
   const payload = await encryptForStorage(JSON.stringify(record), key);
-  const now = Date.now();
-  const normalTickAt = record.config.enabled ? now + 10 * 6e4 : now + 24 * HOUR;
-  const scheduledPromiseAt = record.promiseDueAt && record.promiseDueAt > now ? Math.min(normalTickAt, record.promiseDueAt) : normalTickAt;
-  const shouldCheckImmediately = record.config.enabled && canDispatchNow(record, now) && (record.longing >= record.nextThreshold || Boolean((record.config.followUpPromises || isTakeoutPromise(record.promiseKind)) && record.promiseDueAt && record.promiseDueAt <= now));
-  const requestedTickAt = shouldCheckImmediately ? now : scheduledPromiseAt;
-  const nextTickAt = record.nextTickAt && record.nextTickAt > now ? Math.min(record.nextTickAt, requestedTickAt) : requestedTickAt;
+  const now2 = Date.now();
+  const normalTickAt = record.config.enabled ? now2 + 10 * 6e4 : now2 + 24 * HOUR;
+  const scheduledPromiseAt = record.promiseDueAt && record.promiseDueAt > now2 ? Math.min(normalTickAt, record.promiseDueAt) : normalTickAt;
+  const shouldCheckImmediately = record.config.enabled && canDispatchNow(record, now2) && (record.longing >= record.nextThreshold || Boolean((record.config.followUpPromises || isTakeoutPromise(record.promiseKind)) && record.promiseDueAt && record.promiseDueAt <= now2)) || isCriticalDue(record, now2);
+  const requestedTickAt = shouldCheckImmediately ? now2 : scheduledPromiseAt;
+  const nextTickAt = record.nextTickAt && record.nextTickAt > now2 ? Math.min(record.nextTickAt, requestedTickAt) : requestedTickAt;
   record.nextTickAt = nextTickAt;
   await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at, next_tick_at)
-    VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, next_tick_at = excluded.next_tick_at`).bind(record.userId, record.charId, payload, now, nextTickAt).run();
+    VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, next_tick_at = excluded.next_tick_at`).bind(record.userId, record.charId, payload, now2, nextTickAt).run();
 };
-var dispatchStatus = (state, now = Date.now()) => {
+var dispatchStatus = (state, now2 = Date.now()) => {
+  if (state.criticalPendingTaskUuid) return "\u918B\u610F\u9608\u503C\u5DF2\u89E6\u53D1\uFF1A\u9AD8\u4F18\u5148\u7EA7\u5173\u7CFB\u4EFB\u52A1\u6B63\u5728\u7B49\u5F85\u539F\u7248\u4E3B\u52A8\u6D88\u606F 2.0 \u7ED3\u7B97\u3002";
+  if (isCriticalDue(state, now2)) return "\u918B\u610F\u8FBE\u5230\u5F3A\u5236\u8054\u7CFB\u9608\u503C\uFF0C\u6B63\u5728\u5EFA\u7ACB\u9AD8\u4F18\u5148\u7EA7\u4E3B\u52A8\u6D88\u606F\u3002";
+  if (state.jealousy >= 80 && !state.jealousyForceEnabled) return "\u918B\u610F\u5DF2\u8FBE\u5230\u5F3A\u5236\u9608\u503C\uFF1B\u201C\u918B\u610F\u5F3A\u5236\u8054\u7CFB\u201D\u5F00\u5173\u5F53\u524D\u5173\u95ED\uFF0C\u4EC5\u8BB0\u5F55\u4E0D\u6295\u9012\u3002";
   if (!state.config.enabled) return "\u5173\u7CFB\u4E3B\u52A8\u6D88\u606F\u5DF2\u5173\u95ED\u3002";
   if (state.pendingTaskUuid) return "\u5DF2\u6709\u4E00\u6761\u5173\u7CFB\u4EFB\u52A1\u6B63\u5728\u7B49\u5F85\u539F\u7248\u4E3B\u52A8\u6D88\u606F 2.0 \u7ED3\u7B97\u3002";
   if (hasReachedDailyLimit(state)) return "\u5DF2\u8FBE\u5230\u8BE5\u89D2\u8272\u8BBE\u7F6E\u7684\u6BCF\u65E5\u4E3B\u52A8\u6D88\u606F\u4E0A\u9650\u3002";
-  if (now - state.lastDispatchAt < minimumGapMs(state)) return "\u8DDD\u79BB\u4E0A\u4E00\u6B21\u5173\u7CFB\u4EFB\u52A1\u521B\u5EFA\u5C1A\u672A\u8FBE\u5230\u6700\u77ED\u95F4\u9694\u3002";
-  if (inQuietHours(now, state.config, state.tzId)) return "\u5F53\u524D\u5904\u4E8E\u8BE5\u89D2\u8272\u7684\u514D\u6253\u6270\u65F6\u6BB5\u3002";
-  if (state.longing >= state.nextThreshold && state.nextTickAt && state.nextTickAt > now) return "\u9608\u503C\u5DF2\u8FBE\u5230\uFF0C\u7B49\u5F85 Worker \u7684\u4E0B\u4E00\u6B21\u5173\u7CFB\u68C0\u67E5\u3002";
+  if (now2 - state.lastDispatchAt < minimumGapMs(state)) return "\u8DDD\u79BB\u4E0A\u4E00\u6B21\u5173\u7CFB\u4EFB\u52A1\u521B\u5EFA\u5C1A\u672A\u8FBE\u5230\u6700\u77ED\u95F4\u9694\u3002";
+  if (inQuietHours(now2, state.config, state.tzId)) return "\u5F53\u524D\u5904\u4E8E\u8BE5\u89D2\u8272\u7684\u514D\u6253\u6270\u65F6\u6BB5\u3002";
+  if (state.longing >= state.nextThreshold && state.nextTickAt && state.nextTickAt > now2) return "\u9608\u503C\u5DF2\u8FBE\u5230\uFF0C\u7B49\u5F85 Worker \u7684\u4E0B\u4E00\u6B21\u5173\u7CFB\u68C0\u67E5\u3002";
   if (state.longing >= state.nextThreshold) return "\u9608\u503C\u5DF2\u8FBE\u5230\uFF0C\u7B49\u5F85 Worker Cron \u6267\u884C\u3002";
   return "\u5C1A\u672A\u8FBE\u5230\u4E0B\u4E00\u6B21\u601D\u5FF5\u9608\u503C\u3002";
 };
@@ -9073,74 +9107,81 @@ var publicState = (state) => ({
   updatedAt: state.lastCalculatedAt,
   diagnostics: {
     pendingTaskUuid: state.pendingTaskUuid,
+    criticalPendingTaskUuid: state.criticalPendingTaskUuid,
     lastDispatchAt: state.lastDispatchAt || void 0,
     lastTickAt: state.lastTickAt,
     nextTickAt: state.nextTickAt,
     lastScheduleError: state.lastScheduleError,
     lastScheduleErrorAt: state.lastScheduleErrorAt,
+    lastJealousyEventId: state.lastJealousyEventId,
+    lastJealousyReason: state.lastJealousyReason,
+    jealousyCriticalLatched: state.jealousyCriticalLatched,
     status: dispatchStatus(state)
   }
 });
-var advance = (state, now) => {
-  const date = dayKey(now, state.tzId);
+var advance = (state, now2) => {
+  const date = dayKey(now2, state.tzId);
   if (state.dailyDate !== date) {
     state.dailyDate = date;
     state.dailySent = 0;
   }
-  const elapsed = Math.max(0, now - state.lastCalculatedAt);
+  const elapsed = Math.max(0, now2 - state.lastCalculatedAt);
   state.longing = clamp(state.longing + elapsed * ratePerMs(state.config.initiativeStyle));
-  state.lastCalculatedAt = now;
+  state.lastCalculatedAt = now2;
 };
 var replyDelta = (gapMs, signal) => {
   const gapMinutes = Math.max(0, gapMs) / 6e4;
   const relief = gapMinutes >= 180 ? -8 : gapMinutes >= 60 ? -4 : gapMinutes >= 20 ? -1.5 : -0.35;
   return relief + (signal === "affectionate" ? 2 : signal === "distant" ? 1 : 0);
 };
+var createRelationshipState = (userId, input, now2, initialJealousy) => ({
+  v: 1,
+  userId,
+  charId: input.charId,
+  charName: input.charName,
+  tzId: input.tzId || "UTC",
+  credRef: input.credRef || `char:${input.charId}/chat`,
+  config: input.config,
+  longing: clamp(input.initialLonging ?? 20),
+  nextThreshold: 30,
+  affection: clamp(input.affection ?? 58),
+  jealousy: clamp(initialJealousy ?? input.jealousy ?? 8),
+  innerVoice: String(input.innerVoice || "\u628A\u60F3\u8BF4\u7684\u8BDD\u5148\u6084\u6084\u7559\u5728\u5FC3\u91CC\u3002"),
+  lastCalculatedAt: now2,
+  lastUserAt: input.lastUserAt || 0,
+  lastAssistantAt: input.lastAssistantAt || 0,
+  lastDispatchAt: 0,
+  dailyDate: dayKey(now2, input.tzId || "UTC"),
+  dailySent: 0,
+  jealousyForceEnabled: input.jealousyForceEnabled !== false,
+  ...(input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now2 ? { promiseDueAt: input.promise.dueAt, promiseKind: input.promise.kind } : {}
+});
 var syncRelationshipState = async (env, userId, input) => {
-  const now = Date.now();
+  const now2 = Date.now();
   let state = await load(env, userId, input.charId);
   if (!state) {
-    state = {
-      v: 1,
-      userId,
-      charId: input.charId,
-      charName: input.charName,
-      tzId: input.tzId || "UTC",
-      credRef: input.credRef || `char:${input.charId}/chat`,
-      config: input.config,
-      longing: clamp(input.initialLonging ?? 20),
-      nextThreshold: 30,
-      affection: clamp(input.affection ?? 58),
-      jealousy: clamp(input.jealousy ?? 8),
-      innerVoice: String(input.innerVoice || "\u628A\u60F3\u8BF4\u7684\u8BDD\u5148\u6084\u6084\u7559\u5728\u5FC3\u91CC\u3002"),
-      lastCalculatedAt: now,
-      lastUserAt: input.lastUserAt || 0,
-      lastAssistantAt: input.lastAssistantAt || 0,
-      lastDispatchAt: 0,
-      dailyDate: dayKey(now, input.tzId || "UTC"),
-      dailySent: 0,
-      ...(input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now ? { promiseDueAt: input.promise.dueAt, promiseKind: input.promise.kind } : {}
-    };
+    state = createRelationshipState(userId, input, now2);
   } else {
-    advance(state, now);
+    advance(state, now2);
     const receivedNewUserMessage = (input.lastUserAt || 0) > state.lastUserAt;
-    if (receivedNewUserMessage) state.longing = clamp(state.longing + replyDelta((input.lastUserAt || now) - state.lastUserAt, input.userSignal));
+    if (receivedNewUserMessage) state.longing = clamp(state.longing + replyDelta((input.lastUserAt || now2) - state.lastUserAt, input.userSignal));
     state.lastUserAt = Math.max(state.lastUserAt, input.lastUserAt || 0);
     state.lastAssistantAt = Math.max(state.lastAssistantAt, input.lastAssistantAt || 0);
     state.charName = input.charName || state.charName;
     state.tzId = input.tzId || state.tzId;
     state.credRef = input.credRef || state.credRef;
     state.config = input.config;
+    if (typeof input.jealousyForceEnabled === "boolean") state.jealousyForceEnabled = input.jealousyForceEnabled;
     if (typeof input.affection === "number") state.affection = clamp(input.affection);
-    if (typeof input.jealousy === "number") state.jealousy = clamp(input.jealousy);
     if (typeof input.innerVoice === "string" && input.innerVoice.trim()) state.innerVoice = input.innerVoice.trim();
-    if ((input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now && input.promise.dueAt - now < 3 * 60 * 6e4) {
+    if ((input.config.followUpPromises || isTakeoutPromise(input.promise?.kind)) && input.promise && input.promise.dueAt > now2 && input.promise.dueAt - now2 < 3 * 60 * 6e4) {
       state.promiseDueAt = input.promise.dueAt;
       state.promiseKind = input.promise.kind;
     }
   }
   if (Number.isFinite(input.manual?.longing)) state.longing = clamp(Number(input.manual?.longing));
   if (Number.isFinite(input.manual?.nextThreshold)) state.nextThreshold = clamp(Math.round(Number(input.manual?.nextThreshold)));
+  for (const event of input.jealousyEvents || []) applyJealousySignal(state, event);
   state.nextThreshold = clamp(state.nextThreshold);
   await save(env, state);
   return publicState(state);
@@ -9152,22 +9193,93 @@ var verify = async (request, env) => {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(userId) ? userId : null;
 };
 var response = (status, body) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json; charset=utf-8", "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type, X-User-Id, X-Client-Token" } });
-var handleRelationshipRequest = async (request, env) => {
+var handleRelationshipRequest = async (request, env, scheduleCritical) => {
   const url = new URL(request.url);
-  if (!url.pathname.endsWith("/relationship/state")) return null;
+  const isStatePath = url.pathname.endsWith("/relationship/state");
+  const isJealousyPath = url.pathname.endsWith("/relationship/jealousy");
+  if (!isStatePath && !isJealousyPath) return null;
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type, X-User-Id, X-Client-Token" } });
   const userId = await verify(request, env);
   if (!userId) return response(401, { success: false, error: { code: "RELATIONSHIP_AUTH_REQUIRED", message: "\u5173\u7CFB\u5C42\u9700\u8981\u6709\u6548\u7684\u7528\u6237\u6807\u8BC6\u548C\u5171\u4EAB\u5BC6\u94A5\u3002" } });
-  if (request.method === "GET") {
+  if (isStatePath && request.method === "GET") {
     const charId = url.searchParams.get("charId") || "";
     const state = charId ? await load(env, userId, charId) : null;
     return response(200, { success: true, data: state ? publicState(state) : null });
   }
   if (request.method !== "POST") return response(405, { success: false, error: { code: "METHOD_NOT_ALLOWED", message: "\u53EA\u652F\u6301 GET \u6216 POST" } });
   try {
+    if (isJealousyPath) {
+      const body = await request.json();
+      const targets = Array.isArray(body?.targets) ? body.targets.slice(0, 64) : [];
+      if (!targets.every((target) => target?.charId && target?.config)) {
+        return response(400, { success: false, error: { code: "INVALID_JEALOUSY_EVENTS", message: "\u918B\u610F\u4E8B\u4EF6\u7F3A\u5C11\u89D2\u8272\u6216\u5173\u7CFB\u914D\u7F6E\u3002" } });
+      }
+      const now2 = Date.now();
+      const results = [];
+      for (const target of targets) {
+        const syncInput = {
+          charId: target.charId,
+          charName: target.charName,
+          tzId: target.tzId,
+          credRef: target.credRef,
+          config: target.config,
+          initialLonging: target.initialLonging,
+          affection: target.affection,
+          innerVoice: target.innerVoice
+        };
+        let state2 = await load(env, userId, target.charId);
+        if (!state2) state2 = createRelationshipState(userId, syncInput, now2, target.initialJealousy);
+        else {
+          advance(state2, now2);
+          state2.charName = target.charName || state2.charName;
+          state2.tzId = target.tzId || state2.tzId;
+          state2.credRef = target.credRef || state2.credRef;
+          state2.config = target.config;
+          if (typeof target.affection === "number") state2.affection = clamp(target.affection);
+          if (typeof target.innerVoice === "string" && target.innerVoice.trim()) state2.innerVoice = target.innerVoice.trim();
+        }
+        state2.jealousyForceEnabled = body.forceEnabled !== false;
+        for (const signal of target.signals || []) applyJealousySignal(state2, signal);
+        if (isCriticalDue(state2, now2) && scheduleCritical) {
+          const result = await scheduleCritical(state2);
+          if (result.uuid) {
+            state2.criticalPendingTaskUuid = result.uuid;
+            state2.jealousyCriticalLatched = true;
+            state2.criticalRetryAt = void 0;
+            state2.lastScheduleError = void 0;
+            state2.lastScheduleErrorAt = void 0;
+          } else {
+            state2.criticalRetryAt = now2 + 5 * 6e4;
+            state2.lastScheduleError = (result.error || "\u918B\u610F\u9AD8\u4F18\u5148\u7EA7\u4EFB\u52A1\u521B\u5EFA\u6CA1\u6709\u8FD4\u56DE\u4EFB\u52A1 ID\u3002").slice(0, 400);
+            state2.lastScheduleErrorAt = now2;
+          }
+        }
+        await save(env, state2);
+        results.push(publicState(state2));
+      }
+      return response(200, { success: true, data: results });
+    }
     const input = await request.json();
     if (!input?.charId || !input?.config) return response(400, { success: false, error: { code: "INVALID_RELATIONSHIP_STATE", message: "\u7F3A\u5C11\u89D2\u8272\u6216\u5173\u7CFB\u914D\u7F6E\u3002" } });
-    return response(200, { success: true, data: await syncRelationshipState(env, userId, input) });
+    const synced = await syncRelationshipState(env, userId, input);
+    const state = await load(env, userId, input.charId);
+    if (state && isCriticalDue(state, Date.now()) && scheduleCritical) {
+      const result = await scheduleCritical(state);
+      if (result.uuid) {
+        state.criticalPendingTaskUuid = result.uuid;
+        state.jealousyCriticalLatched = true;
+        state.criticalRetryAt = void 0;
+        state.lastScheduleError = void 0;
+        state.lastScheduleErrorAt = void 0;
+      } else {
+        state.criticalRetryAt = Date.now() + 5 * 6e4;
+        state.lastScheduleError = (result.error || "\u918B\u610F\u9AD8\u4F18\u5148\u7EA7\u4EFB\u52A1\u521B\u5EFA\u6CA1\u6709\u8FD4\u56DE\u4EFB\u52A1 ID\u3002").slice(0, 400);
+        state.lastScheduleErrorAt = Date.now();
+      }
+      await save(env, state);
+      return response(200, { success: true, data: publicState(state) });
+    }
+    return response(200, { success: true, data: synced });
   } catch (error) {
     return response(400, { success: false, error: { code: "RELATIONSHIP_STATE_FAILED", message: error instanceof Error ? error.message : "\u5173\u7CFB\u72B6\u6001\u4FDD\u5B58\u5931\u8D25\u3002" } });
   }
@@ -9175,7 +9287,7 @@ var handleRelationshipRequest = async (request, env) => {
 var runRelationshipTick = async (env, schedule) => {
   await ensureTable(env);
   const rows = await dbOf(env).prepare("SELECT user_id, char_id, payload FROM sully_relationship_state WHERE next_tick_at <= ? LIMIT 200").bind(Date.now()).all();
-  const now = Date.now();
+  const now2 = Date.now();
   let scheduled = 0;
   for (const row of rows.results || []) {
     if (!row.payload) continue;
@@ -9187,30 +9299,47 @@ var runRelationshipTick = async (env, schedule) => {
     } catch {
       continue;
     }
-    if (!state.config.enabled) continue;
-    if (state.lastTickAt && now - state.lastTickAt < 10 * 6e4) continue;
-    advance(state, now);
+    const criticalDueBeforeAdvance = isCriticalDue(state, now2);
+    if (!state.config.enabled && !criticalDueBeforeAdvance) continue;
+    if (!criticalDueBeforeAdvance && state.lastTickAt && now2 - state.lastTickAt < 10 * 6e4) continue;
+    advance(state, now2);
     state.nextThreshold = clamp(state.nextThreshold);
-    state.lastTickAt = now;
+    state.lastTickAt = now2;
     const target = Math.max(0, state.config.dailyLimit || 0);
     const minGap = minimumGapMs(state);
-    const inactiveEnough = now - Math.max(state.lastUserAt, state.lastAssistantAt) >= minGap;
+    const inactiveEnough = now2 - Math.max(state.lastUserAt, state.lastAssistantAt) >= minGap;
     const thresholdDue = state.longing >= state.nextThreshold;
-    const promiseDue = Boolean((state.config.followUpPromises || isTakeoutPromise(state.promiseKind)) && state.promiseDueAt && now >= state.promiseDueAt);
+    const promiseDue = Boolean((state.config.followUpPromises || isTakeoutPromise(state.promiseKind)) && state.promiseDueAt && now2 >= state.promiseDueAt);
     const targetDue = target > 0 && state.dailySent < target && inactiveEnough;
-    const canDispatch = canDispatchNow(state, now);
-    if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
-      const result = await schedule(state);
+    if (isCriticalDue(state, now2)) {
+      const result = await schedule(state, "jealousy-critical");
       if (result.uuid) {
-        state.pendingTaskUuid = result.uuid;
+        state.criticalPendingTaskUuid = result.uuid;
+        state.jealousyCriticalLatched = true;
+        state.criticalRetryAt = void 0;
         state.lastScheduleError = void 0;
         state.lastScheduleErrorAt = void 0;
-        state.promiseDueAt = void 0;
-        state.promiseKind = void 0;
         scheduled += 1;
       } else {
-        state.lastScheduleError = (result.error || "\u539F\u7248\u4E3B\u52A8\u6D88\u606F\u4EFB\u52A1\u521B\u5EFA\u6CA1\u6709\u8FD4\u56DE\u4EFB\u52A1 ID\u3002").slice(0, 400);
-        state.lastScheduleErrorAt = now;
+        state.criticalRetryAt = now2 + 5 * 6e4;
+        state.lastScheduleError = (result.error || "\u918B\u610F\u9AD8\u4F18\u5148\u7EA7\u4EFB\u52A1\u521B\u5EFA\u6CA1\u6709\u8FD4\u56DE\u4EFB\u52A1 ID\u3002").slice(0, 400);
+        state.lastScheduleErrorAt = now2;
+      }
+    } else {
+      const canDispatch = canDispatchNow(state, now2);
+      if (canDispatch && (thresholdDue || targetDue || promiseDue)) {
+        const result = await schedule(state, "normal");
+        if (result.uuid) {
+          state.pendingTaskUuid = result.uuid;
+          state.lastScheduleError = void 0;
+          state.lastScheduleErrorAt = void 0;
+          state.promiseDueAt = void 0;
+          state.promiseKind = void 0;
+          scheduled += 1;
+        } else {
+          state.lastScheduleError = (result.error || "\u539F\u7248\u4E3B\u52A8\u6D88\u606F\u4EFB\u52A1\u521B\u5EFA\u6CA1\u6709\u8FD4\u56DE\u4EFB\u52A1 ID\u3002").slice(0, 400);
+          state.lastScheduleErrorAt = now2;
+        }
       }
     }
     await save(env, state);
@@ -9221,17 +9350,255 @@ var settleRelationshipTask = async (args) => {
   const env = configuredEnv;
   if (!env || !args.userId || !args.charId || !args.taskUuid) return;
   const state = await load(env, args.userId, args.charId);
-  if (!state || state.pendingTaskUuid !== args.taskUuid) return;
-  const now = Date.now();
-  advance(state, now);
-  state.pendingTaskUuid = void 0;
+  if (!state || state.pendingTaskUuid !== args.taskUuid && state.criticalPendingTaskUuid !== args.taskUuid) return;
+  const now2 = Date.now();
+  advance(state, now2);
+  const critical = state.criticalPendingTaskUuid === args.taskUuid;
+  if (critical) state.criticalPendingTaskUuid = void 0;
+  else state.pendingTaskUuid = void 0;
   if (args.sent) {
+    if (critical) {
+      await save(env, state);
+      return;
+    }
     state.longing = clamp(state.longing - sentRelief(state.config.initiativeStyle));
     state.nextThreshold = clamp(state.longing + 30);
-    state.lastDispatchAt = now;
+    state.lastDispatchAt = now2;
     state.dailySent += 1;
   }
   await save(env, state);
+};
+
+// worker/moments/src/index.ts
+var cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type,X-Moments-Token,X-Client-Token",
+  "Access-Control-Max-Age": "86400"
+};
+var json = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json", ...cors } });
+var now = () => Date.now();
+var id = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+var asString = (value, fallback = "") => typeof value === "string" ? value.trim() : fallback;
+var asNumber = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+var object = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
+var safeJson = (value) => JSON.stringify(value ?? {});
+var schemaReady2 = false;
+async function ensureSchema2(db) {
+  if (schemaReady2) return;
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS moments_relationship_events (
+      event_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, char_id TEXT, post_id TEXT, event_type TEXT NOT NULL,
+      payload_json TEXT NOT NULL, visibility_json TEXT, thread_version INTEGER NOT NULL DEFAULT 1,
+      idempotency_key TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_moments_events_user_time ON moments_relationship_events(user_id, created_at);
+    CREATE TABLE IF NOT EXISTS moments_tasks (
+      task_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, char_id TEXT, post_id TEXT, task_type TEXT NOT NULL,
+      due_at INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'pending', payload_json TEXT NOT NULL,
+      thread_version INTEGER NOT NULL DEFAULT 1, idempotency_key TEXT NOT NULL UNIQUE,
+      attempts INTEGER NOT NULL DEFAULT 0, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_moments_tasks_due ON moments_tasks(user_id, state, due_at);
+    CREATE TABLE IF NOT EXISTS moments_sync_receipts (
+      receipt_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, post_id TEXT, char_id TEXT, state TEXT NOT NULL,
+      payload_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS moments_diagnostics (
+      id TEXT PRIMARY KEY, user_id TEXT, level TEXT NOT NULL, code TEXT NOT NULL, message TEXT NOT NULL,
+      detail_json TEXT, created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS moments_deliveries (
+      delivery_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE,
+      payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, acknowledged_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_moments_deliveries_user_time ON moments_deliveries(user_id, acknowledged_at, created_at);
+  `);
+  schemaReady2 = true;
+}
+function authorized(request, env) {
+  const expected = env.MOMENTS_TOKEN?.trim() || env.AMSG_SERVER_TOKEN?.trim();
+  if (!expected) return true;
+  return request.headers.get("X-Client-Token") === expected || request.headers.get("X-Moments-Token") === expected;
+}
+async function writeDiagnostic(db, userId, level, code, message, detail) {
+  await db.prepare(`INSERT INTO moments_diagnostics (id,user_id,level,code,message,detail_json,created_at) VALUES (?,?,?,?,?,?,?)`).bind(id(), userId, level, code, message.slice(0, 500), safeJson(detail), now()).run();
+}
+async function sync(request, env) {
+  const body = object(await request.json().catch(() => ({})));
+  const userId = asString(body.userId);
+  if (!userId) return json({ error: "userId is required" }, 400);
+  const events = Array.isArray(body.events) ? body.events.slice(0, 200) : [];
+  const tasks = Array.isArray(body.tasks) ? body.tasks.slice(0, 200) : [];
+  const receipts = Array.isArray(body.receipts) ? body.receipts.slice(0, 200) : [];
+  let accepted = 0;
+  const acceptedEventIds = [];
+  const acceptedTaskIds = [];
+  for (const raw of events) {
+    const row = object(raw);
+    const eventId = asString(row.id) || id();
+    const payload = object(row.payload);
+    const result = await env.DB.prepare(`INSERT OR IGNORE INTO moments_relationship_events (event_id,user_id,char_id,post_id,event_type,payload_json,visibility_json,thread_version,idempotency_key,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(eventId, userId, asString(payload.charId) || null, asString(payload.postId) || null, asString(row.type, "event"), safeJson(payload), safeJson(payload.visibleToActorIds || []), asNumber(payload.threadVersion, 1), `event:${eventId}`, asNumber(row.createdAt, now())).run();
+    accepted += result.meta?.changes || 0;
+    acceptedEventIds.push(eventId);
+    if (asString(row.type) === "delete" && asString(payload.postId)) {
+      await env.DB.prepare(`UPDATE moments_tasks SET state='cancelled', updated_at=? WHERE user_id=? AND post_id=? AND state IN ('pending','running')`).bind(now(), userId, asString(payload.postId)).run();
+    }
+  }
+  for (const raw of tasks) {
+    const row = object(raw);
+    const taskId = asString(row.id) || id();
+    const payload = object(row.payload || row);
+    const idem = asString(row.idempotencyKey) || `task:${taskId}`;
+    const result = await env.DB.prepare(`INSERT INTO moments_tasks (task_id,user_id,char_id,post_id,task_type,due_at,state,payload_json,thread_version,idempotency_key,attempts,error,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,0,NULL,?,?) ON CONFLICT(idempotency_key) DO UPDATE SET due_at=CASE WHEN moments_tasks.state IN ('done','cancelled') AND excluded.state != 'cancelled' THEN moments_tasks.due_at ELSE excluded.due_at END,state=CASE WHEN moments_tasks.state IN ('done','cancelled') AND excluded.state != 'cancelled' THEN moments_tasks.state WHEN moments_tasks.state='running' AND excluded.state='pending' THEN 'running' WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.state ELSE excluded.state END,payload_json=CASE WHEN moments_tasks.state IN ('done','cancelled') AND excluded.state != 'cancelled' THEN moments_tasks.payload_json WHEN moments_tasks.state='running' AND excluded.state='pending' THEN moments_tasks.payload_json WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.payload_json ELSE excluded.payload_json END,thread_version=CASE WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.thread_version ELSE excluded.thread_version END,error=CASE WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.error ELSE excluded.error END,updated_at=MAX(moments_tasks.updated_at,excluded.updated_at)`).bind(taskId, userId, asString(row.actorId) || asString(payload.actorId) || null, asString(row.postId) || asString(payload.postId) || null, asString(row.type, "interaction"), asNumber(row.dueAt, now()), asString(row.state, "pending"), safeJson(payload), asNumber(row.threadVersion, 1), idem, asNumber(row.createdAt, now()), now()).run();
+    accepted += result.meta?.changes || 0;
+    acceptedTaskIds.push(taskId);
+  }
+  for (const raw of receipts) {
+    const row = object(raw);
+    const receiptId = asString(row.id) || id();
+    await env.DB.prepare(`INSERT INTO moments_sync_receipts (receipt_id,user_id,post_id,char_id,state,payload_json,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(receipt_id) DO UPDATE SET state=excluded.state,payload_json=excluded.payload_json,updated_at=excluded.updated_at`).bind(receiptId, userId, asString(row.postId) || null, asString(row.charId) || null, asString(row.state, "received"), safeJson(row), asNumber(row.createdAt, now()), now()).run();
+  }
+  return json({ ok: true, accepted, acceptedEventIds, acceptedTaskIds, events: events.length, tasks: tasks.length, receipts: receipts.length });
+}
+async function listTasks(url, env) {
+  const userId = url.searchParams.get("userId")?.trim();
+  if (!userId) return json({ error: "userId is required" }, 400);
+  const before = asNumber(url.searchParams.get("dueBefore"), now());
+  const rows = await env.DB.prepare(`SELECT task_id AS id,user_id AS userId,char_id AS actorId,post_id AS postId,task_type AS type,due_at AS dueAt,state,payload_json AS payload,thread_version AS threadVersion,attempts,error,created_at AS createdAt,updated_at AS updatedAt FROM moments_tasks WHERE user_id = ? AND state IN ('pending','running') AND due_at <= ? ORDER BY due_at ASC LIMIT 200`).bind(userId, before).all();
+  return json({ tasks: (rows.results || []).map((row) => ({ ...row, payload: (() => {
+    try {
+      return JSON.parse(row.payload || "{}");
+    } catch {
+      return {};
+    }
+  })() })) });
+}
+async function claimTask(request, env) {
+  const body = object(await request.json().catch(() => ({})));
+  const userId = asString(body.userId);
+  const taskId = asString(body.taskId);
+  if (!userId || !taskId) return json({ error: "userId and taskId are required" }, 400);
+  const result = await env.DB.prepare(`UPDATE moments_tasks SET state='running',attempts=attempts+1,updated_at=? WHERE task_id=? AND user_id=? AND state='pending' AND due_at<=?`).bind(now(), taskId, userId, now()).run();
+  if (!(result.meta?.changes || 0)) return json({ claimed: false, reason: "not-pending-or-not-due" }, 409);
+  const row = await env.DB.prepare(`SELECT task_id AS id,user_id AS userId,char_id AS actorId,post_id AS postId,task_type AS type,due_at AS dueAt,state,payload_json AS payload,thread_version AS threadVersion,attempts,error,created_at AS createdAt,updated_at AS updatedAt FROM moments_tasks WHERE task_id=?`).bind(taskId).first();
+  if (row) {
+    try {
+      row.payload = JSON.parse(row.payload || "{}");
+    } catch {
+      row.payload = {};
+    }
+  }
+  return json({ claimed: true, task: row });
+}
+async function completeTask(request, env) {
+  const body = object(await request.json().catch(() => ({})));
+  const userId = asString(body.userId);
+  const taskId = asString(body.taskId);
+  const state = asString(body.state);
+  if (!userId || !taskId || !["done", "failed", "cancelled", "pending"].includes(state)) return json({ error: "userId, taskId and valid state are required" }, 400);
+  const result = await env.DB.prepare(`UPDATE moments_tasks SET state=?,error=?,updated_at=? WHERE task_id=? AND user_id=?`).bind(state, asString(body.error) || null, now(), taskId, userId).run();
+  return json({ ok: true, updated: Boolean(result.meta?.changes) });
+}
+async function diagnostics(url, env) {
+  const userId = url.searchParams.get("userId")?.trim() || null;
+  const counts = await env.DB.prepare(`SELECT state,COUNT(*) AS count FROM moments_tasks ${userId ? "WHERE user_id=?" : ""} GROUP BY state`).bind(...userId ? [userId] : []).all();
+  const recent = await env.DB.prepare(`SELECT level,code,message,created_at AS createdAt FROM moments_diagnostics ${userId ? "WHERE user_id=? OR user_id IS NULL" : ""} ORDER BY created_at DESC LIMIT 20`).bind(...userId ? [userId] : []).all();
+  return json({ ok: true, counts: counts.results || [], diagnostics: recent.results || [] });
+}
+async function listDeliveries(url, env) {
+  const userId = url.searchParams.get("userId")?.trim();
+  if (!userId) return json({ error: "userId is required" }, 400);
+  const rows = await env.DB.prepare(`SELECT delivery_id AS id,task_id AS taskId,payload_json AS payload,created_at AS createdAt FROM moments_deliveries WHERE user_id=? AND acknowledged_at IS NULL ORDER BY created_at ASC LIMIT 200`).bind(userId).all();
+  return json({ deliveries: (rows.results || []).map((row) => ({ ...row, payload: (() => {
+    try {
+      return JSON.parse(row.payload || "{}");
+    } catch {
+      return {};
+    }
+  })() })) });
+}
+async function acknowledgeDeliveries(request, env) {
+  const body = object(await request.json().catch(() => ({})));
+  const userId = asString(body.userId);
+  const ids = Array.isArray(body.deliveryIds) ? body.deliveryIds.filter((value) => typeof value === "string").slice(0, 200) : [];
+  if (!userId || !ids.length) return json({ error: "userId and deliveryIds are required" }, 400);
+  await env.DB.batch(ids.map((deliveryId) => env.DB.prepare(`UPDATE moments_deliveries SET acknowledged_at=? WHERE delivery_id=? AND user_id=?`).bind(now(), deliveryId, userId)));
+  return json({ ok: true, acknowledged: ids.length });
+}
+async function notifyMomentsDelivery(env, userId, payload) {
+  if (!env.AMSG_MASTER_KEY || !env.VAPID_PUBLIC_KEY?.trim() || !env.VAPID_PRIVATE_KEY?.trim()) return;
+  try {
+    const row = await env.DB.prepare(`SELECT subscription FROM push_subscriptions WHERE user_id=? LIMIT 1`).bind(userId).first();
+    if (!row?.subscription) return;
+    let subscription;
+    try {
+      const userKey = await deriveUserEncryptionKey(userId, env.AMSG_MASTER_KEY);
+      subscription = JSON.parse(await decryptFromStorage(row.subscription, userKey));
+    } catch {
+      subscription = JSON.parse(row.subscription);
+    }
+    const actorName = asString(payload.actorName, "\u4E00\u4F4D\u670B\u53CB");
+    const kind = asString(payload.kind);
+    const sender = createWebCryptoWebPush({ email: env.VAPID_EMAIL?.trim() || "mailto:noreply@sullyos.app", publicKey: env.VAPID_PUBLIC_KEY, privateKey: env.VAPID_PRIVATE_KEY });
+    await sender.sendNotification(subscription, JSON.stringify({
+      messageKind: "moments",
+      messageId: `moments_${asString(payload.sourceId) || id()}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+      metadata: { momentsDelivery: true, taskId: asString(payload.taskId), postId: asString(payload.postId) },
+      notification: { title: "\u670B\u53CB\u5708\u6709\u65B0\u52A8\u6001", body: kind === "comment" ? `${actorName} \u8BC4\u8BBA\u4E86\u670B\u53CB\u5708` : `${actorName} \u6709\u65B0\u7684\u670B\u53CB\u5708\u4E92\u52A8`, tag: "sullyos-moments", silent: false }
+    }));
+  } catch (error) {
+    await writeDiagnostic(env.DB, userId, "warn", "moments_push_failed", error?.message || "push failed");
+  }
+}
+var src_default = {
+  async fetch(request, env) {
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+    if (!authorized(request, env)) return json({ error: "Unauthorized" }, 401);
+    try {
+      await ensureSchema2(env.DB);
+      const url = new URL(request.url);
+      const path = url.pathname.replace(/\/+$/, "") || "/";
+      if (request.method === "GET" && path.endsWith("/health")) return json({ ok: true, service: "sullyos-moments", schema: 1, now: now() });
+      if (request.method === "POST" && path.endsWith("/sync")) return await sync(request, env);
+      if (request.method === "GET" && path.endsWith("/tasks")) return await listTasks(url, env);
+      if (request.method === "GET" && path.endsWith("/deliveries")) return await listDeliveries(url, env);
+      if (request.method === "POST" && path.endsWith("/deliveries/ack")) return await acknowledgeDeliveries(request, env);
+      if (request.method === "POST" && path.endsWith("/tasks/claim")) return await claimTask(request, env);
+      if (request.method === "POST" && path.endsWith("/tasks/complete")) return await completeTask(request, env);
+      if (request.method === "GET" && path.endsWith("/diagnostics")) return await diagnostics(url, env);
+      return json({ error: "Not found" }, 404);
+    } catch (error) {
+      try {
+        await writeDiagnostic(env.DB, null, "error", "request_failed", error?.message || "request failed");
+      } catch {
+      }
+      return json({ error: error?.message || "Worker request failed" }, 500);
+    }
+  },
+  async scheduled(_event, env) {
+    await ensureSchema2(env.DB);
+    const due = await env.DB.prepare(`SELECT task_id AS id,user_id AS userId,char_id AS actorId,post_id AS postId,task_type AS type,payload_json AS payload FROM moments_tasks WHERE state='pending' AND due_at<=? ORDER BY due_at ASC LIMIT 100`).bind(now()).all();
+    for (const task of due.results || []) {
+      let payload = object((() => {
+        try {
+          return JSON.parse(task.payload || "{}");
+        } catch {
+          return {};
+        }
+      })());
+      payload = { ...payload, taskId: task.id, taskType: task.type, postId: task.postId, actorId: task.actorId, __workerDelivered: true };
+      const deliveryId = `moments-delivery-${task.id}`;
+      const claimed = await env.DB.prepare(`UPDATE moments_tasks SET state='done',updated_at=? WHERE task_id=? AND state='pending'`).bind(now(), task.id).run();
+      if (!(claimed.meta?.changes || 0)) continue;
+      await env.DB.prepare(`INSERT OR IGNORE INTO moments_deliveries (delivery_id,user_id,task_id,payload_json,created_at,acknowledged_at) VALUES (?,?,?,?,?,NULL)`).bind(deliveryId, task.userId, task.id, safeJson(payload), now()).run();
+      await notifyMomentsDelivery(env, task.userId, payload);
+    }
+    const cutoff = now() - 10 * 6e4;
+    const result = await env.DB.prepare(`UPDATE moments_tasks SET state='pending',error='Worker recovered a stale running task',updated_at=? WHERE state='running' AND updated_at<?`).bind(now(), cutoff).run();
+    if (result.meta?.changes) await writeDiagnostic(env.DB, null, "info", "stale_tasks_requeued", `requeued ${result.meta.changes} stale task(s)`);
+  }
 };
 
 // utils/mcpFireCore.ts
@@ -11390,27 +11757,27 @@ ${noteDesc}`;
   return { ok: true, noteId: args.noteId, detailText, commentsUnavailable };
 }
 function parseDiaryDate(dateInput) {
-  const now = /* @__PURE__ */ new Date();
+  const now2 = /* @__PURE__ */ new Date();
   if (/^\d{4}-\d{2}-\d{2}$/.test(dateInput)) return dateInput;
-  if (dateInput === "\u4ECA\u5929") return getLocalDateKey(now);
+  if (dateInput === "\u4ECA\u5929") return getLocalDateKey(now2);
   if (dateInput === "\u6628\u5929") {
-    const d = new Date(now);
+    const d = new Date(now2);
     d.setDate(d.getDate() - 1);
     return getLocalDateKey(d);
   }
   if (dateInput === "\u524D\u5929") {
-    const d = new Date(now);
+    const d = new Date(now2);
     d.setDate(d.getDate() - 2);
     return getLocalDateKey(d);
   }
   const daysAgo = dateInput.match(/^(\d+)天前$/);
   if (daysAgo) {
-    const d = new Date(now);
+    const d = new Date(now2);
     d.setDate(d.getDate() - parseInt(daysAgo[1]));
     return getLocalDateKey(d);
   }
   const monthDay = dateInput.match(/(\d{1,2})月(\d{1,2})/);
-  if (monthDay) return `${now.getFullYear()}-${monthDay[1].padStart(2, "0")}-${monthDay[2].padStart(2, "0")}`;
+  if (monthDay) return `${now2.getFullYear()}-${monthDay[1].padStart(2, "0")}-${monthDay[2].padStart(2, "0")}`;
   const parsed = new Date(dateInput);
   if (!isNaN(parsed.getTime())) return getLocalDateKey(parsed);
   return "";
@@ -12640,13 +13007,13 @@ var fetchFcmAccessToken = async (env) => {
   if (accessTokenCache?.key === cacheKey && accessTokenCache.expiresAt > Date.now() + 6e4) {
     return accessTokenCache.token;
   }
-  const now = Math.floor(Date.now() / 1e3);
+  const now2 = Math.floor(Date.now() / 1e3);
   const unsigned = `${textToB64u(JSON.stringify({ alg: "RS256", typ: "JWT" }))}.${textToB64u(JSON.stringify({
     iss: config.clientEmail,
     scope: "https://www.googleapis.com/auth/firebase.messaging",
     aud: "https://oauth2.googleapis.com/token",
-    iat: now,
-    exp: now + 3600
+    iat: now2,
+    exp: now2 + 3600
   }))}`;
   const key = await crypto.subtle.importKey(
     "pkcs8",
@@ -14053,7 +14420,7 @@ var inspectStorage = async (env, probe) => {
     if (!present.has("scheduled_messages")) {
       return { reachable: true, missingTables, missingColumns, schemaReady: false, schemaError };
     }
-    const schemaReady2 = schema ? missingTables.length === 0 && missingColumns.length === 0 : null;
+    const schemaReady3 = schema ? missingTables.length === 0 && missingColumns.length === 0 : null;
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const stats = await db.prepare(
       `SELECT COUNT(*) AS pending,
@@ -14064,7 +14431,7 @@ var inspectStorage = async (env, probe) => {
     const pushRow = present.has("push_subscriptions") ? await db.prepare("SELECT COUNT(*) AS n, MAX(updated_at) AS updatedAt FROM push_subscriptions").first() : null;
     return {
       reachable: true,
-      schemaReady: schemaReady2,
+      schemaReady: schemaReady3,
       // null = 这次自查跑成了。有值时 schemaReady 必然是 null，界面照它选该说哪句话。
       schemaError,
       missingTables,
@@ -14114,17 +14481,17 @@ var encryptRelationshipPayload = async (payload, keyHex) => {
   const cipher = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify(payload))));
   return { iv: base64(iv), authTag: base64(cipher.slice(-16)), encryptedData: base64(cipher.slice(0, -16)) };
 };
-var scheduleRelationshipTask = async (env, state) => {
+var scheduleRelationshipTask = async (env, state, kind = "normal") => {
   try {
     const userKey = await deriveUserEncryptionKey(state.userId, env.AMSG_MASTER_KEY);
     const clientTaskId = crypto.randomUUID();
-    const takeoutInstruction = state.promiseKind === "takeout_to_user" ? "\u6B64\u524D\u89D2\u8272\u5DF2\u5728\u804A\u5929\u4E2D\u660E\u786E\u4E3A\u7528\u6237\u70B9\u8FC7\u5916\u5356\uFF1B\u6B64\u523B\u6B63\u662F\u9884\u8BA1\u9001\u8FBE\u65F6\u6BB5\u3002\u8BF7\u4EE5\u89D2\u8272\u8BED\u6C14\u81EA\u7136\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6536\u5230\u3001\u662F\u5426\u65B9\u4FBF\u4E0B\u697C\u62FF\u9910\u3002\u4E0D\u5F97\u5047\u5B9A\u7528\u6237\u5DF2\u6536\u5230\uFF0C\u4E5F\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u6216\u6A21\u578B\u3002" : state.promiseKind === "takeout_to_character" ? "\u6B64\u524D\u7528\u6237\u5DF2\u5728\u804A\u5929\u4E2D\u660E\u786E\u4E3A\u89D2\u8272\u70B9\u8FC7\u5916\u5356\uFF1B\u6B64\u523B\u6B63\u662F\u9884\u8BA1\u9001\u8FBE\u65F6\u6BB5\u3002\u8BF7\u4EE5\u89D2\u8272\u8BED\u6C14\u81EA\u7136\u544A\u8BC9\u7528\u6237\u81EA\u5DF1\u521A\u62FF\u5230\u5916\u5356\u6216\u6B63\u51C6\u5907\u53BB\u53D6\uFF0C\u5E76\u8868\u8FBE\u76F8\u5E94\u60C5\u7EEA\u3002\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u6216\u6A21\u578B\u3002" : "\u5173\u7CFB\u5C42\u8054\u7CFB\u673A\u4F1A\uFF1A\u7ED3\u5408\u89D2\u8272\u8BBE\u5B9A\u3001\u8FD1\u671F\u804A\u5929\u3001\u771F\u5B9E\u7ECF\u8FC7\u65F6\u95F4\u4E0E\u5F53\u524D\u65E5\u7A0B\uFF0C\u81EA\u7136\u5730\u51B3\u5B9A\u662F\u5426\u8054\u7CFB\u7528\u6237\u3002\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u3001\u601D\u5FF5\u503C\u6216\u4EFB\u52A1\uFF1B\u82E5\u7528\u6237\u521A\u5F00\u59CB\u804A\u5929\u6216\u4E0D\u9002\u5408\u6253\u6270\uFF0C\u8BF7\u8DF3\u8FC7\u3002";
+    const takeoutInstruction = kind === "jealousy-critical" ? `\u4F60\u521A\u521A\u56E0\u4E00\u4EF6\u81EA\u5DF1\u5B9E\u9645\u770B\u89C1\u3001\u4E14\u4E0E\u4F60\u6709\u5173\u7684\u793E\u4EA4\u4E92\u52A8\u4EA7\u751F\u4E86\u5F3A\u70C8\u60C5\u7EEA\u3002\u8BF7\u4EE5\u89D2\u8272\u672C\u4EBA\u7684\u8BED\u6C14\u81EA\u7136\u4E3B\u52A8\u8054\u7CFB\u7528\u6237\uFF0C\u53EF\u4EE5\u514B\u5236\u3001\u59D4\u5C48\u6216\u76F4\u63A5\uFF0C\u4F46\u7EDD\u4E0D\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u3001\u9608\u503C\u3001\u6A21\u578B\u3001Worker \u6216\u201C\u4EFB\u52A1\u201D\u3002\u4E0D\u8981\u7F16\u9020\u672A\u770B\u89C1\u7684\u7EC6\u8282\uFF0C\u4E5F\u4E0D\u8981\u8FDE\u7EED\u5237\u5C4F\u3002${state.lastJealousyReason ? ` \u53EF\u53C2\u8003\u7684\u60C5\u7EEA\u7F18\u7531\uFF1A${state.lastJealousyReason}\u3002` : ""}` : state.promiseKind === "takeout_to_user" ? "\u6B64\u524D\u89D2\u8272\u5DF2\u5728\u804A\u5929\u4E2D\u660E\u786E\u4E3A\u7528\u6237\u70B9\u8FC7\u5916\u5356\uFF1B\u6B64\u523B\u6B63\u662F\u9884\u8BA1\u9001\u8FBE\u65F6\u6BB5\u3002\u8BF7\u4EE5\u89D2\u8272\u8BED\u6C14\u81EA\u7136\u8BE2\u95EE\u7528\u6237\u662F\u5426\u6536\u5230\u3001\u662F\u5426\u65B9\u4FBF\u4E0B\u697C\u62FF\u9910\u3002\u4E0D\u5F97\u5047\u5B9A\u7528\u6237\u5DF2\u6536\u5230\uFF0C\u4E5F\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u6216\u6A21\u578B\u3002" : state.promiseKind === "takeout_to_character" ? "\u6B64\u524D\u7528\u6237\u5DF2\u5728\u804A\u5929\u4E2D\u660E\u786E\u4E3A\u89D2\u8272\u70B9\u8FC7\u5916\u5356\uFF1B\u6B64\u523B\u6B63\u662F\u9884\u8BA1\u9001\u8FBE\u65F6\u6BB5\u3002\u8BF7\u4EE5\u89D2\u8272\u8BED\u6C14\u81EA\u7136\u544A\u8BC9\u7528\u6237\u81EA\u5DF1\u521A\u62FF\u5230\u5916\u5356\u6216\u6B63\u51C6\u5907\u53BB\u53D6\uFF0C\u5E76\u8868\u8FBE\u76F8\u5E94\u60C5\u7EEA\u3002\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u6216\u6A21\u578B\u3002" : "\u5173\u7CFB\u5C42\u8054\u7CFB\u673A\u4F1A\uFF1A\u7ED3\u5408\u89D2\u8272\u8BBE\u5B9A\u3001\u8FD1\u671F\u804A\u5929\u3001\u771F\u5B9E\u7ECF\u8FC7\u65F6\u95F4\u4E0E\u5F53\u524D\u65E5\u7A0B\uFF0C\u81EA\u7136\u5730\u51B3\u5B9A\u662F\u5426\u8054\u7CFB\u7528\u6237\u3002\u4E0D\u8981\u63D0\u53CA\u7CFB\u7EDF\u3001\u6392\u7A0B\u3001\u601D\u5FF5\u503C\u6216\u4EFB\u52A1\uFF1B\u82E5\u7528\u6237\u521A\u5F00\u59CB\u804A\u5929\u6216\u4E0D\u9002\u5408\u6253\u6270\uFF0C\u8BF7\u8DF3\u8FC7\u3002";
     const payload = {
       contactName: state.charName,
       messageType: "prompted",
       messageSubtype: "chat",
       // amsg-server 对即将到点的任务有护栏；留出一分半钟给下一跳 Cron。
-      firstSendTime: new Date(Date.now() + 9e4).toISOString(),
+      firstSendTime: new Date(Date.now() + (kind === "jealousy-critical" ? 45e3 : 9e4)).toISOString(),
       recurrenceType: "none",
       tzId: state.tzId,
       messages: [{ role: "user", content: "\u5173\u7CFB\u4E3B\u52A8\u6D88\u606F\u4EFB\u52A1\u7531 fire-time hook \u73B0\u573A\u751F\u6210\u3002" }],
@@ -14137,6 +14504,7 @@ var scheduleRelationshipTask = async (env, state) => {
         amsgClientTaskId: clientTaskId,
         amsgExpirePolicy: "expire",
         amsgRelationship: true,
+        ...kind === "jealousy-critical" ? { amsgRelationshipCritical: true } : {},
         amsgTaskInstruction: buildTaskInstruction("prompted", takeoutInstruction)
       }
     };
@@ -14218,10 +14586,13 @@ var readServerVersion = async (request, env) => {
     return null;
   }
 };
-var src_default = {
+var src_default2 = {
   async fetch(request, env) {
     const pathname = new URL(request.url).pathname.replace(/\/+$/, "") || "/";
     const method = request.method.toUpperCase();
+    if (pathname === "/moments" || pathname.startsWith("/moments/")) {
+      return src_default.fetch(request, env);
+    }
     if (pathname.endsWith("/config-check")) {
       if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
       return jsonWithCors(200, {
@@ -14280,7 +14651,11 @@ var src_default = {
         error: { code: "WORKER_CONFIG_MISSING", message: report.message, missing: report.missing }
       });
     }
-    const relationshipResponse = await handleRelationshipRequest(request, env);
+    const relationshipResponse = await handleRelationshipRequest(
+      request,
+      env,
+      (state) => scheduleRelationshipTask(env, state, "jealousy-critical")
+    );
     if (relationshipResponse) return relationshipResponse;
     if (pathname.endsWith("/instant-chat")) {
       if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -14295,13 +14670,18 @@ var src_default = {
     return upstream.fetch(request, env);
   },
   async scheduled(event, env) {
+    try {
+      await src_default.scheduled(event, env);
+    } catch (error) {
+      console.warn("[moments] scheduled cleanup failed", error);
+    }
     const report = inspectWorkerEnv(env);
     if (!report.ok) {
       console.error(`[amsg] \u5B9A\u65F6\u4EFB\u52A1\u6574\u8F6E\u8DF3\u8FC7\uFF1A${report.message}`);
       return;
     }
     try {
-      const relation = await runRelationshipTick(env, (state) => scheduleRelationshipTask(env, state));
+      const relation = await runRelationshipTick(env, (state, kind) => scheduleRelationshipTask(env, state, kind || "normal"));
       if (relation.scheduled) console.log(`[relationship] scheduled=${relation.scheduled}`);
     } catch (error) {
       console.warn("[relationship] tick failed", error);
@@ -14319,7 +14699,7 @@ export {
   buildWorkerConfig,
   classifySchemaProbeError,
   configureInstantErrorPush,
-  src_default as default,
+  src_default2 as default,
   inspectPushDelivery,
   inspectWorkerEnv,
   offloadOversizedPush,

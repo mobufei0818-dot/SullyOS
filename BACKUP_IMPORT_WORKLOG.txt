@@ -1,0 +1,211 @@
+SullyOS 二改：完整备份与导入兼容工作记录
+============================================
+
+用途
+----
+这是用户 xuaimin 的 SullyOS fork（二改）中“完整备份 / 恢复导入 / 图片素材恢复”的交接记录。
+以后用户提到“调用备份记录”“导入报错”“恢复后图片没了”“原版备份导不进二改版”时，
+先阅读本文件，再检查当前源码、Git 状态与线上版本。
+
+安全规则：本文件不得记录 API Key、GitHub Token、用户聊天内容、角色照片、备份文件内容或
+本机私密路径。备份文件本身应由用户自行保管，二改代码不可将其上传到仓库。
+
+
+一、项目、仓库与部署
+----------------------
+
+原版上游仓库（只用于参考，不可写入）：
+https://github.com/qegj567-cloud/SullyOS
+
+用户 fork（唯一允许写入的仓库）：
+https://github.com/mobufei0818-dot/SullyOS
+
+用户线上专属页面（唯一允许发布的页面）：
+https://mobufei0818-dot.github.io/SullyOS/
+
+本地项目目录：
+/Users/xuaimin/Documents/小手机
+
+部署铁则：
+1. 不能修改原版仓库或原版 Pages。
+2. 每次真实修改都应同步到用户 fork 的 master。
+3. 手动触发 GitHub Actions 工作流“Deploy to GitHub Pages”（deploy-pages.yml）。
+4. 只有 build 和 deploy 都为 success，才能告知用户已更新。
+5. 最终链接格式：
+   https://mobufei0818-dot.github.io/SullyOS/?v=<最新远端提交短 SHA>
+   参数只用于避开浏览器缓存，不代表另一个网站。
+
+
+二、问题背景与用户现象
+----------------------
+
+用户从原版导出的“完整备份”使用 formatVersion: 3。
+
+最初二改版仅支持 formatVersion: 2，因此导入直接报错：
+“不支持的备份格式版本：3（本版本只能导入 formatVersion 2 的备份）”。
+
+放开 v3 格式限制后，文字、角色和聊天记录可以导入，但用户观察到下列图片全部或部分破图：
+- 角色聊天头像；
+- 用户头像；
+- 首页右下角方形图片；
+- 桌面小组件图片；
+- 其他直接以 img src 渲染的历史图片字段。
+
+注意：这不是用户原图真的丢失，也不是重新上传能够彻底解决的问题；是 v3 备份与当前
+二改版图片存储协议不完全兼容。
+
+
+三、v3 备份格式的关键事实
+--------------------------
+
+v3 完整 zip 主要包含：
+- manifest.json：声明 formatVersion、各 store 的分片信息等；
+- stores/*.json：角色、聊天、主题、assets 等结构化业务数据；
+- assets/*：传统 data URL 被抽出的普通资源文件；
+- blobs/index.json：Blob 素材索引，记录 id、MIME type、size；
+- blobs/<id>：对应的原始二进制图片文件。
+
+在 stores 数据中，很多图片字段只保存短令牌：
+  blobref:<id>
+
+令牌的真实二进制内容不在 JSON 中，而在 blobs/<id>。常见位置包括：
+- CharacterProfile.avatar（角色头像）；
+- CharacterProfile.sprites、聊天背景、房间素材；
+- 用户资料与每角色用户头像；
+- 主题 / 锁屏壁纸；
+- launcherWidgets（首页方图、桌面组件）；
+- 画廊、聊天 HTML/图片、各 App 的历史媒体。
+
+
+四、已完成的兼容修复
+----------------------
+
+1. formatVersion 兼容
+文件：utils/backupFormat.ts
+
+- 当前导入器允许 formatVersion 2 和 3。
+- 其他未知版本仍会拒绝，避免错误格式部分写入数据。
+
+2. Blob 二进制恢复
+文件：context/OSContext.tsx
+
+导入 zip 时：
+- 读取并校验 blobs/index.json；
+- 校验每个索引条目有合法 id、没有重复，并且压缩包实际含有 blobs/<id>；
+- 先完整读取/校验，确认备份没有缺件后才开始写入；
+- 以原始 id 与 MIME type 写入 IndexedDB 的 blob_assets store；
+- 恢复过程显示“Blob 素材”的进度信息；
+- v1/v2 备份没有 blobs/index.json 时自动跳过，不影响旧备份导入。
+
+3. 旧界面显示兼容（本次真正解决头像/组件破图的部分）
+文件：context/OSContext.tsx
+
+问题：二改版中有些较旧的 UI 直接使用：
+  <img src={value}>
+它们不能识别 blobref:<id>，即使 Blob 已经恢复到 IndexedDB，也仍会显示破图。
+
+解决：仅当检测到 v3 Blob 备份时，在 Blob 写入后、业务数据写入前：
+- 深度解析 data 内的 blobref；
+- 读取已恢复的 Blob，转换为可直接显示的 data URL；
+- 将 data URL 写回导入的数据对象；
+- 特别解析 assets 中 ls_mirror_v1 内嵌的 localStorage JSON 字符串，覆盖 os_theme、
+  user_profile 等内的图片令牌。
+
+因此旧界面与已经支持 blobref 的新界面均可显示图片。Blob 原件依然保留在 blob_assets，
+不会因为兼容转换而缺失。
+
+4. 大型备份性能保护
+文件：utils/blobRef.ts
+
+resolveBlobRefsDeep 在遍历时跳过 ArrayBuffer、TypedArray、Blob 等二进制对象。
+原因：记忆向量等二进制数据不会包含 blobref；逐字节枚举会严重拖慢完整备份恢复。
+
+
+五、当前关键源码位置
+----------------------
+
+1. utils/backupFormat.ts
+- BACKUP_FORMAT_VERSION 与 SUPPORTED_BACKUP_IMPORT_VERSIONS。
+- v2/v3 分片备份的 manifest 校验与组装。
+
+2. context/OSContext.tsx
+- importSystem：备份导入的总入口。
+- restoreBlobAssetsFromV3Backup：恢复 blobs/index.json 所列的二进制图片。
+- materializeV3BlobRefsForLegacyRender：将 v3 图片令牌变成旧界面也能显示的 data URL。
+- restoreAssetsInPlace：恢复传统 assets/<filename> 引用。
+- DB.importFullData：最终写入角色、消息、assets、主题等业务数据。
+
+3. utils/blobRef.ts
+- BLOBREF_PREFIX = 'blobref:'。
+- getBlobForRef / putImageBlob：Blob 素材读写。
+- resolveBlobRefsDeep：递归把令牌转 data URL；必须保持跳过二进制对象的保护。
+
+4. utils/db.ts
+- blob_assets store。
+- DB.getBlobAsset(id)、DB.putBlobAsset(id, blob)。
+- DB.importFullData：恢复各 IndexedDB store。
+
+5. utils/lsMirror.ts
+- ls_mirror_v1 保存会影响启动外观与用户资料的 localStorage 镜像。
+- 导入 v3 时，镜像内部 JSON 中的 blobref 也必须处理；不能只处理顶层 store。
+
+
+六、正确的用户恢复操作
+------------------------
+
+当用户拿到一份原版或新版完整备份时：
+1. 打开用户 fork 的最新带 ?v= 参数链接。
+2. 在“备份与恢复”中选择完整 zip 或 JSON 备份。
+3. 等待导入进度完成；v3 完整包会经过“Blob 素材”阶段。
+4. 系统提示恢复成功后会自动重启页面。
+
+若曾在旧版本导入过同一份 v3 备份并出现破图：
+- 不必手动逐张补传；
+- 不必清空系统；
+- 在已发布上述修复的新版页面上，重新导入同一份原始完整备份一次；
+- 因为旧导入并未把图片二进制存入本地数据库，重新导入才会恢复原图。
+
+
+七、测试与验收清单
+--------------------
+
+每次改动备份功能后，至少验证：
+- formatVersion 2 的旧备份仍可导入；
+- formatVersion 3 完整 zip 可导入；
+- 损坏的 manifest / blobs/index.json / 缺失 blobs/<id> 会在写业务数据前明确报错；
+- 角色头像、用户头像、聊天内头像正常显示；
+- 首页方形图片、桌面小组件图片正常显示；
+- 角色立绘、聊天背景、壁纸、画廊和其他媒体不出现新的破图；
+- 导入后刷新/自动重启仍正常；
+- GitHub Actions build 与 deploy 都成功后再提供页面链接。
+
+建议真实验证时使用用户自己保管的完整备份；不要把备份文件提交进 Git 或上传至公开仓库。
+
+
+八、后续同步原版时的注意事项
+------------------------------
+
+1. 如果上游再次改变 formatVersion、manifest、blobs/index.json 或 blobref 规则，先检查
+   备份结构，再决定是否扩展 SUPPORTED_BACKUP_IMPORT_VERSIONS；不要直接放开所有版本。
+
+2. 如果上游把更多图片字段改为 blobref，新代码优先改消费组件使用 useBlobRefUrl / TokenImg。
+   同时保留导入阶段的 data URL 兼容层，直到二改版所有历史页面都不再直接渲染 blobref。
+
+3. 不能删除 restoreBlobAssetsFromV3Backup 或 materializeV3BlobRefsForLegacyRender。
+   前者负责恢复真实原图，后者负责兼容现有旧 UI；少任何一个都会再次产生破图。
+
+4. 对备份读取失败必须先校验，再写数据库。完整恢复数据优先级高于“尽量导入一部分”；
+   禁止无提示吞掉 Blob 缺失或将失效 blobref 静默置空。
+
+5. 每次涉及 backupFormat.ts、OSContext.tsx、blobRef.ts、db.ts、lsMirror.ts 的改动，
+   都应检查本记录并使用真实 v3 完整备份回归。
+
+
+九、已发布版本记录
+--------------------
+
+- bcb166d：首次补齐 v3 Blob 二进制写入；解决“导入格式被拒绝”及 Blob 未落库问题。
+- c97d7e2：补齐 v3 blobref 的旧 UI 显示兼容；解决聊天角色/用户头像、首页方图和
+  桌面小组件仍显示破图的问题。
+
+截至本记录写入时，用户已确认新版导入“目前看来没问题”。

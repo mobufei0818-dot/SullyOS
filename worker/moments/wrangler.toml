@@ -1,0 +1,21 @@
+# 仅供本地独立调试的模板；正式部署请更新现有 AMSG Worker 的 worker/amsg/worker.bundle.js，
+# 不要按此文件新建朋友圈 Worker/D1。
+name = "sullyos-moments"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+[triggers]
+crons = ["* * * * *"]
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sullyos-moments"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# 可选（仅独立调试）：wrangler secret put MOMENTS_TOKEN

@@ -41,7 +41,7 @@ const importers: Partial<Record<AppID, () => Promise<unknown>>> = {
   [AppID.Schedule]: () => import('../../apps/ScheduleApp'),
   [AppID.Room]: () => import('../../apps/RoomApp'),
   [AppID.CheckPhone]: () => import('../../apps/CheckPhone'),
-  [AppID.Social]: () => import('../../apps/SocialApp'),
+  [AppID.Social]: () => import('../../apps/MomentsApp'),
   [AppID.Study]: () => import('../../apps/StudyApp'),
   [AppID.FAQ]: () => import('../../apps/FAQApp'),
   [AppID.Game]: () => import('../../apps/GameApp'),

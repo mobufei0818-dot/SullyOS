@@ -104,6 +104,9 @@ import {
 import { buildRealtimeWorldBlock } from './realtimeWorld';
 import { handleSelfUpdate } from './selfUpdate';
 import { configureRelationshipEngine, handleRelationshipRequest, runRelationshipTick, settleRelationshipTask, type RelationshipEngineEnv } from './relationshipEngine';
+// 朋友圈只挂载在 fork 的 AMSG 外壳上。上游主动消息处理器和 scheduled 流程保持原样；
+// /moments/* 使用同一个 DB 与 AMSG_SERVER_TOKEN，避免再部署第二个 Worker。
+import momentsWorker from '../../moments/src/index';
 import {
   buildMcpDirectHeaders,
   buildMcpFireBlock,
@@ -2903,12 +2906,14 @@ const encryptRelationshipPayload = async (payload: Record<string, unknown>, keyH
 };
 
 const scheduleRelationshipTask = async (env: Env, state: {
-  userId: string; charId: string; charName: string; tzId: string; credRef: string; promiseKind?: string;
-}): Promise<{ uuid?: string; error?: string }> => {
+  userId: string; charId: string; charName: string; tzId: string; credRef: string; promiseKind?: string; lastJealousyReason?: string;
+}, kind: 'normal' | 'jealousy-critical' = 'normal'): Promise<{ uuid?: string; error?: string }> => {
   try {
     const userKey = await deriveUserEncryptionKey(state.userId, env.AMSG_MASTER_KEY);
     const clientTaskId = crypto.randomUUID();
-    const takeoutInstruction = state.promiseKind === 'takeout_to_user'
+    const takeoutInstruction = kind === 'jealousy-critical'
+      ? `你刚刚因一件自己实际看见、且与你有关的社交互动产生了强烈情绪。请以角色本人的语气自然主动联系用户，可以克制、委屈或直接，但绝不提及系统、排程、阈值、模型、Worker 或“任务”。不要编造未看见的细节，也不要连续刷屏。${state.lastJealousyReason ? ` 可参考的情绪缘由：${state.lastJealousyReason}。` : ''}`
+      : state.promiseKind === 'takeout_to_user'
       ? '此前角色已在聊天中明确为用户点过外卖；此刻正是预计送达时段。请以角色语气自然询问用户是否收到、是否方便下楼拿餐。不得假定用户已收到，也不要提及系统、排程或模型。'
       : state.promiseKind === 'takeout_to_character'
         ? '此前用户已在聊天中明确为角色点过外卖；此刻正是预计送达时段。请以角色语气自然告诉用户自己刚拿到外卖或正准备去取，并表达相应情绪。不要提及系统、排程或模型。'
@@ -2917,13 +2922,14 @@ const scheduleRelationshipTask = async (env: Env, state: {
       contactName: state.charName,
       messageType: 'prompted', messageSubtype: 'chat',
       // amsg-server 对即将到点的任务有护栏；留出一分半钟给下一跳 Cron。
-      firstSendTime: new Date(Date.now() + 90_000).toISOString(), recurrenceType: 'none', tzId: state.tzId,
+      firstSendTime: new Date(Date.now() + (kind === 'jealousy-critical' ? 45_000 : 90_000)).toISOString(), recurrenceType: 'none', tzId: state.tzId,
       messages: [{ role: 'user', content: '关系主动消息任务由 fire-time hook 现场生成。' }],
       credRefs: { chat: state.credRef },
       metadata: {
         charId: state.charId, charName: state.charName, source: 'active_msg_2',
         amsgMode: 'prompted', amsgClientTaskId: clientTaskId, amsgExpirePolicy: 'expire',
         amsgRelationship: true,
+        ...(kind === 'jealousy-critical' ? { amsgRelationshipCritical: true } : {}),
         amsgTaskInstruction: buildTaskInstruction('prompted', takeoutInstruction),
       },
     };
@@ -3058,6 +3064,12 @@ export default {
     const pathname = new URL(request.url).pathname.replace(/\/+$/, '') || '/';
     const method = request.method.toUpperCase();
 
+    // 独立数据域路由：只拦截 /moments/*，不经过 AMSG 配置门，也不触碰上游 AMSG 路由。
+    // 这样朋友圈同步不要求 VAPID/master key 之外的额外配置，但仍沿用已有 D1 和共享密钥。
+    if (pathname === '/moments' || pathname.startsWith('/moments/')) {
+      return momentsWorker.fetch(request, env as any);
+    }
+
     if (pathname.endsWith('/config-check')) {
       if (method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
       // 刻意不校验 X-Client-Token：worker 配了口令而前端没填正是要诊断的情形之一，
@@ -3144,7 +3156,11 @@ export default {
       });
     }
 
-    const relationshipResponse = await handleRelationshipRequest(request, env as RelationshipEngineEnv);
+    const relationshipResponse = await handleRelationshipRequest(
+      request,
+      env as RelationshipEngineEnv,
+      (state) => scheduleRelationshipTask(env, state, 'jealousy-critical'),
+    );
     if (relationshipResponse) return relationshipResponse;
 
     // 即时对话：一个请求把「传云端状态 + 建任务」串完，回 202 之后立刻起一跳。
@@ -3164,6 +3180,13 @@ export default {
   },
 
   async scheduled(event: CfScheduledEvent, env: Env): Promise<void> {
+    // 朋友圈模块只做自己的 stale 任务回收；失败不能阻断原版 AMSG Cron。
+    // 它与 AMSG 共用同一个每分钟 Cron，但不读取/修改 AMSG 任务表。
+    try {
+      await momentsWorker.scheduled(event, env as any);
+    } catch (error) {
+      console.warn('[moments] scheduled cleanup failed', error);
+    }
     // 定时任务这条路没人看得见，配置不全时上游只会抛一个堆栈。写明白点，
     // wrangler tail 里一眼能看出是配置问题还是任务本身挂了。
     const report = inspectWorkerEnv(env);
@@ -3174,7 +3197,7 @@ export default {
     // 关系层先按 10 分钟量级的时间差推进状态。Cron 仍每分钟运行以保留原版 AMSG
     // 的准时投递；关系层自己只会在差值累计到 10 分钟时产生可见变化。
     try {
-      const relation = await runRelationshipTick(env as RelationshipEngineEnv, (state) => scheduleRelationshipTask(env, state));
+      const relation = await runRelationshipTick(env as RelationshipEngineEnv, (state, kind) => scheduleRelationshipTask(env, state, kind || 'normal'));
       if (relation.scheduled) console.log(`[relationship] scheduled=${relation.scheduled}`);
     } catch (error) {
       // 关系层故障不能阻断原版主动消息 2.0 的整轮投递。
