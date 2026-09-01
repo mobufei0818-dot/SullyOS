@@ -7,7 +7,7 @@ import { processImageToBlob } from '../utils/file';
 import TokenImg from '../components/os/TokenImg';
 import type { CharacterProfile, GalleryImage, MemoryFragment, MomentsComment, MomentsEventType, MomentsInteractionMode, MomentsMediaRef, MomentsPendingJob, MomentsPost, MomentsPostingMode, MomentsProfile, MomentsReaction, MomentsSettings, MomentsTempStranger, MomentsTempTranscript, MomentsVisibilityMode, MomentsApiConfig, MomentsWorkerConfig, MomentsWorkerDiagnostics } from '../types';
 import { generateChatImage, isImageGenerationConfigured } from '../utils/imageGeneration';
-import { fetchMomentsModels, isMomentsApiReady, momentsApiFromMain, momentsApiFromPreset, planMomentsCharacterPost, planMomentsInteractions, planMomentsNpcCharacterProfile, planMomentsNpcProfiles, planMomentsStranger, replyMomentsStranger, testMomentsApi } from '../utils/momentsApi';
+import { fetchMomentsModels, isMomentsApiReady, momentsApiFromMain, momentsApiFromPreset, planMomentsCharacterPost, planMomentsInteractions, planMomentsNpcCharacterProfile, planMomentsNpcProfiles, planMomentsStranger, planMomentsStrangerCharacterProfile, replyMomentsStranger, testMomentsApi } from '../utils/momentsApi';
 import { acknowledgeMomentsDeliveries, claimMomentsTask, completeMomentsTask, getMomentsWorkerDiagnostics, isMomentsWorkerReady, outboxToSyncPayload, pullMomentsDeliveries, pullMomentsTasks, syncMomentsOutbox } from '../utils/momentsSync';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { mirrorMomentsEventToMemoryPalace, removeMomentsPostFromMemoryPalace } from '../utils/momentsMemoryPalace';
@@ -58,6 +58,7 @@ const stableHash = (value: string) => {
   for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
   return hash >>> 0;
 };
+const normalizedPersonName = (value?: string) => (value || '').normalize('NFKC').replace(/[\s·•・._-]+/g, '').toLocaleLowerCase();
 /** 先由系统落实好友数量规则，再把入选名单一次性交给副 API 写自然互动。 */
 const selectInteractionActors = (postId: string, actors: MomentsProfile[]) => {
   const count = actors.length;
@@ -183,6 +184,7 @@ const MomentsApp: React.FC = () => {
   const characterPostCheckInFlight = useRef(false);
   const characterPostCheckRetryAt = useRef(0);
   const legacyNpcCardMigrationInFlight = useRef(false);
+  const friendPromotionInFlight = useRef(new Set<string>());
 
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
@@ -231,7 +233,8 @@ const MomentsApp: React.FC = () => {
     setSharedAmsgWorker(sharedWorker);
     setPendingJobs(storedJobs);
     setFriends(syncedFriends);
-    setNpcProfiles(storedNpcs);
+    // 已转正的旧 NPC 行保留作幂等凭据，但不再作为“可添加的临时 NPC”显示。
+    setNpcProfiles(storedNpcs.filter(npc => npc.friendshipState !== 'friend' && !npc.characterId));
     setTempStrangers(storedStrangers.filter(stranger => !stranger.addedAsFriendAt));
     setMediaByPost(Object.fromEntries(mediaEntries));
     setReactionsByPost(Object.fromEntries(reactionEntries));
@@ -1058,6 +1061,21 @@ const MomentsApp: React.FC = () => {
 
   const addNpcAsFriend = async (npc: MomentsProfile) => {
     if (npc.actorType !== 'npc') return;
+    const promotionKey = `npc:${npc.id}`;
+    if (friendPromotionInFlight.current.has(promotionKey)) {
+      addToast('正在添加，请不要重复点击', 'info');
+      return;
+    }
+    const sameName = normalizedPersonName(npc.displayName);
+    const existingFriend = friends.find(friend => normalizedPersonName(friend.displayName) === sameName);
+    const existingCharacter = characters.find(character => normalizedPersonName(character.name) === sameName);
+    if (npc.characterId || existingFriend || existingCharacter) {
+      const existing = existingFriend || (existingCharacter ? friends.find(friend => friend.characterId === existingCharacter.id) : undefined);
+      if (existing) setTimelineProfile(existing);
+      addToast(`${npc.displayName} 已经是角色好友，不会重复生成人设`, 'info');
+      return;
+    }
+    friendPromotionInFlight.current.add(promotionKey);
     setBusy(true);
     try {
       const sourceCharacter = characters.find(character => character.id === npc.parentCharacterId);
@@ -1074,14 +1092,16 @@ const MomentsApp: React.FC = () => {
       await updateCharacter(created.id, { name: npc.displayName, description: card.description, systemPrompt: card.systemPrompt, memories: [...(created.memories || []), memory] });
       const promoted: MomentsProfile = { ...npc, id: `moments:character:${created.id}`, actorType: 'character', characterId: created.id, friendshipState: 'friend', updatedAt: now };
       const promotedPosts = posts.filter(post => post.authorId === npc.id).map(post => ({ ...post, authorId: promoted.id, authorType: 'character' as const, updatedAt: now }));
-      await Promise.all([DB.saveMomentsProfile(promoted), ...promotedPosts.map(post => DB.saveMomentsPost(post))]);
+      // 原 NPC 行改为“已转正”是持久化幂等凭据；即使刷新页面也不会再次显示添加入口。
+      const promotionMarker: MomentsProfile = { ...npc, characterId: created.id, friendshipState: 'friend', updatedAt: now };
+      await Promise.all([DB.saveMomentsProfile(promotionMarker), DB.saveMomentsProfile(promoted), ...promotedPosts.map(post => DB.saveMomentsPost(post))]);
       setNpcProfiles(prev => prev.filter(item => item.id !== npc.id));
       setFriends(prev => [...prev, promoted]);
       if (promotedPosts.length) setPosts(prev => prev.map(post => promotedPosts.find(next => next.id === post.id) || post));
       setTimelineProfile(promoted);
       addToast(`${npc.displayName} 已添加为角色好友`, 'success');
     } catch (error: any) { addToast(error?.message || '添加 NPC 好友失败', 'error'); }
-    finally { setBusy(false); }
+    finally { friendPromotionInFlight.current.delete(promotionKey); setBusy(false); }
   };
 
   const togglePin = async (post: MomentsPost) => {
@@ -1258,8 +1278,13 @@ const MomentsApp: React.FC = () => {
       let openingLine = '你好，刚好摇到你。';
       const config = settings.momentsApi || momentsApiFromMain(apiConfig);
       if (isMomentsApiReady(config)) {
-        const generated = await planMomentsStranger({ config, attractive });
-        name = generated.name; persona = generated.bio; openingLine = generated.openingLine;
+        try {
+          const generated = await planMomentsStranger({ config, attractive });
+          name = generated.name; persona = generated.bio; openingLine = generated.openingLine;
+        } catch {
+          // 摇一摇是前端交互：网络慢或副 API 失败时立即落本地候选，不让页面一直卡住或空白。
+          openingLine = attractive ? '嗨，没想到真的摇到附近的人。你现在也在随便逛吗？' : '这么巧，刚好摇到你。要不要聊两句？';
+        }
       }
       const now = Date.now();
       const id = `stranger-${now}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1290,19 +1315,27 @@ const MomentsApp: React.FC = () => {
     const content = strangerDraft.trim();
     if (!stranger || !content || strangerBusy) return;
     setStrangerBusy(true);
+    const now = Date.now();
+    const userLine: MomentsTempTranscript = { id: `stranger-msg-${now}-${Math.random().toString(36).slice(2, 7)}`, strangerId: stranger.id, sender: 'user', content, createdAt: now };
     try {
-      const now = Date.now();
-      const userLine: MomentsTempTranscript = { id: `stranger-msg-${now}-${Math.random().toString(36).slice(2, 7)}`, strangerId: stranger.id, sender: 'user', content, createdAt: now };
+      // 先把用户消息即时写入和显示，再等待浏览器直连副 API；按钮不会再像“没点到”。
+      await DB.saveMomentsTempTranscript(userLine);
+      setStrangerTranscript(prev => [...prev, userLine]);
+      setStrangerDraft('');
       const config = settings.momentsApi || momentsApiFromMain(apiConfig);
       const fallback = ['嗯，我记住了。你平时也会在这里刷朋友圈吗？', '听起来挺有意思的，和你聊天比我想象中轻松。', '哈哈，被你说得我都有点好奇了。'];
-      const replyContent = isMomentsApiReady(config)
-        ? await replyMomentsStranger({ config, profile: activeStranger!, transcript: [...strangerTranscript, userLine].map(item => ({ sender: item.sender, content: item.content })) })
-        : fallback[Math.floor(Math.random() * fallback.length)];
+      let replyContent = fallback[stableHash(`${stranger.id}:${content}`) % fallback.length];
+      if (isMomentsApiReady(config)) {
+        try {
+          replyContent = await replyMomentsStranger({ config, profile: activeStranger!, transcript: [...strangerTranscript, userLine].map(item => ({ sender: item.sender, content: item.content })) });
+        } catch {
+          // 临时聊天不依赖 Worker；前端 API 超时或失败时仍生成一条符合临时关系的本地回复。
+        }
+      }
       const reply: MomentsTempTranscript = { id: `stranger-msg-${now + 1}-${Math.random().toString(36).slice(2, 7)}`, strangerId: stranger.id, sender: 'stranger', content: replyContent, createdAt: now + 1 };
-      await Promise.all([DB.saveMomentsTempTranscript(userLine), DB.saveMomentsTempTranscript(reply), DB.saveMomentsTempStranger({ ...stranger, lastMetAt: now })]);
-      setStrangerTranscript(prev => [...prev, userLine, reply]);
+      await Promise.all([DB.saveMomentsTempTranscript(reply), DB.saveMomentsTempStranger({ ...stranger, lastMetAt: now })]);
+      setStrangerTranscript(prev => [...prev, reply]);
       setTempStrangers(prev => prev.map(item => item.id === stranger.id ? { ...item, lastMetAt: now } : item));
-      setStrangerDraft('');
     } catch (error: any) { addToast(error?.message || '消息保存失败', 'error'); }
     finally { setStrangerBusy(false); }
   };
@@ -1310,13 +1343,30 @@ const MomentsApp: React.FC = () => {
   const addStrangerAsFriend = async () => {
     const stranger = tempStrangers.find(item => item.profileId === activeStranger?.id);
     if (!stranger || !activeStranger) return;
+    const promotionKey = `stranger:${stranger.id}`;
+    if (friendPromotionInFlight.current.has(promotionKey)) {
+      addToast('正在添加，请不要重复点击', 'info');
+      return;
+    }
+    const sameName = normalizedPersonName(activeStranger.displayName);
+    const existingCharacter = characters.find(character => normalizedPersonName(character.name) === sameName);
+    if (stranger.formalCharacterId || existingCharacter) {
+      addToast(`${activeStranger.displayName} 已经是角色好友，不会重复生成人设`, 'info');
+      return;
+    }
+    friendPromotionInFlight.current.add(promotionKey);
     setStrangerBusy(true);
     try {
-      const created = await addCharacter();
       const transcripts = await DB.getMomentsTempTranscripts(stranger.id);
+      const card = await planMomentsStrangerCharacterProfile({
+        config: settings.momentsApi || momentsApiFromMain(apiConfig),
+        profile: activeStranger,
+        transcript: transcripts.map(item => ({ sender: item.sender, content: item.content })),
+      });
+      const created = await addCharacter();
       const transcriptSummary = transcripts.map(item => `${item.sender === 'user' ? userProfile.name : activeStranger.displayName}：${item.content}`).join('\n');
       const memory: MemoryFragment = { id: `moments-stranger-memory-${stranger.id}`, date: new Date().toISOString().slice(0, 10), summary: `通过朋友圈摇一摇认识了${activeStranger.displayName}。临时聊天记录：\n${transcriptSummary || '尚未聊天。'}`, mood: 'archive' };
-      await updateCharacter(created.id, { name: activeStranger.displayName, description: activeStranger.bio || '通过朋友圈认识的新朋友。', systemPrompt: `${activeStranger.bio || ''}\n你与用户通过朋友圈摇一摇认识，保持自然、循序渐进的交流。`, memories: [...(created.memories || []), memory] });
+      await updateCharacter(created.id, { name: activeStranger.displayName, description: card.description, systemPrompt: card.systemPrompt, memories: [...(created.memories || []), memory] });
       const now = Date.now();
       await Promise.all([
         DB.saveMomentsProfile({ ...activeStranger, id: `moments:character:${created.id}`, characterId: created.id, friendshipState: 'friend', updatedAt: now }),
@@ -1328,7 +1378,7 @@ const MomentsApp: React.FC = () => {
       setTempStrangers(prev => prev.filter(item => item.id !== stranger.id));
       addToast(`${activeStranger.displayName} 已添加为角色好友，临时聊天已迁移到记忆`, 'success');
     } catch (error: any) { addToast(error?.message || '添加好友失败', 'error'); }
-    finally { setStrangerBusy(false); }
+    finally { friendPromotionInFlight.current.delete(promotionKey); setStrangerBusy(false); }
   };
 
   const saveMomentsApi = async () => {
@@ -1624,7 +1674,7 @@ const MomentsApp: React.FC = () => {
         <div className="flex-1 overflow-y-auto"><div className="mt-3 bg-white px-4 py-4"><div className="text-[13px] font-semibold text-[#333]">附近的人</div><p className="mt-1 text-[11px] leading-relaxed text-[#888]">摇到的人会保留在这里，可以继续临时聊天；只有你主动添加后才会成为正式角色好友。</p><button type="button" disabled={strangerBusy} onClick={() => void shakeStranger()} className="mt-4 flex w-full touch-manipulation items-center justify-center gap-2 rounded-xl bg-[#07c160] py-3 text-[14px] font-medium text-white disabled:opacity-50"><ArrowsClockwise size={19} />{strangerBusy ? '正在摇一摇…' : '摇一摇找人'}</button></div><section className="mt-3 bg-white"><div className="px-4 py-3 text-[12px] text-[#999]">临时聊天</div>{tempStrangers.length === 0 ? <div className="border-t border-[#ededed] px-4 py-10 text-center text-[13px] text-[#999]">还没有遇到陌生人。</div> : tempStrangers.map(stranger => <button type="button" key={stranger.id} onClick={() => { setStrangerListOpen(false); void openSavedStranger(stranger); }} className="flex w-full touch-manipulation items-center gap-3 border-t border-[#ededed] px-4 py-3.5 text-left active:bg-[#f8f8f8]"><div className="flex h-11 w-11 items-center justify-center rounded-full bg-[#edf5ff] text-[#576b95]"><UserPlus size={20} /></div><span className="min-w-0 flex-1"><span className="block truncate text-[14px] text-[#333]">{(stranger.persona || '陌生人').split('，')[0]}</span><span className="mt-0.5 block truncate text-[11px] text-[#999]">点击继续临时聊天</span></span><CaretRight size={18} className="text-[#bbb]" /></button>)}</section></div>
       </div>}
 
-      {activeStranger && <div className="absolute inset-0 z-[60] flex flex-col bg-[#f7f7f7]"><header className="flex h-[56px] shrink-0 items-center justify-between border-b border-[#ededed] bg-white px-2.5"><button type="button" onClick={() => setActiveStranger(null)} className="flex h-11 w-11 touch-manipulation items-center justify-center"><ArrowLeft size={25} /></button><span className="text-[16px] font-semibold">陌生人资料</span><div className="flex items-center"><button type="button" disabled={!strangerDraft.trim() || strangerBusy} onClick={() => void sendStrangerMessage()} className="flex h-11 w-11 touch-manipulation items-center justify-center text-[#576b95] disabled:opacity-30" aria-label="请求回复"><PaperPlaneTilt size={20} weight="fill" /></button><button type="button" disabled={strangerBusy} onClick={() => void addStrangerAsFriend()} className="flex h-9 touch-manipulation items-center gap-1 rounded-full bg-[#07c160] px-3 text-[12px] text-white disabled:opacity-50"><UserPlus size={15} />加好友</button></div></header><div className="flex-1 overflow-y-auto"><div className="bg-white px-5 py-5"><div className="flex items-center gap-3"><div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#edf5ff] text-[#576b95]"><UserPlus size={26} /></div><div><div className="text-[18px] font-semibold text-[#333]">{activeStranger.displayName}</div><div className="mt-1 text-[12px] leading-relaxed text-[#888]">{activeStranger.bio}</div></div></div></div><section className="mt-3 bg-white px-4 py-4"><div className="mb-3 text-[13px] font-semibold text-[#555]">最近十条朋友圈</div>{!settings.strangersCanViewTen ? <p className="text-[12px] leading-relaxed text-[#999]">对方没有开放“陌生人查看十条”，暂时看不到朋友圈。</p> : strangerVisiblePosts.length === 0 ? <p className="text-[12px] text-[#999]">你还没有公开的朋友圈动态。</p> : strangerVisiblePosts.map(post => <div key={post.id} className="border-t border-[#f0f0f0] py-3"><div className="whitespace-pre-wrap text-[13px] leading-relaxed text-[#333]">{post.content || '分享了一张照片'}</div><div className="mt-1 text-[10px] text-[#aaa]">{formatMomentTime(post.createdAt)}</div></div>)}</section><section className="mt-3 bg-white px-4 py-4"><div className="mb-3 text-[13px] font-semibold text-[#555]">临时聊天</div>{strangerTranscript.length === 0 ? <p className="text-[12px] text-[#999]">还没有开始聊天。聊得来后，可以把对方正式加为角色好友。</p> : <div className="space-y-2">{strangerTranscript.map(line => <div key={line.id} className={`flex ${line.sender === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[82%] rounded-2xl px-3 py-2 text-[13px] leading-relaxed ${line.sender === 'user' ? 'bg-[#95ec69] text-[#1f3d1b]' : 'bg-[#f1f1f1] text-[#333]'}`}>{line.content}</div></div>)}</div>}</section></div><div className="flex shrink-0 items-end gap-2 border-t border-[#e5e5e5] bg-white p-3"><textarea value={strangerDraft} onChange={event => setStrangerDraft(event.target.value)} onKeyDown={event => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') void sendStrangerMessage(); }} placeholder="和陌生人聊两句…" className="min-h-[40px] max-h-24 flex-1 resize-none rounded-xl bg-[#f4f4f4] px-3 py-2 text-[13px] outline-none" /><button type="button" disabled={!strangerDraft.trim() || strangerBusy} onClick={() => void sendStrangerMessage()} className="flex h-10 w-10 touch-manipulation items-center justify-center rounded-full bg-[#07c160] text-white disabled:opacity-40"><PaperPlaneTilt size={18} weight="fill" /></button></div></div>}
+      {activeStranger && <div className="absolute inset-0 z-[60] flex flex-col bg-[#f7f7f7]"><header className="flex h-[56px] shrink-0 items-center justify-between border-b border-[#ededed] bg-white px-2.5"><button type="button" onClick={() => setActiveStranger(null)} className="flex h-11 w-11 touch-manipulation items-center justify-center"><ArrowLeft size={25} /></button><span className="text-[16px] font-semibold">陌生人资料</span><div className="flex items-center"><button type="button" disabled={!strangerDraft.trim() || strangerBusy} onClick={() => void sendStrangerMessage()} className="flex h-11 w-11 touch-manipulation items-center justify-center text-[#576b95] disabled:opacity-30" aria-label="请求回复"><PaperPlaneTilt size={20} weight="fill" /></button><button type="button" disabled={strangerBusy} onClick={() => void addStrangerAsFriend()} className="flex h-9 touch-manipulation items-center gap-1 rounded-full bg-[#07c160] px-3 text-[12px] text-white disabled:opacity-50"><UserPlus size={15} />加好友</button></div></header><div className="flex-1 overflow-y-auto"><div className="bg-white px-5 py-5"><div className="flex items-center gap-3"><div className="flex h-14 w-14 items-center justify-center rounded-full bg-[#edf5ff] text-[#576b95]"><UserPlus size={26} /></div><div><div className="text-[18px] font-semibold text-[#333]">{activeStranger.displayName}</div><div className="mt-1 text-[12px] leading-relaxed text-[#888]">{activeStranger.bio}</div></div></div></div><section className="mt-3 bg-white px-4 py-4"><div className="mb-3 text-[13px] font-semibold text-[#555]">最近十条朋友圈</div>{!settings.strangersCanViewTen ? <p className="text-[12px] leading-relaxed text-[#999]">对方没有开放“陌生人查看十条”，暂时看不到朋友圈。</p> : strangerVisiblePosts.length === 0 ? <p className="text-[12px] text-[#999]">你还没有公开的朋友圈动态。</p> : strangerVisiblePosts.map(post => <div key={post.id} className="border-t border-[#f0f0f0] py-3"><div className="whitespace-pre-wrap text-[13px] leading-relaxed text-[#333]">{post.content || '分享了一张照片'}</div><div className="mt-1 text-[10px] text-[#aaa]">{formatMomentTime(post.createdAt)}</div></div>)}</section><section className="mt-3 bg-white px-4 py-4"><div className="mb-3 text-[13px] font-semibold text-[#555]">临时聊天</div>{strangerTranscript.length === 0 ? <p className="text-[12px] text-[#999]">还没有开始聊天。聊得来后，可以把对方正式加为角色好友。</p> : <div className="space-y-2">{strangerTranscript.map(line => <div key={line.id} className={`flex ${line.sender === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[82%] rounded-2xl px-3 py-2 text-[13px] leading-relaxed ${line.sender === 'user' ? 'bg-[#95ec69] text-[#1f3d1b]' : 'bg-[#f1f1f1] text-[#333]'}`}>{line.content}</div></div>)}</div>}</section></div><div className="flex shrink-0 items-end gap-2 border-t border-[#e5e5e5] bg-white p-3"><textarea value={strangerDraft} onChange={event => setStrangerDraft(event.target.value)} enterKeyHint="send" rows={1} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void sendStrangerMessage(); } }} placeholder="和陌生人聊两句…" className="min-h-[40px] max-h-24 flex-1 resize-none rounded-xl bg-[#f4f4f4] px-3 py-2 text-[13px] outline-none" /><button type="button" disabled={!strangerDraft.trim() || strangerBusy} onClick={() => void sendStrangerMessage()} className="flex h-10 w-10 touch-manipulation items-center justify-center rounded-full bg-[#07c160] text-white disabled:opacity-40" aria-label="发送临时消息"><PaperPlaneTilt size={18} weight="fill" /></button></div></div>}
     </div>
   );
 };

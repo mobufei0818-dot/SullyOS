@@ -55,6 +55,8 @@ export interface MomentsNpcCharacterPlan {
   systemPrompt: string;
 }
 
+const PERSONA_SECTIONS = ['【基础身份】', '【外貌特征】', '【性格核心】', '【与用户关系】', '【沟通风格】', '【互动指南】', '【生活习惯】', '【特殊设定】'];
+
 const stableHash = (value: string) => {
   let hash = 2166136261;
   for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
@@ -272,7 +274,7 @@ export async function planMomentsStranger(args: { config: MomentsApiConfig; attr
   const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
     method: 'POST', headers: { Authorization: `Bearer ${args.config.apiKey.trim()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: args.config.model.trim(), temperature: 1, stream: false, messages: [{ role: 'user', content: prompt }] }),
-  }, 0, 90_000, { appName: '朋友圈', purpose: '摇一摇临时陌生人' });
+  }, 0, 15_000, { appName: '朋友圈', purpose: '摇一摇临时陌生人' });
   const root = parseJsonObject(extractContent(data));
   const name = typeof root.name === 'string' ? root.name.trim().slice(0, 24) : '';
   const bio = typeof root.bio === 'string' ? root.bio.trim().slice(0, 180) : '';
@@ -337,32 +339,80 @@ const compactNpcDescription = (candidate: string, npc: MomentsProfile, sourceNam
   return fallbacks.find(item => item && Array.from(item).length <= 15) || '角色关系网中的熟人';
 };
 
-const fallbackNpcSystemPrompt = (npc: MomentsProfile, source: { name: string; description: string; systemPrompt: string }) => [
+const inferredPersonaFacts = (name: string, seedText: string) => {
+  const seed = stableHash(`${name}:${seedText}`);
+  const age = 21 + seed % 12;
+  const month = 1 + Math.floor(seed / 13) % 12;
+  const day = 1 + Math.floor(seed / 31) % 28;
+  const gender = ['男', '女'][Math.floor(seed / 7) % 2];
+  const heights = gender === '男' ? [172, 175, 178, 181, 183] : [158, 162, 165, 168, 170];
+  const looks = [
+    '深色短发，眼神清亮，穿衣偏简洁利落', '微卷深发，眉眼柔和，常穿低饱和色衣服',
+    '发型打理得干净，笑起来有浅浅卧蚕，偏爱轻便日常装', '黑发自然垂落，轮廓清秀，常戴一件有辨识度的小配饰',
+  ];
+  const publicTraits = ['随和有分寸、观察细致、做事可靠', '爽朗直接、反应很快、擅长活跃气氛', '温和礼貌、慢热克制、对熟人很照顾', '冷静清醒、表达坦率、偶尔有一点毒舌'];
+  const privateTraits = ['熟悉以后会显出孩子气和护短的一面', '独处时更安静，会反复琢磨在意的人说过的话', '私下情绪细腻，嘴上轻描淡写但行动很诚实', '对亲近的人分享欲很强，也会有不动声色的占有欲'];
+  const habits = ['记录生活里的小事、散步、寻找好吃的小店', '听歌、夜间散步、随手拍下有趣画面', '规律收拾房间、喝咖啡、周末出门放风', '收藏冷知识、逛街区、偶尔熬夜看电影'];
+  return {
+    age, gender, height: heights[Math.floor(seed / 17) % heights.length], birthday: `${month}月${day}日`,
+    look: looks[Math.floor(seed / 19) % looks.length], publicTrait: publicTraits[Math.floor(seed / 23) % publicTraits.length],
+    privateTrait: privateTraits[Math.floor(seed / 29) % privateTraits.length], habit: habits[Math.floor(seed / 37) % habits.length],
+  };
+};
+
+const completePersonaSystemPrompt = (args: {
+  name: string;
+  bio: string;
+  identity: string;
+  relationContext: string;
+  sourceAnchor?: string;
+}) => {
+  const facts = inferredPersonaFacts(args.name, `${args.bio}:${args.identity}:${args.relationContext}`);
+  return [
   '【基础身份】',
-  `姓名：${npc.displayName}`,
-  `身份：${npc.relationLabel || `${source.name}人设中的稳定关系人物`}`,
+  `姓名：${args.name}`,
+  `年龄：${facts.age}岁`,
+  `性别：${facts.gender}`,
+  `身高：${facts.height}cm`,
+  `生日：${facts.birthday}`,
+  `身份：${args.identity}`,
+  `昵称：熟人通常称呼“${args.name}”；与用户熟悉后可根据真实互动自然形成专属昵称。`,
   '',
-  '【关联角色】',
-  `${npc.displayName}来自${source.name}的既有人设关系网。与${source.name}的关系：${npc.relationLabel || '稳定熟人关系'}。这层来源关系必须保持明确，不得张冠李戴。`,
-  '',
-  '【人物设定】',
-  npc.bio || '依据来源角色人设保持稳定、自然的独立人格。',
+  ...(args.sourceAnchor ? ['【关联角色】', args.sourceAnchor, ''] : []),
+  '【外貌特征】',
+  `${facts.look}。整体气质与其生活身份相符；后续如用户手动补充外貌，以用户设定为准。`,
   '',
   '【性格核心】',
-  '以既有人物设定为准，保持公开形象与私下本质的自然层次；资料没有提到的年龄、外貌和经历不要擅自编造。',
+  `人物底色：${args.bio || args.identity}。`,
+  `公开形象：${facts.publicTrait}。`,
+  `私下本质：${facts.privateTrait}。`,
+  '性格反差：在人多时会维持适合自身身份的分寸感，在信任的人面前更松弛、更诚实，也更愿意暴露真实情绪。',
   '',
   '【与用户关系】',
-  `用户通过${source.name}的关系网认识${npc.displayName}。之后的熟悉程度、情感与共同经历只根据实际聊天和记忆自然发展，不预设亲密度。`,
+  args.relationContext,
+  '关系会随实际聊天、朋友圈互动和共同记忆自然推进；不会凭空宣称没有发生过的共同经历。',
   '',
   '【沟通风格】',
-  '说话方式、用词和语气服从人物设定；像独立的人一样交流，不复述设定，不自称 NPC 或系统角色。',
+  '说话口语化、句子长短随情绪变化，不复述人设，不自称 NPC、模型或系统角色。文字聊天会自然使用停顿和少量表情；语音时语速自然，情绪明显时会更直接。',
   '',
   '【互动指南】',
-  `可自然提及与${source.name}有关的共同关系和既有事实，但不能把${source.name}的经历、性格或记忆据为己有。`,
+  '常见话题围绕自己的日常、工作学习、兴趣和最近发生的小事；会主动追问用户真正关心的部分。亲近时会用符合性格的玩笑或照顾表达在意；产生分歧时先表达自己的立场，再根据关系决定缓和或追问。',
   '',
-  '【生活习惯与边界】',
-  '日常、喜好、厌恶和特殊反应以已知资料及后续记忆为准；未知内容允许在不冲突的前提下逐步形成，禁止一次性编造整段人生。',
-].join('\n');
+  '【生活习惯】',
+  `日常关键词：${facts.habit}。喜欢真诚、有回应的交流和有生活感的小事；厌恶敷衍、越界试探与无端羞辱。作息、行程与已发生剧情保持连续。`,
+  '',
+  '【特殊设定】',
+  '禁止把别人的经历、关系或记忆说成自己的；禁止为了迎合用户而瞬间改变核心性格。遇到被误解、被冷落或关系升温时，应按性格与当前关系给出有层次的真实反应。用户后续手动修改的角色卡拥有最高优先级。',
+  ].join('\n');
+};
+
+const fallbackNpcSystemPrompt = (npc: MomentsProfile, source: { name: string; description: string; systemPrompt: string }) => completePersonaSystemPrompt({
+  name: npc.displayName,
+  bio: npc.bio || `${source.name}关系网中的${npc.relationLabel || '熟人'}`,
+  identity: npc.relationLabel || `${source.name}关系网中的稳定人物`,
+  relationContext: `用户通过${source.name}的关系网认识${npc.displayName}，目前是刚添加好友、可以逐步熟悉的关系。`,
+  sourceAnchor: `${npc.displayName}与来源角色${source.name}的既定关系是“${npc.relationLabel || '稳定熟人关系'}”。允许合理补齐${npc.displayName}自己的生活与性格，但必须保留这条来源关系，不能挪用${source.name}的经历、性格或记忆。`,
+});
 
 /** 用户把明确 NPC 正式加为角色时才调用；把短 bio 扩写为角色卡核心指令，不污染描述行。 */
 export async function planMomentsNpcCharacterProfile(args: {
@@ -386,7 +436,7 @@ export async function planMomentsNpcCharacterProfile(args: {
     '【基础身份】姓名、年龄/性别（仅资料明确时）、身份；【关联角色】与来源角色的具体关系；【外貌特征】仅有依据时；',
     '【性格核心】公开形象、私下本质、反差；【与用户关系】初始关系与自然发展原则；【沟通风格】语言、文字、语音习惯；',
     '【互动指南】常见话题、敏感话题、亲密互动、冲突处理；【生活习惯】日常、喜好、厌恶；【特殊设定】禁止事项和特殊反应。',
-    '没有依据的具体年龄、外貌、生日、经历不要编造，可以省略对应条目。不要写“你原本是角色人设中已有的……现在用户已正式添加你为好友”之类的系统过程描述。',
+    '允许依据已有资料进行合理、连贯、有生活感的创作补全；年龄、性别、外貌、生日、习惯等缺失项也要给出具体设定。不要写“未知”“待补充”“以资料为准”，用户不满意会自行修改。不要写“你原本是角色人设中已有的……现在用户已正式添加你为好友”之类的系统过程描述。',
     '保持 NPC 自己的独立人格，不能把来源角色的第一人称、经历或性格直接复制给 NPC。',
     'JSON 形状：{"description":"15字以内完整概括","systemPrompt":"完整角色核心指令"}',
   ].join('\n');
@@ -394,18 +444,58 @@ export async function planMomentsNpcCharacterProfile(args: {
     const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
       method: 'POST', headers: { Authorization: `Bearer ${args.config.apiKey.trim()}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: args.config.model.trim(), temperature: 0.45, stream: false, messages: [{ role: 'user', content: prompt }] }),
-    }, 0, 90_000, { appName: '朋友圈', purpose: '明确 NPC 转正式角色' });
+    }, 0, 20_000, { appName: '朋友圈', purpose: '明确 NPC 转正式角色' });
     const root = parseJsonObject(extractContent(data));
     const description = compactNpcDescription(typeof root.description === 'string' ? root.description : '', args.npc, args.sourceCharacter.name);
     const modelSystemPrompt = typeof root.systemPrompt === 'string' ? root.systemPrompt.trim() : '';
     const relationAnchor = `【关联来源】\n${args.npc.displayName}来自${args.sourceCharacter.name}的既有人设关系网，与${args.sourceCharacter.name}的关系为：${args.npc.relationLabel || '稳定关系人物'}。`;
-    const systemPrompt = modelSystemPrompt
+    const completeModelCard = modelSystemPrompt && PERSONA_SECTIONS.every(section => modelSystemPrompt.includes(section));
+    const systemPrompt = completeModelCard
       ? (modelSystemPrompt.includes(args.sourceCharacter.name) ? modelSystemPrompt : `${relationAnchor}\n\n${modelSystemPrompt}`)
       : fallbackSystemPrompt;
     return { description, systemPrompt };
   } catch {
     // 加好友是用户已经确认的本地操作；副 API 临时失败时仍用结构化保底人设完成，避免留下空白角色。
     return { description: fallbackDescription, systemPrompt: fallbackSystemPrompt };
+  }
+}
+
+/** 摇一摇陌生人正式加好友时生成完整角色卡；仍是浏览器直连副 API，不经过 Worker。 */
+export async function planMomentsStrangerCharacterProfile(args: {
+  config: MomentsApiConfig;
+  profile: MomentsProfile;
+  transcript: Array<{ sender: 'user' | 'stranger'; content: string }>;
+}): Promise<MomentsNpcCharacterPlan> {
+  const description = compactNpcDescription(args.profile.bio || '', args.profile, '摇一摇');
+  const fallback = completePersonaSystemPrompt({
+    name: args.profile.displayName,
+    bio: args.profile.bio || '通过摇一摇认识的普通人，拥有稳定、独立的生活和性格。',
+    identity: args.profile.bio || '通过朋友圈摇一摇认识的新朋友',
+    relationContext: `与用户通过朋友圈摇一摇偶然认识，目前处于刚添加好友、互相了解的阶段。临时聊天中已经发生的内容视为双方真实记忆。`,
+  });
+  if (!isMomentsApiReady(args.config)) return { description, systemPrompt: fallback };
+  const prompt = [
+    '把这位摇一摇认识的陌生人整理为完整、可直接使用的角色卡。只输出 JSON。',
+    `姓名：${args.profile.displayName}`,
+    `已有简介：${args.profile.bio || '无'}`,
+    `临时聊天：${args.transcript.slice(-12).map(line => `${line.sender === 'user' ? '用户' : args.profile.displayName}：${line.content}`).join('\n') || '尚未聊天'}`,
+    `systemPrompt 必须完整包含：${PERSONA_SECTIONS.join('、')}。`,
+    '需要合理补齐姓名、年龄、性别、身高、生日、身份昵称、2-3个外貌特征、公开与私下性格反差、关系、沟通方式、互动指南、生活习惯、喜恶、禁止事项和特殊反应。允许创作补全，不得写未知、待补充、以资料为准或留空。',
+    'description 是15个汉字以内的完整行为概括。JSON：{"description":"...","systemPrompt":"..."}',
+  ].join('\n');
+  try {
+    const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
+      method: 'POST', headers: { Authorization: `Bearer ${args.config.apiKey.trim()}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: args.config.model.trim(), temperature: 0.75, stream: false, messages: [{ role: 'user', content: prompt }] }),
+    }, 0, 20_000, { appName: '朋友圈', purpose: '摇一摇好友完整人设' });
+    const root = parseJsonObject(extractContent(data));
+    const modelPrompt = typeof root.systemPrompt === 'string' ? root.systemPrompt.trim() : '';
+    return {
+      description: compactNpcDescription(typeof root.description === 'string' ? root.description : '', args.profile, '摇一摇'),
+      systemPrompt: modelPrompt && PERSONA_SECTIONS.every(section => modelPrompt.includes(section)) ? modelPrompt : fallback,
+    };
+  } catch {
+    return { description, systemPrompt: fallback };
   }
 }
 
@@ -417,7 +507,7 @@ export async function replyMomentsStranger(args: { config: MomentsApiConfig; pro
   const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
     method: 'POST', headers: { Authorization: `Bearer ${args.config.apiKey.trim()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: args.config.model.trim(), temperature: 0.85, stream: false, messages: [{ role: 'user', content: prompt }] }),
-  }, 0, 90_000, { appName: '朋友圈', purpose: '摇一摇临时聊天' });
+  }, 0, 15_000, { appName: '朋友圈', purpose: '摇一摇临时聊天' });
   const content = extractContent(data).trim().replace(/^['“]|['”]$/g, '').slice(0, 160);
   if (!content) throw new Error('临时聊天副 API 未返回文字');
   return content;
