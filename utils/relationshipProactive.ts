@@ -5,6 +5,8 @@ import type {
   RelationshipProactiveConfig,
   RelationshipPulse,
 } from '../types';
+import { resolveCharTimeZone } from './timezone';
+import { awakeRelationshipElapsedMs, relationshipSleepWindowFromClocks } from './relationshipSleep';
 
 const HOUR = 60 * 60_000;
 
@@ -99,7 +101,17 @@ export const calculateRelationshipPulse = (
   const previous = char.relationshipPulse;
   const lastUser = [...messages].reverse().find(m => m.role === 'user');
   const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
-  const sinceUserHours = lastUser ? Math.max(0, (now - lastUser.timestamp) / HOUR) : 0;
+  const relationshipConfig = getRelationshipConfig(char);
+  const fallbackSleepWindows = relationshipConfig.quietHoursEnabled
+    ? relationshipSleepWindowFromClocks(relationshipConfig.quietHoursStart, relationshipConfig.quietHoursEnd)
+    : [];
+  const sinceUserHours = lastUser ? awakeRelationshipElapsedMs(
+    lastUser.timestamp,
+    now,
+    resolveCharTimeZone(char) || Intl.DateTimeFormat().resolvedOptions().timeZone,
+    fallbackSleepWindows,
+    20 * HOUR,
+  ) / HOUR : 0;
   const alternations = messages.slice(-80).filter(m => m.role === 'assistant').length;
   const recentText = messages.slice(-16).map(visibleText).join(' ');
   const jealousySignals = (recentText.match(/(?:吃醋|别人|前任|约会|喜欢谁|不理我|冷落)/g) || []).length;
@@ -108,7 +120,7 @@ export const calculateRelationshipPulse = (
   const jealousy = clamp((previous?.jealousy ?? 8) * 0.72 + jealousySignals * 9, 0, 85);
   const baseline = previous?.baselineLonging ?? 26;
   const replyRelief = lastUser && lastUser.timestamp > (previous?.lastUserReplyAt || 0) ? 12 : 0;
-  const longing = clamp(baseline - replyRelief + Math.min(58, sinceUserHours * (getRelationshipConfig(char).initiativeStyle === 'clingy' ? 4.8 : 3.2)));
+  const longing = clamp(baseline - replyRelief + Math.min(58, sinceUserHours * (relationshipConfig.initiativeStyle === 'clingy' ? 4.8 : 3.2)));
   const fallbackVoice = longing >= 72 ? '很想等你空下来，再听你说几句。'
     : longing >= 45 ? '刚才的话还在心里轻轻打转。'
       : '把想说的话先悄悄留在心里。';

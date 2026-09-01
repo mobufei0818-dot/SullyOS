@@ -6,6 +6,12 @@
  */
 import { decryptFromStorage, deriveUserEncryptionKey, encryptForStorage } from '@rei-standard/amsg-server/cloudflare';
 import { constantTimeEqual } from './instantChat';
+import {
+  awakeRelationshipElapsedMs,
+  normalizeRelationshipSleepWindows,
+  relationshipSleepWindowFromClocks,
+  type RelationshipSleepWindow,
+} from '../../../utils/relationshipSleep';
 
 type Style = 'reserved' | 'natural' | 'clingy';
 type D1Statement = { bind: (...values: unknown[]) => D1Statement; first: <T = Record<string, unknown>>() => Promise<T | null>; run: () => Promise<unknown>; all: <T = Record<string, unknown>>() => Promise<{ results?: T[] }> };
@@ -39,6 +45,8 @@ interface RelationshipRecord {
   tzId: string;
   credRef: string;
   config: RelationshipConfigWire;
+  /** 最近一次由角色日程同步来的睡眠时段；App 关闭后 Worker 仍据此暂停增长。 */
+  sleepWindows?: RelationshipSleepWindow[];
   longing: number;
   nextThreshold: number;
   affection: number;
@@ -80,6 +88,7 @@ export interface RelationshipSyncInput {
   tzId: string;
   credRef?: string;
   config: RelationshipConfigWire;
+  sleepWindows?: RelationshipSleepWindow[];
   /** 首次启用时前端按已有聊天/人设给出的合理估值，不是固定从 0 开始。 */
   initialLonging?: number;
   lastUserAt?: number;
@@ -280,7 +289,22 @@ const advance = (state: RelationshipRecord, now: number) => {
   const date = dayKey(now, state.tzId);
   if (state.dailyDate !== date) { state.dailyDate = date; state.dailySent = 0; }
   const elapsed = Math.max(0, now - state.lastCalculatedAt);
-  state.longing = clamp(state.longing + elapsed * ratePerMs(state.config.initiativeStyle));
+  const sleepWindows = state.sleepWindows?.length
+    ? normalizeRelationshipSleepWindows(state.sleepWindows)
+    : state.config.quietHoursEnabled
+      ? relationshipSleepWindowFromClocks(state.config.quietHoursStart, state.config.quietHoursEnd)
+      : [];
+  const rate = ratePerMs(state.config.initiativeStyle);
+  const awakeNeeded = rate > 0 ? Math.max(0, 100 - state.longing) / rate : 0;
+  const awakeElapsed = awakeRelationshipElapsedMs(
+    state.lastCalculatedAt,
+    now,
+    state.tzId,
+    sleepWindows,
+    Math.min(elapsed, awakeNeeded),
+  );
+  state.longing = clamp(state.longing + awakeElapsed * rate);
+  // 即使整段都在睡眠，也必须推进游标；醒来后不会把睡眠时间补涨回来。
   state.lastCalculatedAt = now;
 };
 
@@ -297,6 +321,7 @@ const replyDelta = (gapMs: number, signal: RelationshipSyncInput['userSignal']) 
 const createRelationshipState = (userId: string, input: RelationshipSyncInput, now: number, initialJealousy?: number): RelationshipRecord => ({
   v: 1, userId, charId: input.charId, charName: input.charName, tzId: input.tzId || 'UTC',
   credRef: input.credRef || `char:${input.charId}/chat`, config: input.config,
+  sleepWindows: normalizeRelationshipSleepWindows(input.sleepWindows),
   longing: clamp(input.initialLonging ?? 20), nextThreshold: 30,
   affection: clamp(input.affection ?? 58), jealousy: clamp(initialJealousy ?? input.jealousy ?? 8),
   innerVoice: String(input.innerVoice || '把想说的话先悄悄留在心里。'),
@@ -323,6 +348,7 @@ export const syncRelationshipState = async (env: RelationshipEngineEnv, userId: 
     state.tzId = input.tzId || state.tzId;
     state.credRef = input.credRef || state.credRef;
     state.config = input.config;
+    if (Array.isArray(input.sleepWindows)) state.sleepWindows = normalizeRelationshipSleepWindows(input.sleepWindows);
     if (typeof input.jealousyForceEnabled === 'boolean') state.jealousyForceEnabled = input.jealousyForceEnabled;
     if (typeof input.affection === 'number') state.affection = clamp(input.affection);
     // 醋意是 Worker 的事件账本状态，不能被每次聊天同步传来的旧前端快照覆盖。

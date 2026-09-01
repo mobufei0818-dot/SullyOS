@@ -49,7 +49,7 @@ import { normalizeApiBaseUrl, normalizeApiCredential, normalizeApiModel } from '
 import { configFromPreset, findActivePresetId, type PresetSwitchPatch } from '../utils/apiPresetSwitch';
 import type { APIConfig, TtsProvider } from '../types';
 import { describeImageWithVisionApi, VISION_API_TEST_IMAGE_DATA_URL, visionApiConfigFromPreset } from '../utils/visionApi';
-import { DEFAULT_IMAGE_STYLE_PROMPT } from '../utils/imageGeneration';
+import { DEFAULT_IMAGE_STYLE_PROMPT, getImageGenerationProviderDrafts } from '../utils/imageGeneration';
 import {
     FIRECRAWL_API_KEYS_URL,
     getFirecrawlApiKey,
@@ -516,9 +516,12 @@ const Settings: React.FC = () => {
   const [localFishKey, setLocalFishKey] = useState(apiConfig.fishAudioApiKey || '');
   const [localFishModel, setLocalFishModel] = useState(apiConfig.fishAudioModel || 's2.1-pro');
   const [imageProvider, setImageProvider] = useState<'openai_compatible' | 'novelai'>(apiConfig.imageGeneration?.provider || 'openai_compatible');
-  const [imageUrl, setImageUrl] = useState(apiConfig.imageGeneration?.baseUrl || '');
-  const [imageKey, setImageKey] = useState(apiConfig.imageGeneration?.apiKey || '');
-  const [imageModel, setImageModel] = useState(apiConfig.imageGeneration?.model || 'gpt-image-2');
+  const initialImageDrafts = getImageGenerationProviderDrafts(apiConfig.imageGeneration);
+  const [openAIImageUrl, setOpenAIImageUrl] = useState(initialImageDrafts.openaiCompatible.baseUrl);
+  const [openAIImageKey, setOpenAIImageKey] = useState(initialImageDrafts.openaiCompatible.apiKey);
+  const [openAIImageModel, setOpenAIImageModel] = useState(initialImageDrafts.openaiCompatible.model);
+  const [novelAIImageKey, setNovelAIImageKey] = useState(initialImageDrafts.novelai.apiKey);
+  const [novelAIImageModel, setNovelAIImageModel] = useState(initialImageDrafts.novelai.model);
   const [imageSize, setImageSize] = useState(apiConfig.imageGeneration?.size || '1024x1024');
   const [imageQuality, setImageQuality] = useState(apiConfig.imageGeneration?.quality || 'medium');
   const [imageFormat, setImageFormat] = useState<'png' | 'jpeg' | 'webp'>(apiConfig.imageGeneration?.outputFormat || 'png');
@@ -954,9 +957,12 @@ const Settings: React.FC = () => {
       setLocalFishKey(apiConfig.fishAudioApiKey || '');
       setLocalFishModel(apiConfig.fishAudioModel || 's2.1-pro');
       setImageProvider(apiConfig.imageGeneration?.provider || 'openai_compatible');
-      setImageUrl(apiConfig.imageGeneration?.baseUrl || '');
-      setImageKey(apiConfig.imageGeneration?.apiKey || '');
-      setImageModel(apiConfig.imageGeneration?.model || 'gpt-image-2');
+      const drafts = getImageGenerationProviderDrafts(apiConfig.imageGeneration);
+      setOpenAIImageUrl(drafts.openaiCompatible.baseUrl);
+      setOpenAIImageKey(drafts.openaiCompatible.apiKey);
+      setOpenAIImageModel(drafts.openaiCompatible.model);
+      setNovelAIImageKey(drafts.novelai.apiKey);
+      setNovelAIImageModel(drafts.novelai.model);
       setImageSize(apiConfig.imageGeneration?.size || '1024x1024');
       setImageQuality(apiConfig.imageGeneration?.quality || 'medium');
       setImageFormat(apiConfig.imageGeneration?.outputFormat || 'png');
@@ -974,6 +980,15 @@ const Settings: React.FC = () => {
   }, [
       apiConfig.minimaxApiKey, apiConfig.minimaxGroupId, apiConfig.minimaxRegion, apiConfig.aceStepApiKey,
       apiConfig.ttsProvider, apiConfig.fishAudioApiKey, apiConfig.fishAudioModel,
+      apiConfig.imageGeneration?.provider, apiConfig.imageGeneration?.baseUrl,
+      apiConfig.imageGeneration?.apiKey, apiConfig.imageGeneration?.model,
+      apiConfig.imageGeneration?.openaiCompatible?.baseUrl,
+      apiConfig.imageGeneration?.openaiCompatible?.apiKey,
+      apiConfig.imageGeneration?.openaiCompatible?.model,
+      apiConfig.imageGeneration?.novelai?.apiKey,
+      apiConfig.imageGeneration?.novelai?.model,
+      apiConfig.imageGeneration?.size, apiConfig.imageGeneration?.quality,
+      apiConfig.imageGeneration?.outputFormat, apiConfig.imageGeneration?.baseStylePrompt,
       apiConfig.elevenLabsApiKey, apiConfig.elevenLabsModel, apiConfig.elevenLabsStability,
       apiConfig.elevenLabsSimilarityBoost, apiConfig.elevenLabsStyle, apiConfig.elevenLabsUseSpeakerBoost,
       apiConfig.voicePrompts?.minimax, apiConfig.voicePrompts?.fishaudio,
@@ -1232,6 +1247,13 @@ const Settings: React.FC = () => {
     }
   };
 
+  const imageUrl = imageProvider === 'openai_compatible' ? openAIImageUrl : '';
+  const imageKey = imageProvider === 'openai_compatible' ? openAIImageKey : novelAIImageKey;
+  const imageModel = imageProvider === 'openai_compatible' ? openAIImageModel : novelAIImageModel;
+  const setCurrentImageModel = (value: string) => imageProvider === 'openai_compatible'
+    ? setOpenAIImageModel(value)
+    : setNovelAIImageModel(value);
+
   const buildOtherApiConfig = (overrides: Partial<APIConfig> = {}): Partial<APIConfig> => ({
       minimaxApiKey: localMiniMaxKey,
       minimaxGroupId: localMiniMaxGroupId,
@@ -1240,7 +1262,25 @@ const Settings: React.FC = () => {
       ttsProvider: localTtsProvider,
       fishAudioApiKey: localFishKey,
       fishAudioModel: localFishModel,
-      imageGeneration: { provider: imageProvider, baseUrl: imageUrl.trim(), apiKey: imageKey.trim(), model: imageModel.trim(), size: imageSize, quality: imageQuality, outputFormat: imageFormat, baseStylePrompt: imageStylePrompt.trim() },
+      imageGeneration: {
+        provider: imageProvider,
+        baseUrl: imageProvider === 'openai_compatible' ? openAIImageUrl.trim() : undefined,
+        apiKey: imageKey.trim(),
+        model: imageModel.trim(),
+        openaiCompatible: {
+          baseUrl: openAIImageUrl.trim(),
+          apiKey: openAIImageKey.trim(),
+          model: openAIImageModel.trim(),
+        },
+        novelai: {
+          apiKey: novelAIImageKey.trim(),
+          model: novelAIImageModel.trim(),
+        },
+        size: imageSize,
+        quality: imageQuality,
+        outputFormat: imageFormat,
+        baseStylePrompt: imageStylePrompt.trim(),
+      },
       elevenLabsApiKey: localElevenLabsKey,
       elevenLabsModel: localElevenLabsModel,
       elevenLabsStability: localElevenLabsStability,
@@ -1264,7 +1304,9 @@ const Settings: React.FC = () => {
 
   const fetchImageModels = async () => {
     if (imageProvider === 'novelai') {
-      setImageModels(['nai-diffusion-4-5-full', 'nai-diffusion-4-5-curated-preview', 'nai-diffusion-4-5-full-inpainting']);
+      const models = ['nai-diffusion-4-5-full', 'nai-diffusion-4-5-curated-preview', 'nai-diffusion-4-5-full-inpainting'];
+      setImageModels(models);
+      if (imageModel && !models.includes(imageModel)) setCurrentImageModel('');
       setImageApiResult('✅ NovelAI 使用官方图片模型列表');
       return;
     }
@@ -1276,7 +1318,8 @@ const Settings: React.FC = () => {
       if (!res.ok) throw new Error(data?.error?.message || `HTTP ${res.status}`);
       const models = (Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : []).map((m: any) => typeof m === 'string' ? m : m?.id).filter(Boolean);
       if (!models.length) throw new Error('接口未返回模型列表');
-      setImageModels(models); if (!models.includes(imageModel)) setImageModel(models[0]);
+      setImageModels(models);
+      if (imageModel && !models.includes(imageModel)) setCurrentImageModel('');
       setImageApiResult(`✅ 已拉取 ${models.length} 个模型`);
     } catch (error: any) { setImageApiResult(`❌ 拉取失败：${error?.message || '网络或跨域错误'}`); }
     finally { setLoadingImageModels(false); }
@@ -3064,12 +3107,12 @@ const Settings: React.FC = () => {
                         <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">给聊天照片卡使用。Key 只保存在本机；选择 NovelAI 时使用其官方图片接口，角色参考脸不会发送给 NovelAI。</p>
                     </div>
                     <div className="grid grid-cols-2 gap-2">
-                        {([['openai_compatible', 'OpenAI 兼容'], ['novelai', 'NovelAI']] as const).map(([value, label]) => <button key={value} type="button" onClick={() => setImageProvider(value)} className={`rounded-xl border px-3 py-2 text-xs font-bold ${imageProvider === value ? 'bg-violet-500 border-violet-500 text-white' : 'bg-white border-violet-100 text-slate-500'}`}>{label}</button>)}
+                        {([['openai_compatible', 'OpenAI 兼容'], ['novelai', 'NovelAI']] as const).map(([value, label]) => <button key={value} type="button" onClick={() => { setImageProvider(value); setImageModels([]); setImageApiResult(''); }} className={`rounded-xl border px-3 py-2 text-xs font-bold ${imageProvider === value ? 'bg-violet-500 border-violet-500 text-white' : 'bg-white border-violet-100 text-slate-500'}`}>{label}</button>)}
                     </div>
-                    {imageProvider === 'openai_compatible' && <input value={imageUrl} onChange={e => setImageUrl(e.target.value)} placeholder="生图接口 URL，例如 https://api.example.com/v1" className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-mono" />}
-                    <input type="password" autoComplete="new-password" value={imageKey} onChange={e => setImageKey(e.target.value)} placeholder={imageProvider === 'novelai' ? 'NovelAI Persistent API Token' : '生图 API Key'} className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-mono" />
+                    {imageProvider === 'openai_compatible' && <input value={openAIImageUrl} onChange={e => setOpenAIImageUrl(e.target.value)} placeholder="生图接口 URL，例如 https://api.example.com/v1" className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-mono" />}
+                    <input type="password" autoComplete="new-password" value={imageKey} onChange={e => imageProvider === 'openai_compatible' ? setOpenAIImageKey(e.target.value) : setNovelAIImageKey(e.target.value)} placeholder={imageProvider === 'novelai' ? 'NovelAI Persistent API Token' : '生图 API Key'} className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs font-mono" />
                     <div className="flex gap-2">
-                        {imageModels.length > 0 ? <select value={imageModel} onChange={e => setImageModel(e.target.value)} className="flex-1 min-w-0 bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs"><option value="">选择生图模型</option>{imageModels.map(model => <option key={model} value={model}>{model}</option>)}</select> : <input value={imageModel} onChange={e => setImageModel(e.target.value)} placeholder="生图模型" className="flex-1 min-w-0 bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs" />}
+                        {imageModels.length > 0 ? <select value={imageModel} onChange={e => setCurrentImageModel(e.target.value)} className="flex-1 min-w-0 bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs"><option value="">选择生图模型</option>{imageModels.map(model => <option key={model} value={model}>{model}</option>)}</select> : <input value={imageModel} onChange={e => setCurrentImageModel(e.target.value)} placeholder="生图模型" className="flex-1 min-w-0 bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-xs" />}
                         <button type="button" onClick={fetchImageModels} disabled={loadingImageModels} className="shrink-0 rounded-xl bg-violet-100 px-3 text-xs font-bold text-violet-700 disabled:opacity-60">{loadingImageModels ? '拉取中…' : '拉取模型'}</button>
                     </div>
                     <div className="grid grid-cols-3 gap-2">

@@ -1739,7 +1739,7 @@ ${isInitialGeneration ? `
                                    </label>
                                    <textarea value={formData.imageProfile?.appearancePrompt || ''} onChange={e => handleChange('imageProfile', { ...(formData.imageProfile || {}), appearancePrompt: e.target.value })} placeholder="用户补充外貌（可简写），例如：黑色微卷短发、琥珀色眼睛……" className="flex-1 min-h-20 bg-slate-50 rounded-2xl p-3 text-xs border border-slate-200 resize-y" />
                                </div>
-                               {formData.imageProfile?.faceReferenceImage && <>
+                               <>
                                    <div className="flex flex-wrap gap-2">
                                        <button type="button" disabled={isExtractingIdentity} onClick={handleExtractIdentityProfile} className="px-3 py-2 rounded-xl text-[11px] font-bold bg-violet-600 text-white disabled:opacity-50">
                                            {isExtractingIdentity ? '正在提取…' : '从参考图提取身份特征'}
@@ -1754,7 +1754,7 @@ ${isInitialGeneration ? `
                                    <textarea value={formData.imageProfile?.identityProfile || ''} onChange={e => handleChange('imageProfile', { ...(formData.imageProfile || {}), identityProfile: e.target.value })} placeholder="系统提取的身份特征会显示在这里；可直接修改。它只应描述脸型、五官、发型、肤色和稳定标记。" className="w-full min-h-24 bg-violet-50/50 rounded-2xl p-3 text-xs border border-violet-100 resize-y" />
                                    <p className="text-[10px] text-slate-400 leading-relaxed">{formData.imageProfile?.referenceMode === 'strong' ? '强参考复刻会将原照作为图片编辑底图发送，因此更容易沿用同一表情与构图，且需要你的生图接口支持图片编辑。' : '身份参考不会在每次生图时发送原照；请先提取或补充上方身份特征，以获得更稳定的人物连续性。'}</p>
                                    <button type="button" onClick={() => handleChange('imageProfile', { ...(formData.imageProfile || {}), faceReferenceImage: undefined, identityProfile: undefined, referenceMode: 'identity' })} className="text-[10px] text-rose-500">移除参考图与身份特征</button>
-                               </>}
+                               </>
                            </div>
 
                            {/* Worldbook Section */}

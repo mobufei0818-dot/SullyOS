@@ -267,6 +267,17 @@ export interface APIConfig {
   /** 图片生成独立配置。密钥只保存在用户本机，随备份/恢复一并导出。 */
   imageGeneration?: {
     provider: 'openai_compatible' | 'novelai';
+    /** 两类服务各自保存草稿，切换供应商时不得复用或覆盖另一边的凭据。 */
+    openaiCompatible?: {
+      baseUrl?: string;
+      apiKey?: string;
+      model?: string;
+    };
+    novelai?: {
+      apiKey?: string;
+      model?: string;
+    };
+    /** 当前供应商的生效投影；保留给现有生图调用和旧备份兼容。 */
     baseUrl?: string;
     apiKey?: string;
     model?: string;

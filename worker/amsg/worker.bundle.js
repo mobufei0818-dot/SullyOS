@@ -9194,6 +9194,71 @@ async function handleSelfUpdate(request, env) {
   };
 }
 
+// utils/relationshipSleep.ts
+var MINUTES_PER_DAY = 24 * 60;
+var parseClockMinute = (value) => {
+  const matched = String(value || "").trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!matched) return null;
+  const hour = Number(matched[1]);
+  const minute = Number(matched[2]);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute) || hour < 0 || hour > 23 || minute < 0 || minute > 59) return null;
+  return hour * 60 + minute;
+};
+var normalizeRelationshipSleepWindows = (windows) => {
+  if (!Array.isArray(windows)) return [];
+  const seen = /* @__PURE__ */ new Set();
+  return windows.flatMap((window2) => {
+    const startMinute = Math.round(Number(window2?.startMinute));
+    const endMinute = Math.round(Number(window2?.endMinute));
+    if (!Number.isFinite(startMinute) || !Number.isFinite(endMinute) || startMinute < 0 || startMinute >= MINUTES_PER_DAY || endMinute < 0 || endMinute >= MINUTES_PER_DAY || startMinute === endMinute) return [];
+    const key = `${startMinute}:${endMinute}`;
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [{ startMinute, endMinute }];
+  });
+};
+var relationshipSleepWindowFromClocks = (start, end) => {
+  const startMinute = parseClockMinute(start);
+  const endMinute = parseClockMinute(end);
+  return startMinute === null || endMinute === null ? [] : normalizeRelationshipSleepWindows([{ startMinute, endMinute }]);
+};
+var isMinuteInRelationshipSleep = (minute, windows) => normalizeRelationshipSleepWindows(windows).some((window2) => window2.startMinute < window2.endMinute ? minute >= window2.startMinute && minute < window2.endMinute : minute >= window2.startMinute || minute < window2.endMinute);
+var awakeRelationshipElapsedMs = (startMs, endMs, tzId, windows, maxAwakeMs = Number.POSITIVE_INFINITY) => {
+  const start = Number(startMs);
+  const end = Number(endMs);
+  const maximum = Math.max(0, Number(maxAwakeMs));
+  const normalized = normalizeRelationshipSleepWindows(windows);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start || maximum <= 0) return 0;
+  if (!normalized.length) return Math.min(end - start, maximum);
+  let formatter;
+  try {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: tzId || "UTC",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23"
+    });
+  } catch {
+    formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23"
+    });
+  }
+  let cursor = start;
+  let awake = 0;
+  while (cursor < end && awake < maximum) {
+    const chunk = Math.min(6e4, end - cursor);
+    const parts = formatter.formatToParts(new Date(cursor + chunk / 2));
+    const hour = Number(parts.find((part) => part.type === "hour")?.value || 0);
+    const minute = Number(parts.find((part) => part.type === "minute")?.value || 0);
+    if (!isMinuteInRelationshipSleep(hour * 60 + minute, normalized)) awake += chunk;
+    cursor += chunk;
+  }
+  return Math.min(awake, maximum);
+};
+
 // worker/amsg/src/relationshipEngine.ts
 var configuredEnv = null;
 var schemaReady = null;
@@ -9346,7 +9411,17 @@ var advance = (state, now2) => {
     state.dailySent = 0;
   }
   const elapsed = Math.max(0, now2 - state.lastCalculatedAt);
-  state.longing = clamp(state.longing + elapsed * ratePerMs(state.config.initiativeStyle));
+  const sleepWindows = state.sleepWindows?.length ? normalizeRelationshipSleepWindows(state.sleepWindows) : state.config.quietHoursEnabled ? relationshipSleepWindowFromClocks(state.config.quietHoursStart, state.config.quietHoursEnd) : [];
+  const rate = ratePerMs(state.config.initiativeStyle);
+  const awakeNeeded = rate > 0 ? Math.max(0, 100 - state.longing) / rate : 0;
+  const awakeElapsed = awakeRelationshipElapsedMs(
+    state.lastCalculatedAt,
+    now2,
+    state.tzId,
+    sleepWindows,
+    Math.min(elapsed, awakeNeeded)
+  );
+  state.longing = clamp(state.longing + awakeElapsed * rate);
   state.lastCalculatedAt = now2;
 };
 var replyDelta = (gapMs, signal) => {
@@ -9362,6 +9437,7 @@ var createRelationshipState = (userId, input, now2, initialJealousy) => ({
   tzId: input.tzId || "UTC",
   credRef: input.credRef || `char:${input.charId}/chat`,
   config: input.config,
+  sleepWindows: normalizeRelationshipSleepWindows(input.sleepWindows),
   longing: clamp(input.initialLonging ?? 20),
   nextThreshold: 30,
   affection: clamp(input.affection ?? 58),
@@ -9391,6 +9467,7 @@ var syncRelationshipState = async (env, userId, input) => {
     state.tzId = input.tzId || state.tzId;
     state.credRef = input.credRef || state.credRef;
     state.config = input.config;
+    if (Array.isArray(input.sleepWindows)) state.sleepWindows = normalizeRelationshipSleepWindows(input.sleepWindows);
     if (typeof input.jealousyForceEnabled === "boolean") state.jealousyForceEnabled = input.jealousyForceEnabled;
     if (typeof input.affection === "number") state.affection = clamp(input.affection);
     if (typeof input.innerVoice === "string" && input.innerVoice.trim()) state.innerVoice = input.innerVoice.trim();

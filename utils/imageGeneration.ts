@@ -14,9 +14,49 @@ export const DEFAULT_IMAGE_STYLE_PROMPT = `你是一个图像生成提示词适�
 
 const trimBase = (url?: string) => String(url || '').replace(/\/+$/, '');
 
+export interface ImageGenerationProviderDrafts {
+  openaiCompatible: { baseUrl: string; apiKey: string; model: string };
+  novelai: { apiKey: string; model: string };
+}
+
+const withoutLegacyPresetModel = (model?: string) => String(model || '').trim() === 'gpt-image-2'
+  ? ''
+  : String(model || '');
+
+/**
+ * 读取新版分供应商配置，并只把旧版共享字段迁移给当时真正选中的供应商。
+ * 这样旧备份可继续用，同时不会把 OpenAI Key 误显示到 NovelAI（反之亦然）。
+ */
+export function getImageGenerationProviderDrafts(
+  config?: APIConfig['imageGeneration'],
+): ImageGenerationProviderDrafts {
+  const legacyProvider = config?.provider || 'openai_compatible';
+  return {
+    openaiCompatible: {
+      baseUrl: config?.openaiCompatible?.baseUrl
+        ?? (legacyProvider === 'openai_compatible' ? config?.baseUrl : '')
+        ?? '',
+      apiKey: config?.openaiCompatible?.apiKey
+        ?? (legacyProvider === 'openai_compatible' ? config?.apiKey : '')
+        ?? '',
+      model: withoutLegacyPresetModel(config?.openaiCompatible?.model
+        ?? (legacyProvider === 'openai_compatible' ? config?.model : '')
+        ?? ''),
+    },
+    novelai: {
+      apiKey: config?.novelai?.apiKey
+        ?? (legacyProvider === 'novelai' ? config?.apiKey : '')
+        ?? '',
+      model: withoutLegacyPresetModel(config?.novelai?.model
+        ?? (legacyProvider === 'novelai' ? config?.model : '')
+        ?? ''),
+    },
+  };
+}
+
 export function isImageGenerationConfigured(config: APIConfig): boolean {
   const c = config.imageGeneration;
-  return !!(c?.apiKey && (c.provider === 'novelai' || (c.baseUrl && c.model)));
+  return !!(c?.apiKey && c.model && (c.provider === 'novelai' || c.baseUrl));
 }
 
 export function buildImagePrompt(description: string, config: APIConfig, char?: CharacterProfile, includeCharacter = false): string {
@@ -37,10 +77,11 @@ export async function generateChatImage(input: { prompt: string; config: APIConf
   const { config, char } = input;
   const c = config.imageGeneration;
   if (!c?.apiKey) throw new Error('请先在设置 → 其他 API 配置生图 Key');
+  if (!c.model) throw new Error('请先在设置 → 其他 API 选择或填写生图模型');
   const prompt = buildImagePrompt(input.prompt, config, char, input.includeCharacter === true);
   if (c.provider === 'novelai') {
     const url = 'https://image.novelai.net/ai/generate-image';
-    const body = { input: prompt, model: c.model || 'nai-diffusion-4-5-full', action: 'generate', parameters: { width: 832, height: 1216, scale: 5, sampler: 'k_euler_ancestral', steps: 28, n_samples: 1, ucPreset: 0, qualityToggle: true, negative_prompt: 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality' } };
+    const body = { input: prompt, model: c.model, action: 'generate', parameters: { width: 832, height: 1216, scale: 5, sampler: 'k_euler_ancestral', steps: 28, n_samples: 1, ucPreset: 0, qualityToggle: true, negative_prompt: 'lowres, bad anatomy, bad hands, text, error, missing fingers, extra digit, fewer digits, cropped, worst quality, low quality' } };
     const started = Date.now();
     const response = await fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.apiKey}` },

@@ -3,6 +3,9 @@ import { ActiveMsgStore } from './activeMsgStore';
 import { getRelationshipConfig } from './relationshipProactive';
 import { followUpDelayMs, inferFollowUpKind } from './relationshipProactive';
 import { resolveCharTimeZone } from './timezone';
+import { getDailyScheduleForChar } from './dailySchedule';
+import { isScheduleFeatureOn } from './scheduleFeature';
+import { deriveRelationshipSleepWindows } from './relationshipSleep';
 import { DB } from './db';
 
 type UserSignal = 'neutral' | 'affectionate' | 'distant';
@@ -94,7 +97,10 @@ const asPulse = (data: any): RelationshipPulse | null => {
 export const syncRelationshipBackend = async (char: CharacterProfile, messages: Message[], fallback: RelationshipPulse, knownCharacters: CharacterProfile[] = []) => {
   const global = await ActiveMsgStore.getGlobalConfig();
   if (!global?.workerUrl || !global?.userId) return null;
-  const momentsSettings = await DB.getMomentsSettings().catch(() => undefined);
+  const [momentsSettings, schedule] = await Promise.all([
+    DB.getMomentsSettings().catch(() => undefined),
+    isScheduleFeatureOn(char) ? getDailyScheduleForChar(char).catch(() => null) : Promise.resolve(null),
+  ]);
   const user = latest(messages, 'user');
   const assistant = latest(messages, 'assistant');
   const config = getRelationshipConfig(char);
@@ -108,6 +114,7 @@ export const syncRelationshipBackend = async (char: CharacterProfile, messages: 
     method: 'POST', headers: headers(global.userId, global.serverToken),
     body: JSON.stringify({
       charId: char.id, charName: char.name, tzId: resolveCharTimeZone(char) || Intl.DateTimeFormat().resolvedOptions().timeZone,
+      sleepWindows: deriveRelationshipSleepWindows(schedule),
       // 后端排程只读已同步到原版 Worker 的凭据引用；绝不把 API Key 再存一份。
       credRef: `char:${char.id}/chat`, config,
       initialLonging: fallback.baselineLonging, affection: fallback.affection, jealousy: fallback.jealousy,
