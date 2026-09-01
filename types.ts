@@ -3817,6 +3817,8 @@ export interface MomentsMediaRef {
     createdAt: number;
     generated?: boolean;
     prompt?: string;
+    /** 与聊天生图一致：只有作者本人出镜时才注入身份/外貌参考；场景照保持纯场景。 */
+    includeCharacter?: boolean;
     generationStatus?: 'pending' | 'generating' | 'ready' | 'failed';
     generationError?: string;
 }
@@ -3982,6 +3984,8 @@ export interface MomentsSettings {
     jealousyForceEnabled: boolean;
     /** 每个正式角色的发帖档位；没有记录时视为关闭。 */
     characterPostingModes: Record<string, MomentsPostingMode>;
+    /** 人设中同步出的明确 NPC 也可持续发帖；没有记录时默认低频。 */
+    npcPostingModes?: Record<string, MomentsPostingMode>;
     /** 每位正式角色独立的自动互动方式。 */
     characterInteractionModes?: Record<string, MomentsInteractionMode>;
     /** 朋友圈专用补充分组，不修改系统角色分组或其它 App 的筛选结果。 */

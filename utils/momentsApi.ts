@@ -23,6 +23,7 @@ export interface MomentsCharacterPostPlan {
   shouldPost: boolean;
   content: string;
   photoPrompt?: string;
+  photoIncludesAuthor?: boolean;
   dueAt?: number;
   /** 角色可选择对部分朋友圈好友低调；最终名单仍由前端按稳定 actorId 校验。 */
   visibilityMode?: 'public' | 'exclude';
@@ -41,7 +42,15 @@ export interface MomentsNpcPlan {
   relationLabel: string;
   bio: string;
   initialPost?: string;
+  initialPhotoPrompt?: string;
+  initialPhotoIncludesAuthor?: boolean;
 }
+
+const stableHash = (value: string) => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
+  return hash >>> 0;
+};
 
 export const momentsApiFromMain = (config: APIConfig): MomentsApiConfig => ({
   source: 'main', enabled: true,
@@ -171,6 +180,8 @@ export async function planMomentsCharacterPost(args: {
   mode: 'low' | 'medium' | 'high';
   recentPosts: MomentsPost[];
   privacyCandidates?: Array<{ actorId: string; name: string; groupName?: string }>;
+  /** 由前端按稳定 80% 概率决定；为 true 时应生成可点击合成的照片占位。 */
+  preferPhoto?: boolean;
   now?: number;
 }): Promise<MomentsCharacterPostPlan> {
   if (!isMomentsApiReady(args.config)) throw new Error('朋友圈副 API 尚未配置完整');
@@ -179,7 +190,8 @@ export async function planMomentsCharacterPost(args: {
     '你是角色朋友圈生活线规划器。只输出 JSON，不要解释。',
     '结合角色人设与最近动态判断今天是否有值得发的朋友圈。没有真正值得记录的内容就 shouldPost=false，绝不要凑数。',
     `频率档位=${args.mode}（只影响机会，不代表必须发）；当前时间=${now}。不要在睡眠/明显不合适时段发。`,
-    'JSON 形状：{"shouldPost":true,"content":"不超过500字的生活化正文","photoPrompt":"可选，只有确实适合配图时填写","dueAt":0,"visibilityMode":"public|exclude","excludedActorIds":["候选 actorId"]}',
+    `本次照片占位=${args.preferPhoto ? '需要' : '不强制'}。若为“需要”且 shouldPost=true，必须填写 photoPrompt；同时用 photoIncludesAuthor 表示作者本人是否出镜。纯场景、食物、物品、风景应为 false。`,
+    'JSON 形状：{"shouldPost":true,"content":"不超过500字的生活化正文","photoPrompt":"照片的具体画面描述","photoIncludesAuthor":false,"dueAt":0,"visibilityMode":"public|exclude","excludedActorIds":["候选 actorId"]}',
     '只有角色人设明确低调、避嫌或不愿被特定人看到时，才可选择 exclude；不得编造候选名单以外的 actorId。',
     `角色：${JSON.stringify({ name: args.actor.displayName, bio: args.actor.bio || '' })}`,
     `最近动态：${JSON.stringify(args.recentPosts.slice(0, 6).map(post => ({ content: post.content, createdAt: post.createdAt })))}`,
@@ -192,14 +204,16 @@ export async function planMomentsCharacterPost(args: {
   }, 0, 90_000, { appName: '朋友圈', purpose: '角色生活线发帖判断' });
   const root = parseJsonObject(extractContent(data));
   const content = typeof root.content === 'string' ? root.content.trim().slice(0, 1000) : '';
-  const photoPrompt = typeof root.photoPrompt === 'string' ? root.photoPrompt.trim().slice(0, 1000) : '';
+  const modelPhotoPrompt = typeof root.photoPrompt === 'string' ? root.photoPrompt.trim().slice(0, 1000) : '';
+  const photoPrompt = args.preferPhoto ? (modelPhotoPrompt || (content ? `与这条朋友圈正文一致的自然生活照片：${content}` : '')) : '';
+  const photoIncludesAuthor = root.photoIncludesAuthor === true;
   const dueAt = clampDueAt(root.dueAt, now);
   const candidates = new Set((args.privacyCandidates || []).map(item => item.actorId));
   const excludedActorIds = Array.isArray(root.excludedActorIds)
     ? [...new Set(root.excludedActorIds.filter((item): item is string => typeof item === 'string' && candidates.has(item)))].slice(0, 24)
     : [];
   return {
-    shouldPost: root.shouldPost === true && Boolean(content), content, ...(photoPrompt ? { photoPrompt } : {}), dueAt,
+    shouldPost: root.shouldPost === true && Boolean(content), content, ...(photoPrompt ? { photoPrompt, photoIncludesAuthor } : {}), dueAt,
     ...(root.visibilityMode === 'exclude' && excludedActorIds.length ? { visibilityMode: 'exclude' as const, excludedActorIds } : {}),
   };
 }
@@ -231,8 +245,8 @@ export async function planMomentsNpcProfiles(args: { config: MomentsApiConfig; c
   const prompt = [
     '你是角色人设中的朋友圈 NPC 提取器。只输出 JSON，不要解释。',
     '只保留已有明确姓名或稳定身份关系的 NPC（例如有名字的同事、室友、家人、固定好友）。不要编造，不要把路人或用户算进来；每个源角色最多 3 位。',
-    '可选 initialPost 是这位 NPC 合理的首条简短朋友圈；不合适就省略。',
-    'JSON：{"npcs":[{"sourceCharacterId":"必须原样使用下方角色 id","name":"...","relationLabel":"...","bio":"不超过120字","initialPost":"可选，不超过300字"}]}',
+    '可选 initialPost 是这位 NPC 合理的首条简短朋友圈；不合适就省略。若写 initialPost，也尽量同时写具体的 initialPhotoPrompt，并用 initialPhotoIncludesAuthor 表示 NPC 本人是否出镜。',
+    'JSON：{"npcs":[{"sourceCharacterId":"必须原样使用下方角色 id","name":"...","relationLabel":"...","bio":"不超过120字","initialPost":"可选，不超过300字","initialPhotoPrompt":"可选的照片画面","initialPhotoIncludesAuthor":false}]}',
     `角色人设：${JSON.stringify(args.characters.map(character => ({ id: character.id, name: character.name, description: character.description, systemPrompt: character.systemPrompt })))}`,
   ].join('\n');
   const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
@@ -263,7 +277,14 @@ export async function planMomentsNpcProfiles(args: { config: MomentsApiConfig; c
     if (used.has(key)) return [];
     used.add(key);
     const initialPost = typeof row.initialPost === 'string' ? row.initialPost.trim().slice(0, 500) : '';
-    return [{ sourceCharacterId, name, relationLabel, bio, ...(initialPost ? { initialPost } : {}) }];
+    const wantsInitialPhoto = Boolean(initialPost) && stableHash(`${sourceCharacterId}:${name}:initial-photo`) % 100 < 80;
+    const modelPhotoPrompt = typeof row.initialPhotoPrompt === 'string' ? row.initialPhotoPrompt.trim().slice(0, 1000) : '';
+    const initialPhotoPrompt = wantsInitialPhoto ? (modelPhotoPrompt || `与这条朋友圈正文一致的自然生活照片：${initialPost}`) : '';
+    return [{
+      sourceCharacterId, name, relationLabel, bio,
+      ...(initialPost ? { initialPost } : {}),
+      ...(initialPhotoPrompt ? { initialPhotoPrompt, initialPhotoIncludesAuthor: row.initialPhotoIncludesAuthor === true } : {}),
+    }];
   }).slice(0, 18);
 }
 
