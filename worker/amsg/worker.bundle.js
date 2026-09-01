@@ -6990,7 +6990,7 @@ function stripReasoningTags2(content) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-09-01.relationship-2";
+var AMSG_BUNDLE_VERSION = "2026-09-02.d1-cleanup-1";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -14614,9 +14614,10 @@ var buildWorkerConfig = (env) => {
   const webpush = createHybridPushTransport(env, createWebCryptoWebPush(effectiveVapid));
   configureInstantErrorPush(env.DB && env.AMSG_MASTER_KEY ? { webpush, db: env.DB, masterKey: env.AMSG_MASTER_KEY } : null);
   configureRelationshipEngine(env.DB && env.AMSG_MASTER_KEY ? env : null);
+  const indexedDb = typeof env.DB?.prepare === "function" ? createIndexedHourlyCleanupDb(env) : null;
   return {
     // 显式适配 D1：给 outbox 清理补索引，并把高成本清理从每分钟降到每小时。
-    db: createIndexedHourlyCleanupDb(env),
+    ...indexedDb ? { db: indexedDb } : {},
     masterKey: env.AMSG_MASTER_KEY,
     serverToken: env.AMSG_SERVER_TOKEN,
     vapid: effectiveVapid,

@@ -12,5 +12,5 @@
 //   - utils/amsgWorkerVersion.ts 比的是**上游库** @rei-standard/amsg-server 的 semver；
 //   - utils/buildInfo.ts 的 APP_VERSION 是整个 SullyOS App 的版本。
 //   这里管的只有一样：用户自己那台 Worker 上跑的这份 bundle 是哪天的。
-// 上游 2026-09-01 状态时钟修复 + 二改关系层/朋友圈扩展的合并版本。
-export const AMSG_BUNDLE_VERSION = '2026-09-01.relationship-2';
+// 2026-09-02：为 D1 免费额度降低 outbox 清理频率，并补齐清理索引。
+export const AMSG_BUNDLE_VERSION = '2026-09-02.d1-cleanup-1';
