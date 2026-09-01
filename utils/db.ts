@@ -1380,6 +1380,65 @@ export const DB = {
       });
   },
 
+  /** 删除评论及其回复链的本地事实，并取消仍指向这些评论的待执行任务。 */
+  deleteMomentsCommentsCascade: async (postId: string, commentIds: string[]): Promise<void> => {
+      const ids = new Set(commentIds);
+      if (!ids.size) return;
+      const db = await openDB();
+      const stores = [
+          STORE_MOMENTS_COMMENTS, STORE_MOMENTS_EVENT_LEDGER, STORE_MOMENTS_PENDING_JOBS,
+          STORE_MOMENTS_MEMORY_INDEX, STORE_MOMENTS_SYNC_OUTBOX,
+      ].filter(name => db.objectStoreNames.contains(name));
+      return new Promise((resolve, reject) => {
+          const tx = db.transaction(stores, 'readwrite');
+          const comments = tx.objectStore(STORE_MOMENTS_COMMENTS);
+          ids.forEach(id => comments.delete(id));
+
+          const ledger = tx.objectStore(STORE_MOMENTS_EVENT_LEDGER).index('postId').openCursor(IDBKeyRange.only(postId));
+          ledger.onsuccess = () => {
+              const cursor = ledger.result;
+              if (!cursor) return;
+              const value = cursor.value as MomentsEventLedgerEntry;
+              if (ids.has(value.sourceId)) cursor.update({ ...value, status: 'deleted', deletedAt: Date.now(), deletedSourceId: value.sourceId });
+              cursor.continue();
+          };
+
+          const jobs = tx.objectStore(STORE_MOMENTS_PENDING_JOBS).index('postId').openCursor(IDBKeyRange.only(postId));
+          jobs.onsuccess = () => {
+              const cursor = jobs.result;
+              if (!cursor) return;
+              const value = cursor.value as MomentsPendingJob;
+              const replyTarget = typeof value.payload?.replyToCommentId === 'string' ? value.payload.replyToCommentId : '';
+              const sourceId = typeof value.payload?.sourceId === 'string' ? value.payload.sourceId : '';
+              if (value.state === 'pending' && (ids.has(replyTarget) || ids.has(sourceId))) {
+                  cursor.update({ ...value, state: 'cancelled', updatedAt: Date.now(), error: '关联评论已由用户删除' });
+              }
+              cursor.continue();
+          };
+
+          const memory = tx.objectStore(STORE_MOMENTS_MEMORY_INDEX).openCursor();
+          memory.onsuccess = () => {
+              const cursor = memory.result;
+              if (!cursor) return;
+              const value = cursor.value as MomentsMemoryIndexEntry;
+              if (value.postId === postId && ids.has(value.sourceId)) cursor.delete();
+              cursor.continue();
+          };
+
+          const outbox = tx.objectStore(STORE_MOMENTS_SYNC_OUTBOX).openCursor();
+          outbox.onsuccess = () => {
+              const cursor = outbox.result;
+              if (!cursor) return;
+              const payload = (cursor.value as MomentsSyncOutboxItem).payload;
+              if (ids.has(String(payload?.sourceId || ''))) cursor.delete();
+              cursor.continue();
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error || new Error('deleteMomentsCommentsCascade transaction failed'));
+          tx.onabort = () => reject(tx.error || new Error('deleteMomentsCommentsCascade transaction aborted'));
+      });
+  },
+
   saveMomentsSeenReceipt: async (receipt: MomentsSeenReceipt): Promise<void> => {
       const db = await openDB();
       const tx = db.transaction(STORE_MOMENTS_SEEN, 'readwrite');

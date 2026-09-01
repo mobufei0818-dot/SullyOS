@@ -162,13 +162,10 @@ export async function planMomentsInteractions(args: {
     ...(args.contextReactions || []).map(item => item.actorId),
   ]);
   const commentTargets = new Map((args.contextComments || []).map(item => [item.id, item.actorId]));
-  const fallbackReplyComment = args.replyRound && args.contextComments?.length
-    ? args.contextComments[args.contextComments.length - 1]
-    : undefined;
   const prompt = [
     '你是朋友圈互动规划器。只输出 JSON，不要 Markdown，不要解释。',
     args.replyRound
-      ? '用户刚在评论区说了新内容。请一次性规划这一轮自然回复，最多 3 条；候选人可以回复用户、回复已有评论者，或 @ 已点赞的人。互动是相互的，发帖者也可以回复别人。不要再规划普通点赞。'
+      ? '用户刚在评论区说了新内容。请一次性规划这一轮自然回复，最多 3 条；候选人可以回复用户、回复已有评论者，或 @ 已点赞的人。互动是相互的，发帖者也可以回复别人。只有确实在回应某条评论时才填写 replyToCommentId/replyToActorId；只是围绕动态继续说话时必须省略目标，作为普通评论。不要让所有人都机械回复最新用户评论。不要再规划普通点赞。'
       : '为这条朋友圈一次性规划首轮点赞/评论；不要为凑数强行互动，最多 8 条评论。',
     '每个人的措辞、亲疏、情绪和边界必须来自该人的 persona、与用户的当前关系、近期私聊；回复另一个角色时还必须参考双方共同经历过的群聊上下文。没有共同上下文就只按当下评论自然回应，不得编造共同经历。',
     '这是一通统一规划调用，不要把不同角色写成同一种语气，也不要让角色知道自己看不到的私聊。',
@@ -213,10 +210,10 @@ export async function planMomentsInteractions(args: {
     const requestedActorId = typeof row.replyToActorId === 'string' ? row.replyToActorId : '';
     const replyToActorId = requestedCommentId && commentTargets.has(requestedCommentId)
       ? commentTargets.get(requestedCommentId)
-      : replyTargets.has(requestedActorId) ? requestedActorId : fallbackReplyComment?.actorId;
+      : replyTargets.has(requestedActorId) ? requestedActorId : undefined;
     const replyToCommentId = requestedCommentId && commentTargets.has(requestedCommentId)
       ? requestedCommentId
-      : fallbackReplyComment?.id;
+      : undefined;
     interactions.push({
       actorId, actorType: actor.actorType === 'npc' ? 'npc' : 'character', actorName: actor.displayName,
       kind, ...(content ? { content } : {}),

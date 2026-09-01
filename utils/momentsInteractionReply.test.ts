@@ -45,6 +45,21 @@ describe('朋友圈评论区相互回复', () => {
     expect(plan.interactions[1]).toMatchObject({ replyToActorId: 'moments:character:liker' });
   });
 
+  it('模型未明确回复目标时保留为普通评论，不会把所有人强挂到最新用户评论', async () => {
+    const now = 1_000_000;
+    mockCompletion({ interactions: [
+      { actorId: 'moments:character:a', kind: 'comment', content: '先把充电宝借你。', dueAt: now + 90_000 },
+      { actorId: 'moments:character:b', kind: 'comment', content: '电量确实有点危险。', dueAt: now + 120_000 },
+    ] });
+    const plan = await planMomentsInteractions({
+      config, post, now, maxComments: 3, threadVersion: 3, replyRound: true,
+      actors: [actor('moments:character:a', '甲'), actor('moments:character:b', '乙')],
+      contextComments: [{ id: 'user-comment', actorId: 'moments:user', actorName: '林焕培', content: '亲亲' }],
+    });
+    expect(plan.interactions).toHaveLength(2);
+    expect(plan.interactions.every(item => item.replyToActorId === undefined && item.replyToCommentId === undefined)).toBe(true);
+  });
+
   it('统一规划请求会携带角色私聊、关系状态和共同群聊，而不是逐角色调用', async () => {
     let requestBody = '';
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {

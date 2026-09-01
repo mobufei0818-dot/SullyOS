@@ -109,3 +109,24 @@ export async function removeMomentsPostFromMemoryPalace(postId: string, memoryNo
     else await EventBoxDB.save({ ...box, updatedAt: Date.now() });
   }
 }
+
+/** 删除评论/回复时，仅撤销对应事实节点；同帖其它互动记忆继续保留。 */
+export async function removeMomentsSourcesFromMemoryPalace(postId: string, sourceIds: string[], memoryNodeIds: string[]): Promise<void> {
+  const sourcePrefixes = sourceIds.map(sourceId => `moments:${postId}:${sourceId}`);
+  const byBox = new Map<string, string[]>();
+  for (const memoryId of memoryNodeIds) {
+    const node = await MemoryNodeDB.getById(memoryId);
+    if (!node || !sourcePrefixes.includes(node.sourceId || '')) continue;
+    if (node.eventBoxId) byBox.set(node.eventBoxId, [...(byBox.get(node.eventBoxId) || []), memoryId]);
+    await MemoryNodeDB.delete(memoryId);
+  }
+  for (const [eventBoxId, removedIds] of byBox) {
+    const box = await EventBoxDB.getById(eventBoxId);
+    if (!box) continue;
+    box.liveMemoryIds = box.liveMemoryIds.filter(id => !removedIds.includes(id));
+    box.archivedMemoryIds = box.archivedMemoryIds.filter(id => !removedIds.includes(id));
+    if (box.summaryNodeId && removedIds.includes(box.summaryNodeId)) box.summaryNodeId = null;
+    if (!box.liveMemoryIds.length && !box.archivedMemoryIds.length && !box.summaryNodeId) await EventBoxDB.delete(eventBoxId);
+    else await EventBoxDB.save({ ...box, updatedAt: Date.now() });
+  }
+}

@@ -10,7 +10,7 @@ import { generateChatImage, isImageGenerationConfigured } from '../utils/imageGe
 import { fetchMomentsModels, isMomentsApiReady, momentsApiFromMain, momentsApiFromPreset, planMomentsCharacterPost, planMomentsInteractions, planMomentsNpcCharacterProfile, planMomentsNpcProfiles, planMomentsStranger, planMomentsStrangerCharacterProfile, replyMomentsStranger, testMomentsApi, type MomentsInteractionActorContext } from '../utils/momentsApi';
 import { acknowledgeMomentsDeliveries, claimMomentsTask, completeMomentsTask, getMomentsWorkerDiagnostics, isMomentsWorkerReady, outboxToSyncPayload, pullMomentsDeliveries, pullMomentsTasks, syncMomentsOutbox } from '../utils/momentsSync';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
-import { mirrorMomentsEventToMemoryPalace, removeMomentsPostFromMemoryPalace } from '../utils/momentsMemoryPalace';
+import { mirrorMomentsEventToMemoryPalace, removeMomentsPostFromMemoryPalace, removeMomentsSourcesFromMemoryPalace } from '../utils/momentsMemoryPalace';
 import { reportRelationshipJealousyEvents, setRelationshipJealousyForceEnabled } from '../utils/relationshipBackend';
 
 const USER_PROFILE_ID = 'moments:user';
@@ -203,6 +203,7 @@ const MomentsApp: React.FC = () => {
   const workerPullInFlight = useRef(false);
   const workerPullRetryAt = useRef(0);
   const workerSyncInFlight = useRef(false);
+  const dueJobsInFlight = useRef(false);
   const characterPostCheckInFlight = useRef(false);
   const characterPostCheckRetryAt = useRef(0);
   const legacyNpcCardMigrationInFlight = useRef(false);
@@ -229,11 +230,40 @@ const MomentsApp: React.FC = () => {
       visibilityGroups: storedSettings?.visibilityGroups || [],
     };
     const nextPosts = storedPosts.sort((a, b) => (b.pinned === true ? 1 : 0) - (a.pinned === true ? 1 : 0) || b.createdAt - a.createdAt);
-    const [mediaEntries, reactionEntries, commentEntries] = await Promise.all([
+    const [mediaEntries, reactionEntries, rawCommentEntries] = await Promise.all([
       Promise.all(nextPosts.map(async post => [post.id, await DB.getMomentsMediaByPostId(post.id)] as const)),
       Promise.all(nextPosts.map(async post => [post.id, await DB.getMomentsReactionsByPostId(post.id)] as const)),
       Promise.all(nextPosts.map(async post => [post.id, await DB.getMomentsCommentsByPostId(post.id)] as const)),
     ]);
+    // 旧版本可能并发消费同一条 pending 任务，留下不同 id 但内容完全相同的计划评论。
+    // 只清理同一帖、同一人、同一目标、十分钟内的 planned 精确重复，避免误删真实的再次发言。
+    const duplicateCommentIds = new Map<string, string[]>();
+    const commentEntries = rawCommentEntries.map(([postId, comments]) => {
+      const seen = new Map<string, MomentsComment>();
+      const kept: MomentsComment[] = [];
+      for (const comment of comments) {
+        const signature = [comment.actorId, comment.replyToCommentId || '', comment.replyToActorId || '', comment.content.trim()].join('\u0001');
+        const previous = seen.get(signature);
+        if (comment.source === 'planned' && previous?.source === 'planned' && comment.createdAt - previous.createdAt <= 10 * 60_000) {
+          duplicateCommentIds.set(postId, [...(duplicateCommentIds.get(postId) || []), comment.id]);
+          continue;
+        }
+        seen.set(signature, comment);
+        kept.push(comment);
+      }
+      return [postId, kept] as const;
+    });
+    for (const [postId, ids] of duplicateCommentIds) {
+      const indexes = (await DB.getMomentsMemoryIndexesByPostId(postId)).filter(item => ids.includes(item.sourceId));
+      await removeMomentsSourcesFromMemoryPalace(postId, ids, indexes.map(item => item.memoryNodeId).filter((id): id is string => Boolean(id)));
+      await DB.deleteMomentsCommentsCascade(postId, ids);
+      const createdAt = Date.now();
+      await Promise.all(ids.map(id => DB.saveMomentsSyncOutboxItem({
+        id: `moments-outbox-moment-delete-comment-${id}`,
+        type: 'delete', payload: { postId, actorId: USER_PROFILE_ID, sourceId: `moment-delete-comment-${id}`, deletedSourceId: id, createdAt },
+        createdAt, retryCount: 0,
+      })));
+    }
     const syncedFriends = await Promise.all(characters.map(async char => {
       const id = `moments:character:${char.id}`;
       const existing = await DB.getMomentsProfile(id);
@@ -522,6 +552,9 @@ const MomentsApp: React.FC = () => {
   }, [flushMomentsWorker]);
 
   const applyDueMomentsJobs = useCallback(async () => {
+    if (dueJobsInFlight.current) return;
+    dueJobsInFlight.current = true;
+    try {
     const now = Date.now();
     const due = (await DB.getMomentsPendingJobs()).filter(job => job.state === 'pending' && job.dueAt <= now);
     if (!due.length) return;
@@ -581,10 +614,11 @@ const MomentsApp: React.FC = () => {
               setReactionsByPost(prev => ({ ...prev, [job.postId!]: [...(prev[job.postId!] || []), reaction] }));
             }
           } else if (payload.kind === 'comment' && typeof payload.content === 'string') {
-            const existing = (commentsByPost[executable.postId] || []).some(item => item.id === String(payload.sourceId || executable.id));
+            const commentId = String(payload.sourceId || executable.id);
+            const existing = (await DB.getMomentsCommentsByPostId(executable.postId)).some(item => item.id === commentId);
             if (!existing) {
               const comment: MomentsComment = {
-                id: String(payload.sourceId || executable.id), postId: executable.postId, actorId,
+                id: commentId, postId: executable.postId, actorId,
                 actorType: payload.actorType === 'npc' ? 'npc' : 'character', actorName: actor?.displayName || String(payload.actorName || '角色'),
                 actorAvatar: actor?.avatar, content: String(payload.content),
                 replyToCommentId: typeof payload.replyToCommentId === 'string' ? payload.replyToCommentId : undefined,
@@ -593,7 +627,7 @@ const MomentsApp: React.FC = () => {
               };
               await DB.saveMomentsComment(comment);
               if (post) await recordMomentsEvent({ postId: post.id, actorId, type: comment.replyToActorId ? 'reply' : 'comment', sourceId: comment.id, visibleToActorIds: visibleActorIdsForPost(post.visibility), createdAt: now });
-              setCommentsByPost(prev => ({ ...prev, [job.postId!]: [...(prev[job.postId!] || []), comment] }));
+              setCommentsByPost(prev => ({ ...prev, [job.postId!]: [...(prev[job.postId!] || []).filter(item => item.id !== comment.id), comment] }));
             }
           }
         }
@@ -609,7 +643,10 @@ const MomentsApp: React.FC = () => {
       }
     }
     void flushMomentsWorker();
-  }, [commentsByPost, flushMomentsWorker, friends, npcProfiles, posts, reactionsByPost, recordMomentsEvent, sharedAmsgWorker, visibleActorIdsForPost]);
+    } finally {
+      dueJobsInFlight.current = false;
+    }
+  }, [flushMomentsWorker, friends, npcProfiles, posts, reactionsByPost, recordMomentsEvent, sharedAmsgWorker, visibleActorIdsForPost]);
 
   const buildInteractionActorContexts = useCallback(async (actors: MomentsProfile[]): Promise<MomentsInteractionActorContext[]> => {
     const characterIds = unique(actors.map(actor => actor.characterId).filter((id): id is string => Boolean(id)));
@@ -1269,19 +1306,35 @@ const MomentsApp: React.FC = () => {
     if (!target) return;
     setBusy(true);
     try {
-      await DB.deleteMomentsComment(target.id);
+      const postComments = await DB.getMomentsCommentsByPostId(target.postId);
+      const deletedIds = new Set([target.id]);
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const comment of postComments) {
+          if (comment.replyToCommentId && deletedIds.has(comment.replyToCommentId) && !deletedIds.has(comment.id)) {
+            deletedIds.add(comment.id);
+            grew = true;
+          }
+        }
+      }
+      const memoryIndexes = (await DB.getMomentsMemoryIndexesByPostId(target.postId)).filter(item => deletedIds.has(item.sourceId));
+      await removeMomentsSourcesFromMemoryPalace(target.postId, [...deletedIds], memoryIndexes.map(item => item.memoryNodeId).filter((id): id is string => Boolean(id)));
+      await DB.deleteMomentsCommentsCascade(target.postId, [...deletedIds]);
       const post = posts.find(item => item.id === target.postId);
-      if (post) await recordMomentsEvent({ postId: target.postId, actorId: USER_PROFILE_ID, type: 'delete', sourceId: `moment-delete-comment-${target.id}`, deletedSourceId: target.id, visibleToActorIds: [], createdAt: Date.now() });
-      setCommentsByPost(prev => ({ ...prev, [target.postId]: (prev[target.postId] || []).filter(comment => comment.id !== target.id) }));
+      if (post) {
+        for (const id of deletedIds) await recordMomentsEvent({ postId: target.postId, actorId: USER_PROFILE_ID, type: 'delete', sourceId: `moment-delete-comment-${id}`, deletedSourceId: id, visibleToActorIds: [], createdAt: Date.now() });
+      }
+      setCommentsByPost(prev => ({ ...prev, [target.postId]: (prev[target.postId] || []).filter(comment => !deletedIds.has(comment.id)) }));
+      setPendingJobs(await DB.getMomentsPendingJobs());
       setDeleteCommentTarget(null);
+      void flushMomentsWorker();
+      addToast(deletedIds.size > 1 ? `评论及 ${deletedIds.size - 1} 条关联回复已删除，相关记忆已撤销` : '评论已删除，相关记忆已撤销', 'success');
     } catch (error: any) { addToast(error?.message || '删除评论失败', 'error'); }
     finally { setBusy(false); }
   };
 
   const startCommentLongPress = (comment: MomentsComment) => {
-    const post = posts.find(item => item.id === comment.postId);
-    // 微信式规则：评论作者可删自己的评论；动态作者也可清理自己动态下的任何评论。
-    if (comment.actorId !== USER_PROFILE_ID && post?.authorId !== USER_PROFILE_ID) return;
     commentLongPressTriggered.current = false;
     commentLongPressTimer.current = window.setTimeout(() => {
       commentLongPressTriggered.current = true;
@@ -1525,8 +1578,8 @@ const MomentsApp: React.FC = () => {
   const socialInbox = useMemo(() => posts.flatMap(post => {
     const target = post.authorId === USER_PROFILE_ID ? '你的动态' : `${post.authorName}的动态`;
     return [
-    ...(reactionsByPost[post.id] || []).filter(reaction => reaction.actorId !== USER_PROFILE_ID).map(reaction => ({ id: `reaction-${reaction.id}`, postId: post.id, actorName: reaction.actorName, kind: `赞了${target}`, createdAt: reaction.createdAt })),
-    ...(commentsByPost[post.id] || []).filter(comment => comment.actorId !== USER_PROFILE_ID).map(comment => ({ id: `comment-${comment.id}`, postId: post.id, actorName: comment.actorName, kind: `${comment.replyToActorId ? `回复了 ${interactionActorName(post, comment.replyToActorId)}` : `评论了${target}`}：${comment.content}`, createdAt: comment.createdAt })),
+    ...(reactionsByPost[post.id] || []).filter(reaction => reaction.actorId !== USER_PROFILE_ID).map(reaction => ({ id: `reaction-${reaction.id}`, type: 'reaction' as const, postId: post.id, actorName: reaction.actorName, kind: `赞了${target}`, createdAt: reaction.createdAt })),
+    ...(commentsByPost[post.id] || []).filter(comment => comment.actorId !== USER_PROFILE_ID).map(comment => ({ id: `comment-${comment.id}`, type: 'comment' as const, postId: post.id, actorName: comment.actorName, kind: `${comment.replyToActorId ? `回复了 ${interactionActorName(post, comment.replyToActorId)}` : `评论了${target}`}：${comment.content}`, createdAt: comment.createdAt })),
     ];
   }).sort((a, b) => b.createdAt - a.createdAt), [commentsByPost, posts, reactionsByPost]);
   const unreadSocialCount = socialInbox.filter(item => item.createdAt > (settings.lastInboxReadAt || 0)).length;
@@ -1642,7 +1695,7 @@ const MomentsApp: React.FC = () => {
           <div className="mb-3 text-4xl">💬</div>
           <div className="text-[14px] text-[#555]">还没有朋友圈消息</div>
           <p className="mt-2 text-[12px] leading-relaxed">角色和 NPC 的点赞、评论与回复会显示在这里，不会自动塞进你的私聊。</p>
-        </div> : <div className="flex-1 overflow-y-auto bg-white">{socialInbox.map(item => <button type="button" key={item.id} onClick={() => { markSocialInboxRead(); const post = posts.find(candidate => candidate.id === item.postId); if (post) { setTimelineProfile(profileForPostAuthor(post)); setView('profile'); } }} className="flex w-full gap-3 border-b border-[#ededed] px-4 py-4 text-left"><div className="flex h-10 w-10 items-center justify-center rounded bg-[#edf5ff] text-[#576b95]">♥</div><div className="min-w-0 flex-1"><div className="text-[13px] text-[#576b95]">{item.actorName}</div><div className="mt-1 truncate text-[13px] text-[#555]">{item.kind}</div><div className="mt-1 text-[11px] text-[#999]">{formatMomentTime(item.createdAt)}</div></div></button>)}</div>
+        </div> : <div className="flex-1 overflow-y-auto bg-white">{socialInbox.map(item => <button type="button" key={item.id} onClick={() => { markSocialInboxRead(); const post = posts.find(candidate => candidate.id === item.postId); if (post) { setTimelineProfile(profileForPostAuthor(post)); setView('profile'); } }} className="flex w-full gap-3 border-b border-[#ededed] px-4 py-4 text-left"><div className={`flex h-10 w-10 items-center justify-center rounded ${item.type === 'reaction' ? 'bg-[#fff0f2] text-[#e45b70]' : 'bg-[#edf5ff] text-[#576b95]'}`}>{item.type === 'reaction' ? <Heart size={22} weight="fill" /> : <ChatCircleText size={22} weight="fill" />}</div><div className="min-w-0 flex-1"><div className="text-[13px] text-[#576b95]">{item.actorName}</div><div className="mt-1 truncate text-[13px] text-[#555]">{item.kind}</div><div className="mt-1 text-[11px] text-[#999]">{formatMomentTime(item.createdAt)}</div></div></button>)}</div>
       ) : (
         <>
           <div className="pointer-events-none absolute inset-x-0 top-0 z-40 flex items-center justify-between px-2.5" style={{ paddingTop: 'calc(var(--chrome-top, var(--safe-top, 0px)) + 8px)' }}>
@@ -1699,7 +1752,8 @@ const MomentsApp: React.FC = () => {
                   <div className="mt-2.5 flex items-center justify-between text-[11px] text-[#999]">
                     <span>{post.pinned ? '置顶 · ' : ''}{formatMomentTime(post.createdAt)}</span>
                     <div className="flex items-center gap-2 text-[#576b95]">
-                      {post.authorId === USER_PROFILE_ID && <><button type="button" onClick={() => void togglePin(post)}>{post.pinned ? '取消置顶' : '置顶'}</button><button type="button" onClick={() => setDeleteTarget(post)} aria-label="动态更多操作"><DotsThree size={22} weight="bold" /></button></>}
+                      {post.authorId === USER_PROFILE_ID && <button type="button" onClick={() => void togglePin(post)}>{post.pinned ? '取消置顶' : '置顶'}</button>}
+                      <button type="button" onClick={() => setDeleteTarget(post)} aria-label="删除动态"><DotsThree size={22} weight="bold" /></button>
                       <button type="button" onClick={() => setShareTargetPost(post)} className="text-[11px]">转发</button>
                       <button type="button" onClick={() => void toggleUserReaction(post)} aria-label="点赞" className={(reactionsByPost[post.id] || []).some(reaction => reaction.actorId === USER_PROFILE_ID) ? 'text-[#e05a6e]' : ''}><Heart size={19} weight={(reactionsByPost[post.id] || []).some(reaction => reaction.actorId === USER_PROFILE_ID) ? 'fill' : 'regular'} /></button>
                       <button type="button" onClick={() => openCommentComposer(post.id)} aria-label="评论"><ChatCircleText size={19} /></button>
@@ -1707,11 +1761,11 @@ const MomentsApp: React.FC = () => {
                   </div>
                   {((reactionsByPost[post.id] || []).length > 0 || (commentsByPost[post.id] || []).length > 0) && <div className="mt-2 rounded-sm bg-[#f7f7f7] px-2.5 py-2 text-[12px] leading-relaxed">
                     {(reactionsByPost[post.id] || []).length > 0 && <div className="border-b border-[#e9e9e9] pb-1.5 text-[#576b95]"><Heart size={13} weight="fill" className="mr-1 inline text-[#576b95]" />{(reactionsByPost[post.id] || []).map(reaction => reaction.actorName).join('、')}</div>}
-                    {(commentsByPost[post.id] || []).map(comment => <button type="button" key={comment.id} onClick={() => { if (commentLongPressTriggered.current) { commentLongPressTriggered.current = false; return; } openCommentComposer(post.id, comment); }} onPointerDown={() => startCommentLongPress(comment)} onPointerUp={cancelCommentLongPress} onPointerCancel={cancelCommentLongPress} onPointerLeave={cancelCommentLongPress} onContextMenu={event => { if (comment.actorId === USER_PROFILE_ID) { event.preventDefault(); setDeleteCommentTarget(comment); } }} className="mt-1 block w-full touch-manipulation text-left text-[#576b95]">
+                    {(commentsByPost[post.id] || []).map(comment => <button type="button" key={comment.id} onClick={() => { if (commentLongPressTriggered.current) { commentLongPressTriggered.current = false; return; } openCommentComposer(post.id, comment); }} onPointerDown={() => startCommentLongPress(comment)} onPointerUp={cancelCommentLongPress} onPointerCancel={cancelCommentLongPress} onPointerLeave={cancelCommentLongPress} onContextMenu={event => { event.preventDefault(); setDeleteCommentTarget(comment); }} className="mt-1 block w-full touch-manipulation text-left text-[#576b95]">
                       <span className="font-medium">{comment.actorName}</span>{comment.replyToActorId ? <><span className="text-[#555]"> 回复 </span><span className="font-medium">{interactionActorName(post, comment.replyToActorId)}</span></> : null}<span className="text-[#555]">：{comment.content}</span>
                     </button>)}
                   </div>}
-                      <div className="mt-2 text-[11px] text-[#999]">长按自己的评论，或自己动态下的任意评论，都可以删除；自动互动按可见范围错峰执行。</div>
+                      <div className="mt-2 text-[11px] text-[#999]">长按任意评论即可删除；任意动态也可从右侧菜单删除，相关记忆会同步撤销。</div>
                 </div>
               </article>
             ))}
@@ -1757,7 +1811,7 @@ const MomentsApp: React.FC = () => {
       {shareTargetPost && <div className="absolute inset-0 z-40 flex items-end bg-black/35 p-3"><div className="max-h-[75%] w-full overflow-hidden rounded-2xl bg-white"><div className="flex items-center justify-between border-b border-[#ededed] px-4 py-4"><div><div className="text-[16px] font-semibold">转发给谁</div><p className="mt-1 text-[11px] text-[#888]">只在你主动选择时发进对应私聊。</p></div><button type="button" onClick={() => setShareTargetPost(null)}><X size={20} /></button></div><div className="max-h-[48vh] overflow-y-auto">{friends.length === 0 ? <div className="px-4 py-7 text-center text-[13px] text-[#999]">还没有可转发的角色好友。</div> : friends.map(friend => <button type="button" key={friend.id} disabled={busy} onClick={() => void forwardPostToCharacter(shareTargetPost, friend)} className="flex w-full items-center gap-3 border-b border-[#f0f0f0] px-4 py-3.5 text-left disabled:opacity-50"><div className="h-10 w-10 overflow-hidden bg-[#eee]">{friend.avatar ? <TokenImg value={friend.avatar} alt={friend.displayName} className="h-full w-full object-cover" /> : <span className="flex h-full items-center justify-center">🙂</span>}</div><span className="flex-1 text-[14px]">{friend.displayName}</span><CaretRight size={17} className="text-[#aaa]" /></button>)}</div></div></div>}
 
       {deleteTarget && <div className="absolute inset-0 z-40 flex items-end bg-black/35 p-3"><div className="w-full overflow-hidden rounded-2xl bg-white text-center"><div className="border-b border-[#ededed] px-5 py-5"><div className="text-[16px] font-semibold">删除这条朋友圈？</div><p className="mt-2 text-[12px] leading-relaxed text-[#888]">如果其中的图片来自小手机相册，你可以选择保留或一并删除相册副本。</p></div><button type="button" disabled={busy} onClick={() => void confirmDelete(false)} className="flex w-full items-center justify-center gap-2 border-b border-[#ededed] py-4 text-[15px] text-[#576b95]"><Trash size={17} />只删动态，保留相册照片</button><button type="button" disabled={busy} onClick={() => void confirmDelete(true)} className="w-full border-b border-[#ededed] py-4 text-[15px] text-[#e15b5b]">动态和相册副本都删除</button><button type="button" onClick={() => setDeleteTarget(null)} className="w-full py-4 text-[15px] text-[#555]">取消</button></div></div>}
-      {deleteCommentTarget && <div className="absolute inset-0 z-50 flex items-end bg-black/35 p-3"><div className="w-full overflow-hidden rounded-2xl bg-white text-center"><div className="border-b border-[#ededed] px-5 py-5"><div className="text-[16px] font-semibold">删除这条评论？</div><p className="mt-2 text-[12px] text-[#888]">这不会删除原动态，也不会影响其他人的评论。</p></div><button type="button" disabled={busy} onClick={() => void confirmDeleteComment()} className="w-full border-b border-[#ededed] py-4 text-[15px] text-[#e15b5b]">删除评论</button><button type="button" onClick={() => setDeleteCommentTarget(null)} className="w-full py-4 text-[15px] text-[#555]">取消</button></div></div>}
+      {deleteCommentTarget && <div className="absolute inset-0 z-50 flex items-end bg-black/35 p-3"><div className="w-full overflow-hidden rounded-2xl bg-white text-center"><div className="border-b border-[#ededed] px-5 py-5"><div className="text-[16px] font-semibold">删除这条评论？</div><p className="mt-2 text-[12px] text-[#888]">评论、依附它的回复以及相关事件记忆会一并撤销；原动态保留。</p></div><button type="button" disabled={busy} onClick={() => void confirmDeleteComment()} className="w-full border-b border-[#ededed] py-4 text-[15px] text-[#e15b5b]">删除评论</button><button type="button" onClick={() => setDeleteCommentTarget(null)} className="w-full py-4 text-[15px] text-[#555]">取消</button></div></div>}
 
       {strangerListOpen && <div className="absolute inset-0 z-[55] flex flex-col bg-[#f7f7f7]">
         <header className="flex h-[56px] shrink-0 items-center justify-between border-b border-[#ededed] bg-white px-2.5"><button type="button" onClick={() => setStrangerListOpen(false)} className="flex h-11 w-11 touch-manipulation items-center justify-center"><ArrowLeft size={25} /></button><span className="text-[16px] font-semibold">摇一摇</span><span className="w-11" /></header>
