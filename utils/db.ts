@@ -1567,6 +1567,28 @@ export const DB = {
       });
   },
 
+  deleteMomentsTempStrangerData: async (strangerId: string, profileId: string): Promise<void> => {
+      const db = await openDB();
+      const stores = [STORE_MOMENTS_TEMP_STRANGERS, STORE_MOMENTS_TEMP_TRANSCRIPTS, STORE_MOMENTS_PROFILES]
+          .filter(name => db.objectStoreNames.contains(name));
+      const tx = db.transaction(stores, 'readwrite');
+      return new Promise((resolve, reject) => {
+          tx.objectStore(STORE_MOMENTS_TEMP_STRANGERS).delete(strangerId);
+          tx.objectStore(STORE_MOMENTS_PROFILES).delete(profileId);
+          const transcriptStore = tx.objectStore(STORE_MOMENTS_TEMP_TRANSCRIPTS);
+          const cursor = transcriptStore.index('strangerId').openKeyCursor(IDBKeyRange.only(strangerId));
+          cursor.onsuccess = () => {
+              const current = cursor.result;
+              if (!current) return;
+              transcriptStore.delete(current.primaryKey);
+              current.continue();
+          };
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error);
+          tx.onabort = () => reject(tx.error || new Error('deleteMomentsTempStrangerData transaction aborted'));
+      });
+  },
+
   saveMomentsEventLedger: async (entry: MomentsEventLedgerEntry): Promise<void> => {
       const db = await openDB();
       const tx = db.transaction(STORE_MOMENTS_EVENT_LEDGER, 'readwrite');

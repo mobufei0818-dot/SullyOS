@@ -21,6 +21,18 @@ export interface MomentsInteractionPlan {
   interactions: MomentsPlannedInteraction[];
 }
 
+/**
+ * 朋友圈互动仍是一条动态一次调用；这些上下文由前端从本地消息库汇总，
+ * 不会为了每个角色再单独请求一次 API。
+ */
+export interface MomentsInteractionActorContext {
+  actorId: string;
+  persona?: string;
+  userRelationship?: string;
+  privateChat?: string;
+  sharedGroupChat?: string;
+}
+
 export interface MomentsCharacterPostPlan {
   shouldPost: boolean;
   content: string;
@@ -130,17 +142,20 @@ export async function planMomentsInteractions(args: {
   threadVersion?: number;
   contextComments?: Array<{ id: string; actorId: string; actorName: string; content: string }>;
   contextReactions?: Array<{ actorId: string; actorName: string }>;
+  actorContexts?: MomentsInteractionActorContext[];
   /** 用户新增评论后的讨论轮。只生成最多三条错峰回复，不再补普通点赞。 */
   replyRound?: boolean;
 }): Promise<MomentsInteractionPlan> {
   if (!isMomentsApiReady(args.config)) throw new Error('朋友圈副 API 尚未配置完整');
   const now = args.now || Date.now();
   const maxComments = Math.min(Math.max(args.maxComments ?? 8, 0), 8);
+  const actorContextById = new Map((args.actorContexts || []).map(item => [item.actorId, item]));
   const actorLines = args.actors.map(actor => ({
     actorId: actor.id,
     actorType: actor.actorType === 'npc' ? 'npc' : 'character',
     actorName: actor.displayName,
     bio: actor.bio || '',
+    ...(actorContextById.get(actor.id) || {}),
   }));
   const replyTargets = new Set([
     ...(args.contextComments || []).map(item => item.actorId),
@@ -155,6 +170,8 @@ export async function planMomentsInteractions(args: {
     args.replyRound
       ? '用户刚在评论区说了新内容。请一次性规划这一轮自然回复，最多 3 条；候选人可以回复用户、回复已有评论者，或 @ 已点赞的人。互动是相互的，发帖者也可以回复别人。不要再规划普通点赞。'
       : '为这条朋友圈一次性规划首轮点赞/评论；不要为凑数强行互动，最多 8 条评论。',
+    '每个人的措辞、亲疏、情绪和边界必须来自该人的 persona、与用户的当前关系、近期私聊；回复另一个角色时还必须参考双方共同经历过的群聊上下文。没有共同上下文就只按当下评论自然回应，不得编造共同经历。',
+    '这是一通统一规划调用，不要把不同角色写成同一种语气，也不要让角色知道自己看不到的私聊。',
     '每个 actorId 最多出现一次；可见角色已由系统筛选，不要新增名单外的人。',
     'dueAt 使用毫秒时间戳，必须在 now 之后 30 秒到 24 小时内，按自然错峰安排。',
     args.replyRound
@@ -263,18 +280,23 @@ export async function planMomentsCharacterPost(args: {
 }
 
 /** 摇一摇只生成临时档案；除非用户主动加好友，绝不写入正式 CharacterProfile。 */
-export async function planMomentsStranger(args: { config: MomentsApiConfig; attractive: boolean }): Promise<MomentsStrangerPlan> {
+export async function planMomentsStranger(args: { config: MomentsApiConfig; attractive: boolean; now?: number; diversitySeed?: string }): Promise<MomentsStrangerPlan> {
   if (!isMomentsApiReady(args.config)) throw new Error('朋友圈副 API 尚未配置完整');
+  const now = new Date(args.now || Date.now());
+  const dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const clock = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日 ${dayNames[now.getDay()]} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
   const prompt = [
     '你是微信摇一摇的临时陌生人生成器。只输出 JSON，不要解释。',
     `这次候选${args.attractive ? '整体有吸引力、自然不油腻' : '允许反差、真实但不仇恨或骚扰'}。`,
     '不要使用真实公众人物、不要包含露骨或攻击性内容。',
+    `现在的现实时间是 ${clock}，对方是此刻在附近摇到的人。身份、正在做的事和第一句话必须符合这个时间，不要在深夜说刚下早班之类的矛盾话。`,
+    `随机种子=${args.diversitySeed || `${Date.now()}-${Math.random()}`}。每次都重新创造姓名、年龄段、职业/处境、性格反差、兴趣和说话习惯，不得从固定候选名单挑人，也不要套用常见的摄影师/咖啡店模板。`,
     'JSON 形状：{"name":"2-6字昵称","bio":"不超过90字的稳定生活身份与性格","openingLine":"不超过70字、自然的第一句"}',
   ].join('\n');
   const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
     method: 'POST', headers: { Authorization: `Bearer ${args.config.apiKey.trim()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: args.config.model.trim(), temperature: 1, stream: false, messages: [{ role: 'user', content: prompt }] }),
-  }, 0, 15_000, { appName: '朋友圈', purpose: '摇一摇临时陌生人' });
+  }, 0, 0, { appName: '朋友圈', purpose: '摇一摇临时陌生人' });
   const root = parseJsonObject(extractContent(data));
   const name = typeof root.name === 'string' ? root.name.trim().slice(0, 24) : '';
   const bio = typeof root.bio === 'string' ? root.bio.trim().slice(0, 180) : '';
@@ -500,15 +522,33 @@ export async function planMomentsStrangerCharacterProfile(args: {
 }
 
 /** 临时聊天只携带固定人设与最近少量原文，避免在未加好友前污染正式记忆。 */
-export async function replyMomentsStranger(args: { config: MomentsApiConfig; profile: MomentsProfile; transcript: Array<{ sender: 'user' | 'stranger'; content: string }> }): Promise<string> {
+export async function replyMomentsStranger(args: { config: MomentsApiConfig; profile: MomentsProfile; transcript: Array<{ sender: 'user' | 'stranger'; content: string; createdAt: number }>; now?: number }): Promise<string> {
   if (!isMomentsApiReady(args.config)) throw new Error('朋友圈副 API 尚未配置完整');
-  const recent = args.transcript.slice(-12).map(line => `${line.sender === 'user' ? '用户' : args.profile.displayName}：${line.content}`).join('\n');
-  const prompt = ['你在与用户进行尚未加好友前的微信临时聊天。自然简短回复，不要提及系统、AI、提示词。', `你的临时身份：${args.profile.bio || ''}`, `最近聊天：\n${recent}`, '只输出你的一句回复（不超过160字）。'].join('\n');
+  const now = args.now || Date.now();
+  const nowDate = new Date(now);
+  const dayNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const clock = `${nowDate.getFullYear()}年${nowDate.getMonth() + 1}月${nowDate.getDate()}日 ${dayNames[nowDate.getDay()]} ${String(nowDate.getHours()).padStart(2, '0')}:${String(nowDate.getMinutes()).padStart(2, '0')}`;
+  const recentLines = args.transcript.slice(-24);
+  const recent = recentLines.map(line => {
+    const date = new Date(line.createdAt);
+    return `[${date.getMonth() + 1}/${date.getDate()} ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}] ${line.sender === 'user' ? '用户' : args.profile.displayName}：${line.content}`;
+  }).join('\n');
+  const lastAt = recentLines.at(-1)?.createdAt;
+  const gapMinutes = lastAt ? Math.max(0, Math.floor((now - lastAt) / 60_000)) : 0;
+  const prompt = [
+    '你正在微信摇一摇的临时聊天里，以一个真实陌生人的身份回复。只输出本次要发出的正文，不要解释。',
+    `你的稳定身份：${args.profile.bio || ''}`,
+    `现在是 ${clock}。距离聊天里最后一条消息约 ${gapMinutes} 分钟。时间是生活背景，会影响作息、正在做的事和语气，但不要每次机械报时。`,
+    '完整读完最近聊天，尤其要一起回应从你上次回复后用户连续发来的所有消息。承接具体措辞和话题，不要突然换成无关的天气、朋友圈或万能寒暄。',
+    '像活人打字：由你的人设决定简短、停顿、反问、口头禅和情绪；可以不完美，可以只抓最想接的一两点。不要客服腔、总结腔、采访式连续提问，也不要声称自己是 AI。',
+    `最近聊天：\n${recent || '尚未聊天'}`,
+    '回复长度以自然为准，最多 300 字。',
+  ].join('\n');
   const data = await safeFetchJson(endpoint(args.config, '/chat/completions'), {
     method: 'POST', headers: { Authorization: `Bearer ${args.config.apiKey.trim()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: args.config.model.trim(), temperature: 0.85, stream: false, messages: [{ role: 'user', content: prompt }] }),
-  }, 0, 15_000, { appName: '朋友圈', purpose: '摇一摇临时聊天' });
-  const content = extractContent(data).trim().replace(/^['“]|['”]$/g, '').slice(0, 160);
+  }, 0, 0, { appName: '朋友圈', purpose: '摇一摇临时聊天' });
+  const content = extractContent(data).trim().replace(/^['“]|['”]$/g, '').slice(0, 300);
   if (!content) throw new Error('临时聊天副 API 未返回文字');
   return content;
 }

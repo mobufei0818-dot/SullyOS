@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MomentsApiConfig, MomentsPost, MomentsProfile } from '../types';
-import { planMomentsCharacterPost, planMomentsInteractions } from './momentsApi';
+import { planMomentsCharacterPost, planMomentsInteractions, replyMomentsStranger } from './momentsApi';
 
 const config: MomentsApiConfig = {
   source: 'custom', enabled: true, baseUrl: 'https://example.com/v1', apiKey: 'test-key', model: 'test-model',
@@ -43,6 +43,44 @@ describe('朋友圈评论区相互回复', () => {
     expect(plan.interactions[0]).toMatchObject({ replyToCommentId: 'user-comment', replyToActorId: 'moments:user' });
     expect(plan.interactions[0].dueAt).toBe(now + 60_000);
     expect(plan.interactions[1]).toMatchObject({ replyToActorId: 'moments:character:liker' });
+  });
+
+  it('统一规划请求会携带角色私聊、关系状态和共同群聊，而不是逐角色调用', async () => {
+    let requestBody = '';
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      requestBody = String(init?.body || '');
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"interactions":[]}' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    await planMomentsInteractions({
+      config, post, actors: [actor('moments:character:a', '甲'), actor('moments:character:b', '乙')],
+      actorContexts: [{ actorId: 'moments:character:a', persona: '冷静但护短', userRelationship: '好感 76', privateChat: '用户：今晚等你', sharedGroupChat: '[群：朋友们] 乙：别迟到' }],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestBody).toContain('今晚等你');
+    expect(requestBody).toContain('朋友们');
+    expect(requestBody).toContain('好感 76');
+  });
+});
+
+describe('摇一摇临时聊天', () => {
+  it('会把真实时间、消息时间线和连续用户消息一起交给一次前端请求', async () => {
+    let requestBody = '';
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      requestBody = String(init?.body || '');
+      return new Response(JSON.stringify({ choices: [{ message: { content: '我看到了，第二句更像你真正想说的。' } }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    const reply = await replyMomentsStranger({
+      config, profile: { ...actor('moments:stranger:1', '路言'), bio: '做展陈设计，慢热。' }, now: new Date('2026-09-01T21:30:00+08:00').getTime(),
+      transcript: [
+        { sender: 'user', content: '第一句', createdAt: new Date('2026-09-01T21:20:00+08:00').getTime() },
+        { sender: 'user', content: '还有第二句', createdAt: new Date('2026-09-01T21:25:00+08:00').getTime() },
+      ],
+    });
+    expect(reply).toContain('第二句');
+    expect(requestBody).toContain('第一句');
+    expect(requestBody).toContain('还有第二句');
+    expect(requestBody).toContain('2026年9月1日');
   });
 });
 
