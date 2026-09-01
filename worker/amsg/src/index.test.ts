@@ -1579,7 +1579,7 @@ describe('runMcpFireTool', () => {
       const body = JSON.parse(init.body);
       seen.push({ url: String(input), body, auth: new Headers(init.headers).get('Authorization') });
       if (body.method === 'initialize') {
-        return rpcOk(body.id, { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'p', version: '1' } });
+        return rpcOk(body.id, { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'p', version: '1' } });
       }
       if (String(body.method).startsWith('notifications/')) return new Response(null, { status: 202 });
       return rpcOk(body.id, { content: [{ type: 'text', text: '暗号 MARKER-123' }] });
@@ -1601,7 +1601,7 @@ describe('runMcpFireTool', () => {
       const body = JSON.parse(init.body);
       if (body.method === 'initialize') {
         handshakes++;
-        return rpcOk(body.id, { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'p', version: '1' } });
+        return rpcOk(body.id, { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'p', version: '1' } });
       }
       if (String(body.method).startsWith('notifications/')) return new Response(null, { status: 202 });
       return rpcOk(body.id, { content: [{ type: 'text', text: 'x' }] });
@@ -1647,7 +1647,7 @@ describe('runMcpFireTool', () => {
     vi.stubGlobal('fetch', vi.fn(async (_: any, init: any) => {
       const body = JSON.parse(init.body);
       if (body.method === 'initialize') {
-        return rpcOk(body.id, { protocolVersion: '2024-11-05', capabilities: {}, serverInfo: { name: 'p', version: '1' } });
+        return rpcOk(body.id, { protocolVersion: '2025-11-25', capabilities: {}, serverInfo: { name: 'p', version: '1' } });
       }
       if (String(body.method).startsWith('notifications/')) return new Response(null, { status: 202 });
       clock += 700;

@@ -17,8 +17,18 @@
 
 export interface McpFireToolDef {
     name: string;
+    title?: string;
     description?: string;
     inputSchema?: any;
+    outputSchema?: any;
+    /** MCP 2025-03-26+ 的工具行为提示；只把它当安全提示，不能当权限证明。 */
+    annotations?: {
+        title?: string;
+        readOnlyHint?: boolean;
+        destructiveHint?: boolean;
+        idempotentHint?: boolean;
+        openWorldHint?: boolean;
+    };
 }
 
 /**
@@ -309,8 +319,17 @@ export const extractTextFakedMcpCalls = <S extends McpFireServer>(
 // 会话状态和请求目标都是显式传参，所以浏览器（配置在 localStorage、请求包代理）
 // 和 worker（配置随 tool_config 上云、直连服务器）能共用同一套收发逻辑。
 
-/** initialize 握手声明的协议版本。 */
-const MCP_PROTOCOL_VERSION = '2024-11-05';
+/**
+ * SullyOS 现在使用的是单端点 Streamable HTTP，所以不能再宣称只属于旧 HTTP+SSE
+ * 双端点时代的 2024-11-05。2026-07-28 是另一套无握手协议；本客户端先把成熟且
+ * 广泛部署的 handshake era 做完整，modern era 后续单独接入，不能只换日期冒充支持。
+ */
+export const MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION = '2025-11-25';
+export const MCP_SUPPORTED_HANDSHAKE_PROTOCOL_VERSIONS = [
+    '2025-11-25',
+    '2025-06-18',
+    '2025-03-26',
+] as const;
 
 // 远端 MCP / 用户自建代理都可能保持连接不结束。不能让一次 tools/call
 // 永久卡住整条聊天链路（外层 isTyping 只有等 Promise 结束后才会清掉）。
@@ -345,17 +364,33 @@ export interface McpSessionState {
     sessionId: string | null;
     initialized: boolean;
     initPromise: Promise<void> | null;
+    /** initialize 由服务端确认的版本；后续 HTTP 请求必须带 MCP-Protocol-Version。 */
+    protocolVersion: string | null;
+    /** 只用于接线台诊断展示，不参与权限或行为判断。 */
+    serverInfo: { name?: string; title?: string; version?: string } | null;
+    serverCapabilities: Record<string, any> | null;
     /** JSON-RPC 请求 id，每个会话各数各的 */
     nextId: number;
 }
 
 export const createMcpSessionState = (): McpSessionState =>
-    ({ sessionId: null, initialized: false, initPromise: null, nextId: 0 });
+    ({
+        sessionId: null,
+        initialized: false,
+        initPromise: null,
+        protocolVersion: null,
+        serverInfo: null,
+        serverCapabilities: null,
+        nextId: 0,
+    });
 
 /** 一次请求的目标：最终 URL + 请求头构造。浏览器侧包代理，worker 侧直连。 */
 export interface McpTransportTarget {
     url: string;
-    headers: (sessionId: string | null) => Headers | Record<string, string>;
+    headers: (
+        sessionId: string | null,
+        protocolVersion: string | null,
+    ) => Headers | Record<string, string>;
     /**
      * fetch 当场抛异常（连不上 / 被浏览器拦下）时，附在报错后面的排查提示。
      * 代理和 CORS 都是浏览器侧才有的概念，话术由调用方给；worker 直连可以不传。
@@ -443,7 +478,7 @@ const postCore = async (
     timeoutMs: number,
     expectResponse = true,
 ): Promise<{ response: McpJsonRpcResponse | null }> => {
-    const headers = target.headers(session.sessionId);
+    const headers = target.headers(session.sessionId, session.protocolVersion);
 
     let resp: Response;
     const controller = new AbortController();
@@ -511,12 +546,26 @@ const initializeCore = async (
     timeoutMs: number,
 ): Promise<void> => {
     const initReq = buildRpcRequest(session, 'initialize', {
-        protocolVersion: MCP_PROTOCOL_VERSION,
+        protocolVersion: MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION,
         capabilities: {},
-        clientInfo: { name: 'SullyOS-MCP', version: '1.0.0' },
+        clientInfo: { name: 'sullyos', title: 'SullyOS', version: '1.0.0' },
     });
     const { response } = await postCore(target, session, initReq, timeoutMs);
     if (response?.error) throw new Error(`Initialize 失败: ${response.error.message}`);
+
+    const negotiated = String(
+        response?.result?.protocolVersion || MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION,
+    );
+    if (!(MCP_SUPPORTED_HANDSHAKE_PROTOCOL_VERSIONS as readonly string[]).includes(negotiated)) {
+        throw new Error(
+            `MCP 协议版本不兼容：服务器选择了 ${negotiated}。` +
+            `SullyOS 的 Streamable HTTP 接线支持 ${MCP_SUPPORTED_HANDSHAKE_PROTOCOL_VERSIONS.join(' / ')}；` +
+            `2024-11-05 属于旧 HTTP+SSE 双端点，2026-07-28 则需要新的无握手生命周期。`,
+        );
+    }
+    session.protocolVersion = negotiated;
+    session.serverInfo = response?.result?.serverInfo || null;
+    session.serverCapabilities = response?.result?.capabilities || null;
 
     // 直连模式下读不到 Session-Id 说明 CORS 没暴露响应头（服务器可能有会话但我们拿不到），
     // Streamable HTTP 无状态服务器也可能压根不发。这里不硬报错：tools/list 能通就算能用。
@@ -549,16 +598,22 @@ export const discoverMcpToolsCore = async (
     target: McpTransportTarget,
     session: McpSessionState,
     timeoutMs: number,
+    opts: { onStage?: (stage: 'initialize' | 'tools') => void } = {},
 ): Promise<McpFireToolDef[]> => {
+    opts.onStage?.('initialize');
     await ensureInitializedCore(target, session, timeoutMs);
+    opts.onStage?.('tools');
     const { response } = await postCore(target, session, buildRpcRequest(session, 'tools/list'), timeoutMs);
     if (response?.error) throw new Error(`tools/list 失败: ${response.error.message}`);
     const tools = response?.result?.tools;
     if (!Array.isArray(tools)) return [];
     return tools.map((t: any) => ({
         name: t.name,
+        title: t.title || t.annotations?.title || '',
         description: t.description || '',
         inputSchema: t.inputSchema || t.input_schema || { type: 'object', properties: {} },
+        outputSchema: t.outputSchema || t.output_schema,
+        annotations: t.annotations,
     }));
 };
 
@@ -707,6 +762,13 @@ export const callMcpToolCore = async (
         if (response.error) return finish({ success: false, error: `MCP 错误 [${response.error.code}]: ${response.error.message}` });
 
         const result = response.result;
+        if (result?.resultType === 'input_required') {
+            return finish({
+                success: false,
+                error: '这个工具需要在执行途中补充确认或输入；SullyOS 当前不会替你自动回答，请回到聊天中明确要求后重试。',
+                data: result,
+            });
+        }
         if (result?.content && Array.isArray(result.content)) {
             const textParts = result.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text || '');
             const fullText = textParts.join('\n').trim();
@@ -724,7 +786,11 @@ export const callMcpToolCore = async (
 };
 
 /** worker 直连的请求头（浏览器侧那套代理头逻辑留在 mcpClient.buildMcpRequestHeaders）。 */
-export const buildMcpDirectHeaders = (server: McpFireServer, sessionId: string | null): Record<string, string> => {
+export const buildMcpDirectHeaders = (
+    server: McpFireServer,
+    sessionId: string | null,
+    protocolVersion: string | null = null,
+): Record<string, string> => {
     const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'Accept': 'application/json, text/event-stream',
@@ -736,6 +802,7 @@ export const buildMcpDirectHeaders = (server: McpFireServer, sessionId: string |
     }
     if (server.token) headers['Authorization'] = `Bearer ${server.token}`;
     if (sessionId) headers['Mcp-Session-Id'] = sessionId;
+    if (protocolVersion) headers['MCP-Protocol-Version'] = protocolVersion;
     return headers;
 };
 

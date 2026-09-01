@@ -44,6 +44,7 @@ import {
   supportsLlmCredentials,
   type LlmCredentialRow,
 } from './amsgLlmCredentials';
+import { observeRemoteStateUpdatedAt, stampStateUpdatedAt } from './amsgStateClock';
 import { flattenContentPartsToText } from './promptMessageCleanup';
 import { resolveBlobRefsDeep } from './blobRef';
 import {
@@ -1049,6 +1050,13 @@ export const describeInstantChatFailure = (status: number, body: any): string =>
     return '即时对话没发出去：没赶上服务端的时间校验——网络太慢，或设备时钟偏慢。'
       + '重试一次通常就好；每次都这样的话，检查一下设备的「自动设置时间」开没开。';
   }
+  // 走到这里说明连自愈那一轮（读回云端时间戳对齐再发一次）都没盖上去：要么云端状态
+  // 读不回来，要么真的有另一台设备/另一个标签页在同时写同一个角色。
+  if (code === 'INSTANT_CHAT_STATE_STALE') {
+    return '即时对话没发出去：云端那份状态比这台设备的新，对齐之后重发也没能盖上去。'
+      + '另一台设备或另一个标签页开着同一个角色的话，先关掉再发；只有这一台的话，'
+      + '检查一下设备的「自动设置时间」开没开。';
+  }
   return `即时对话没发出去（HTTP ${status}${code ? ` / ${code}` : ''}）${detail ? `：${detail}` : '。'}`;
 };
 
@@ -1061,6 +1069,15 @@ export const describeInstantChatFailure = (status: number, body: any): string =>
 export const isCredentialNotFound = (body: any): boolean =>
   body?.error?.code === 'CREDENTIAL_NOT_FOUND'
   || body?.error?.upstream?.error?.code === 'CREDENTIAL_NOT_FOUND';
+
+/**
+ * 这个错误体是不是「云端拒收了这一轮的状态」——条件写把 fire_pack 拦下了。
+ *
+ * 这个码由包装层判出来（`worker/amsg/src/instantChat.ts`），所以只在顶层，不用像
+ * 凭据那个一样再往 `error.upstream` 里剥一层。
+ */
+export const isInstantChatStateStale = (body: any): boolean =>
+  body?.error?.code === 'INSTANT_CHAT_STATE_STALE';
 
 /** client_state 上传每次尝试前等多久：数组长度即总尝试次数（首次不等）。 */
 const CLIENT_STATE_BACKOFF_MS = [0, 400, 1200];
@@ -1116,6 +1133,35 @@ export const putClientStateOrThrow = async (
 };
 
 /**
+ * 被条件写拦下之后，照云端那几行的时间戳把本地水位抬上去；返回水位有没有真的动。
+ *
+ * 为什么非得读一遍：拦下只说明「你盖的戳不够新」，没说云端那行是几点。不读回来就只能
+ * 猜偏移多少，而这个偏移取决于当初设备时钟跑偏了多少，猜不出来。对齐之后下一次盖的戳
+ * 自然就跨得过去了（见 amsgStateClock）。
+ *
+ * 读失败不抛：调用方拿 false 当「没对齐上」处理，该报的错照报——自愈是加分项，不该
+ * 把原本清清楚楚的失败盖成一句「读云端状态失败」。
+ */
+const alignStateClockWithRemote = async (
+  client: ReiClient,
+  namespaces: string[],
+): Promise<boolean> => {
+  let aligned = false;
+  for (const namespace of namespaces) {
+    try {
+      const response = await client.getClientState(namespace) as
+        { data?: { entries?: Array<{ updatedAt?: unknown }> } } | undefined;
+      for (const entry of response?.data?.entries ?? []) {
+        if (observeRemoteStateUpdatedAt(entry?.updatedAt)) aligned = true;
+      }
+    } catch (error) {
+      console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 读云端状态时间戳失败，这一轮不对齐`, error);
+    }
+  }
+  return aligned;
+};
+
+/**
  * 把一个 namespace 下还有内容的条目全部清空，返回被清掉的键名。
  *
  * 先读一遍再逐条写空，而不是照着已知键名盲写，有两个原因：
@@ -1146,10 +1192,10 @@ export const clearNamespaceValuesOrThrow = async (
   const keys = entries.filter((e) => e?.key && e?.value).map((e) => e.key as string);
   if (keys.length === 0) return [];
 
-  const now = Date.now();
+  const updatedAt = stampStateUpdatedAt();
   await putClientStateOrThrow(
     client,
-    keys.map((key) => ({ namespace, key, value: '', updatedAt: now })),
+    keys.map((key) => ({ namespace, key, value: '', updatedAt })),
     '清空云端状态',
   );
   return keys;
@@ -2287,7 +2333,7 @@ export const ActiveMsgClient = {
     // 到点只能硬失败。tool_pack / tool_config 里没有 chat，照传。抽掉的那份不会就此作废：
     // 排完任务紧跟着的落库会打脏，等回复销账后由状态同步把最新的包补上去。
     if (firePack) {
-      const now = Date.now();
+      const now = stampStateUpdatedAt();
       const owesChat = owesInstantChatReply(char.id);
       if (owesChat) {
         console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 该角色还欠着一条即时对话回复，这次排程不覆盖云端 fire_pack（等回复销账后由状态同步补传）`);
@@ -2459,7 +2505,7 @@ export const ActiveMsgClient = {
       throw new Error('这台 Worker 还不支持凭据存表，后台任务跑不了（去设置页重新部署一次）。');
     }
 
-    const now = Date.now();
+    const now = stampStateUpdatedAt();
     await putClientStateOrThrow(client, [{
       namespace: AMSG_JOB_NAMESPACE,
       key: params.jobKey,
@@ -2698,16 +2744,24 @@ export const ActiveMsgClient = {
       },
     };
 
-    const stateEntries = {
-      entries: [
-        ...(await buildCharStateEntries(char, firePack, now)),
-        buildToolConfigEntry(realtimeConfig, now),
-      ],
-    };
-    const [statePayload, encryptedTask] = await Promise.all([
-      encryptPayload(client, stateEntries),
+    // 云端那一行的版本号走水位而不是墙钟（见 amsgStateClock）：设备时钟领先过真实时间
+    // 的话，云端会留着一个还没到的时刻，之后每次上传都被条件写判成「旧的」，这条路上
+    // 的表现就是每发一句都 409。
+    const stampedAt = stampStateUpdatedAt();
+    const stateEntries = [
+      ...(await buildCharStateEntries(char, firePack, stampedAt)),
+      buildToolConfigEntry(realtimeConfig, stampedAt),
+    ];
+    // 自愈那一轮只换戳、不重打包：value 里那份压好的 fire_pack 原样复用。
+    const encryptStateEntries = (updatedAt: number) => encryptPayload(client, {
+      entries: stateEntries.map((entry) => ({ ...entry, updatedAt })),
+    });
+    const [encryptedTask, initialState] = await Promise.all([
       encryptPayload(client, taskPayload),
+      encryptStateEntries(stampedAt),
     ]);
+    // 重发那一轮要换成新盖的戳，所以这份是可变的。
+    let statePayload = initialState;
 
     // 凭据行先落地再建任务（上游建任务前会挨个查引用）。只有值变过才真的发请求，
     // 所以常态下这一步是零请求——不给「用户正等着回复」这条路白加一次往返。
@@ -2729,6 +2783,16 @@ export const ActiveMsgClient = {
       await putLlmCredentialRows(credRows, { force: true });
       ({ status, body } = await postInstantChat());
     }
+    // 云端拒收了这一轮的状态：不是内容有问题，是这台设备盖的时间戳跨不过云端那一行
+    // （设备时钟被改过之后，云端会一直留着一个还没到的时刻）。读回云端那份对齐水位、
+    // 重新盖戳再发一次。对齐不动就不重发——那说明拦下它的不是时间戳，重发也是白发。
+    if (status !== 202 && isInstantChatStateStale(body)) {
+      if (await alignStateClockWithRemote(client, [amsgStateNamespace(char.id)])) {
+        console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 云端状态的时间戳比本机的钟新，对齐后重发这一轮`);
+        statePayload = await encryptStateEntries(stampStateUpdatedAt());
+        ({ status, body } = await postInstantChat());
+      }
+    }
 
     if (status !== 202 || typeof body?.uuid !== 'string' || !body.uuid) {
       throw new Error(describeInstantChatFailure(status, body));
@@ -2746,7 +2810,9 @@ export const ActiveMsgClient = {
       namespace: amsgStateNamespace(charId),
       key: AMSG_CHAT_PRESENCE_KEY,
       value: JSON.stringify(presence),
-      updatedAt: presence.activeAt,
+      // 行的版本号走水位，而不是 presence.activeAt：worker 读的是 value 里那个
+      // activeAt（45s TTL 判活跃），版本号只管「这一行能不能盖上去」，两者不是一回事。
+      updatedAt: stampStateUpdatedAt(),
     }]);
     if (!response?.success) {
       throw new Error(response?.error?.message || '上传活跃会话租约失败。');
@@ -2766,7 +2832,7 @@ export const ActiveMsgClient = {
     if (!items.length) return;
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
-    const now = Date.now();
+    const now = stampStateUpdatedAt();
     // 表情包全库与角色无关，整批读一次就够——放在循环里的话 N 个角色要跑 2N 次全表
     // getAll（表情记录带图片数据），拿回来的还是同一份。
     const emojiLibrary = await readEmojiLibrary();
@@ -2794,23 +2860,29 @@ export const ActiveMsgClient = {
         rejected.map((r) => `${r.namespace}/${r.key}: ${r.message || 'rejected'}`),
       );
     }
-    // amsg-server 2.6.0-next.15 起服务端按 updatedAt 做条件写（旧不盖新）。被拦 = 云端
-    // 已有**更新**的一份（多设备 / 多标签页竞写时晚到的旧包），是保护生效而不是错误，
-    // log 一句留个排障线索就好。
+    // amsg-server 2.6.0-next.15 起服务端按 updatedAt 做条件写（旧不盖新）。被拦有两种
+    // 成因，长得一模一样：云端确实有更新的一份（多设备 / 多标签页竞写），或者云端那行
+    // 的时间戳落在了未来（设备时钟被改过，见 amsgStateClock）。后者不管的话，这个角色
+    // 的云端上下文会一直停在旧版本、主动消息一直拿旧上下文说话，而这条路上除了这行 log
+    // 没有任何动静——比即时对话那条明着报 409 的还难发现。
+    //
+    // 对齐水位就够了，这一轮不重传：fire_pack 每轮聊天都是全量重建的，下一次打脏同步
+    // 带着更新的内容盖过去，比现在拿这份已经被判成「旧」的包硬挤进去更有道理。
     const skipped = (response as { data?: { skippedEntries?: Array<{ namespace: string; key: string }> } })
       .data?.skippedEntries;
     if (skipped && skipped.length > 0) {
-      console.log(
-        `${ACTIVE_MSG_RUNTIME_HEADER} 云端已有更新的一份，这批旧条目被拦下（条件写保护）`,
+      console.warn(
+        `${ACTIVE_MSG_RUNTIME_HEADER} 云端已有更新的一份，这批条目被条件写拦下`,
         skipped.map((s) => `${s.namespace}/${s.key}`),
       );
+      await alignStateClockWithRemote(client, [...new Set(skipped.map((s) => s.namespace))]);
     }
   },
 
   async syncToolConfig(realtimeConfig: RealtimeConfig | undefined): Promise<void> {
     const globalConfig = await ensureWorkerReady();
     const client = await initializeClient(globalConfig);
-    const response = await client.putClientState([buildToolConfigEntry(realtimeConfig, Date.now())]);
+    const response = await client.putClientState([buildToolConfigEntry(realtimeConfig, stampStateUpdatedAt())]);
     if (!response?.success) {
       throw new Error(response?.error?.message || '上传工具凭据失败。');
     }
@@ -3214,7 +3286,7 @@ export const ActiveMsgClient = {
     const client = await initializeClient(config);
     await putClientStateOrThrow(
       client,
-      [{ namespace, key, value, updatedAt: Date.now() }],
+      [{ namespace, key, value, updatedAt: stampStateUpdatedAt() }],
       '写入云端状态',
     );
   },
@@ -3230,7 +3302,7 @@ export const ActiveMsgClient = {
   async clearClientStateValue(namespace: string, key: string): Promise<void> {
     const config = await ensureWorkerReady();
     const client = await initializeClient(config);
-    await client.putClientState([{ namespace, key, value: '', updatedAt: Date.now() }]);
+    await client.putClientState([{ namespace, key, value: '', updatedAt: stampStateUpdatedAt() }]);
   },
 
   /**
@@ -3279,7 +3351,7 @@ export const ActiveMsgClient = {
       const authed = await initializeClient(config);
       await putClientStateOrThrow(
         authed,
-        [buildToolConfigEntry(realtimeConfig, Date.now())],
+        [buildToolConfigEntry(realtimeConfig, stampStateUpdatedAt())],
         '重新上传工具凭据',
       );
     } catch (error) {

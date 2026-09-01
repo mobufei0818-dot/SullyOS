@@ -11,6 +11,7 @@ import {
     filterMcpServersForChar,
     MCP_FIRE_NAME_BUDGET,
     MCP_FIRE_NAME_PREFIX,
+    MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION,
     sanitizeMcpToolName,
     stripTextFakedMcpCalls,
     withMcpDedupeSuffix,
@@ -115,7 +116,7 @@ describe('JSON-RPC 传输层（直连路径）', () => {
 
     const directTarget = (server: McpFireServer): McpTransportTarget => ({
         url: server.url,
-        headers: (sessionId) => buildMcpDirectHeaders(server, sessionId),
+        headers: (sessionId, protocolVersion) => buildMcpDirectHeaders(server, sessionId, protocolVersion),
     });
 
     const jsonResp = (payload: any, extraHeaders: Record<string, string> = {}): Response =>
@@ -166,9 +167,51 @@ describe('JSON-RPC 传输层（直连路径）', () => {
         expect(sent[0].headers['Authorization']).toBe('Bearer tk-1');
         expect(sent[0].headers['X-Api-Key']).toBe('k1');
         expect(sent[0].headers['Accept']).toBe('application/json, text/event-stream');
+        expect(sent[0].body.params.protocolVersion).toBe(MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION);
         // 还没握手完，第一发不该凭空带 session
         expect(sent[0].headers['Mcp-Session-Id']).toBeUndefined();
+        expect(sent[0].headers['MCP-Protocol-Version']).toBeUndefined();
+        // 服务端未显式回版本时按本次请求版本继续；握手后的通知和调用都必须带版本头。
+        expect(sent[1].headers['MCP-Protocol-Version']).toBe(MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION);
+        expect(sent[2].headers['MCP-Protocol-Version']).toBe(MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION);
         expect(sent[2].body.params).toEqual({ name: 'get_weather', arguments: { city: '上海' } });
+    });
+
+    it('接受服务端协商到受支持的较早 Streamable HTTP 版本，并把协商结果带到后续请求', async () => {
+        const server = directServer();
+        const sent = stubFetch(({ body }) => {
+            if (body.method === 'initialize') return jsonResp({
+                jsonrpc: '2.0', id: body.id,
+                result: {
+                    protocolVersion: '2025-03-26',
+                    serverInfo: { name: 'legacy-streamable', version: '2.0.0' },
+                    capabilities: { tools: {} },
+                },
+            });
+            if (body.method === 'notifications/initialized') return new Response('', { status: 202 });
+            return jsonResp({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'ok' }] } });
+        });
+
+        const session = createMcpSessionState();
+        const result = await callMcpToolCore(directTarget(server), session, 'get_weather', {});
+
+        expect(result.success).toBe(true);
+        expect(session.protocolVersion).toBe('2025-03-26');
+        expect(session.serverInfo).toMatchObject({ name: 'legacy-streamable', version: '2.0.0' });
+        expect(sent[1].headers['MCP-Protocol-Version']).toBe('2025-03-26');
+        expect(sent[2].headers['MCP-Protocol-Version']).toBe('2025-03-26');
+    });
+
+    it('拒绝把旧 HTTP+SSE 版本当作单端点 Streamable HTTP 继续调用', async () => {
+        const server = directServer();
+        stubFetch(({ body }) => jsonResp({
+            jsonrpc: '2.0', id: body.id,
+            result: { protocolVersion: '2024-11-05' },
+        }));
+
+        const result = await callMcpToolCore(directTarget(server), createMcpSessionState(), 'get_weather', {});
+        expect(result.success).toBe(false);
+        expect(result.error).toContain('2024-11-05 属于旧 HTTP+SSE 双端点');
     });
 
     it('initialize 响应头里的 Mcp-Session-Id 记进会话，之后每一发都带上', async () => {

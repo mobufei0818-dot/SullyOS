@@ -19,6 +19,7 @@ import {
     buildTheaterWorldbookSlots,
     compileStoryPreset,
     prepareStoryGenerationSettings,
+    reconcileStoryAffinityScores,
     createBlankStoryPreset,
     createStoryTheaterDraft,
     dedupeTheaterWorldbooks,
@@ -669,5 +670,36 @@ describe('本轮关系备注', () => {
         expect(RELATIONSHIP_TEXTURE_GUIDE).toContain('95—100');
         expect(RELATIONSHIP_TEXTURE_GUIDE).toContain('<relation_fragment>');
         expect(RELATIONSHIP_TEXTURE_GUIDE).toContain('不写散乱 Markdown');
+    });
+
+    it('绝对关系值由前端按上一轮加减 delta，纠正模型把 41 - 1 算成 42', () => {
+        const previous = '<affinity_panel><affinity_person><character_id>lin</character_id><character_name>林星</character_name><c_to_u_score>60</c_to_u_score><u_to_c_score>41</u_to_c_score></affinity_person></affinity_panel>';
+        const generated = '<affinity_panel><affinity_person><character_id>lin</character_id><character_name>林星</character_name><c_to_u_score>64</c_to_u_score><c_to_u_delta>+2</c_to_u_delta><u_to_c_score>42</u_to_c_score><u_to_c_delta>-1</u_to_c_delta></affinity_person></affinity_panel>';
+        const reconciled = reconcileStoryAffinityScores(
+            generated,
+            previous,
+            [{ characterId: 'lin', characterName: '林星', delta: -1, reason: '有些失望' }],
+            [{ id: 'lin', name: '林星' }],
+        );
+        expect(reconciled).toContain('<c_to_u_score>62</c_to_u_score>');
+        expect(reconciled).toContain('<u_to_c_score>40</u_to_c_score>');
+        expect(reconciled).toContain('<u_to_c_delta>-1</u_to_c_delta>');
+        expect(reconciled).not.toContain('<u_to_c_score>42</u_to_c_score>');
+    });
+
+    it('多人关系分别复算，未填写的角色保持上一轮 U→C', () => {
+        const previous = '<affinity_panel><affinity_person><character_id>a</character_id><character_name>A</character_name><c_to_u_score>50</c_to_u_score><u_to_c_score>31</u_to_c_score></affinity_person><affinity_person><character_id>b</character_id><character_name>B</character_name><c_to_u_score>70</c_to_u_score><u_to_c_score>80</u_to_c_score></affinity_person></affinity_panel>';
+        const generated = '<affinity_panel><affinity_person><character_id>a</character_id><character_name>A</character_name><c_to_u_score>49</c_to_u_score><c_to_u_delta>-2</c_to_u_delta><u_to_c_score>34</u_to_c_score><u_to_c_delta>+3</u_to_c_delta></affinity_person><affinity_person><character_id>b</character_id><character_name>B</character_name><c_to_u_score>72</c_to_u_score><c_to_u_delta>+1</c_to_u_delta><u_to_c_score>79</u_to_c_score><u_to_c_delta>-1</u_to_c_delta></affinity_person></affinity_panel>';
+        const reconciled = reconcileStoryAffinityScores(
+            generated,
+            previous,
+            [{ characterId: 'a', characterName: 'A', delta: 3, reason: '更信任了' }],
+            [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }],
+        );
+        expect(reconciled).toContain('<c_to_u_score>48</c_to_u_score>');
+        expect(reconciled).toContain('<u_to_c_score>34</u_to_c_score>');
+        expect(reconciled).toContain('<c_to_u_score>71</c_to_u_score>');
+        expect(reconciled).toContain('<u_to_c_score>80</u_to_c_score>');
+        expect(reconciled).toContain('<u_to_c_delta>+0</u_to_c_delta>');
     });
 });

@@ -46,3 +46,27 @@ export function normalizePhoneEvidence(record: PhoneEvidence): PhoneEvidence {
         value: value || undefined,
     };
 }
+
+/** 生成首次同步与事后补同步共用的私聊卡片载荷。 */
+export function buildPhoneEvidenceChatCard(record: PhoneEvidence, appName: string): {
+    content: string;
+    metadata: { phoneCard: { app: string; kind: string; title: string; detail: string; value?: string } };
+} {
+    const normalized = normalizePhoneEvidence(record);
+    const app = phoneFieldToText(appName, '手机');
+    const content = normalized.type === 'chat'
+        ? `[你手机的聊天软件] 你和「${normalized.title}」的对话：${normalized.detail.replace(/\n/g, ' ')}`
+        : `[你手机的${app}] ${normalized.title}${normalized.value ? ` · ${normalized.value}` : ''} — ${normalized.detail}`;
+    return {
+        content,
+        metadata: {
+            phoneCard: {
+                app,
+                kind: normalized.type,
+                title: normalized.title,
+                detail: normalized.detail,
+                value: normalized.value || undefined,
+            },
+        },
+    };
+}

@@ -34,8 +34,17 @@ export type { McpToolResult };
 
 export interface McpToolDef {
     name: string;
+    title?: string;
     description?: string;
     inputSchema?: any;
+    outputSchema?: any;
+    annotations?: {
+        title?: string;
+        readOnlyHint?: boolean;
+        destructiveHint?: boolean;
+        idempotentHint?: boolean;
+        openWorldHint?: boolean;
+    };
 }
 
 export interface McpCustomHeader {
@@ -58,6 +67,13 @@ export interface McpServerConfig {
     enabled: boolean;
     /** 「发现工具」后持久化的工具清单（聊天注入直接读这里，不用每次握手） */
     tools?: McpToolDef[];
+    /** 最近一次真实握手的诊断快照；连接字段变化时会清掉，避免展示假绿灯。 */
+    lastConnection?: {
+        testedAt: number;
+        protocolVersion: string;
+        serverName?: string;
+        serverVersion?: string;
+    };
     /**
      * 绑定聊天：空/缺省 = 通用（所有私聊和群聊可用）；非空 = 只有这些角色/群聊能用。
      * 为兼容已有本地配置沿用 charIds 字段名，数组项也可以是 GroupProfile.id。
@@ -146,13 +162,26 @@ export const hasWorkerUnreachableMcpServer = (charId?: string): boolean =>
 export const collectMcpFireServers = (): McpFireServer[] =>
     loadMcpServers()
         .filter((s) => s.enabled && s.url && (s.tools?.length || 0) > 0 && isWorkerReachableUrl(s.url))
-        .map((s) => ({
-            id: s.id, name: s.name, url: s.url,
-            ...(s.token ? { token: s.token } : {}),
-            ...(s.customHeaders?.length ? { customHeaders: s.customHeaders } : {}),
-            ...(s.charIds?.length ? { charIds: s.charIds } : {}),
-            tools: (s.tools || []).map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema })),
-        }));
+        .map((s) => {
+            // 无人值守的后台没有确认弹窗：服务端明确标成 destructive 的工具只留在
+            // 前台并自动询问，不把提示词当权限系统，也不额外暴露用户配置项。
+            const backgroundTools = (s.tools || []).filter((t) => t.annotations?.destructiveHint !== true);
+            return {
+                id: s.id, name: s.name, url: s.url,
+                ...(s.token ? { token: s.token } : {}),
+                ...(s.customHeaders?.length ? { customHeaders: s.customHeaders } : {}),
+                ...(s.charIds?.length ? { charIds: s.charIds } : {}),
+                tools: backgroundTools.map((t) => ({
+                    name: t.name,
+                    title: t.title,
+                    description: t.description,
+                    inputSchema: t.inputSchema,
+                    outputSchema: t.outputSchema,
+                    annotations: t.annotations,
+                })),
+            };
+        })
+        .filter((s) => s.tools.length > 0);
 
 // ── 备份用：随「设置 → 导出/导入备份」一起带走（存 localStorage） ──
 export function exportMcpLocal(): Record<string, string> | undefined {
@@ -206,6 +235,7 @@ export const buildMcpFetchUrl = (server: Pick<McpServerConfig, 'url' | 'proxyUrl
 export const buildMcpRequestHeaders = (
     server: Pick<McpServerConfig, 'token' | 'customHeaders' | 'proxyUrl' | 'proxyKey'>,
     sessionId?: string | null,
+    protocolVersion?: string | null,
 ): Headers => {
     const headers = new Headers({
         'Content-Type': 'application/json',
@@ -227,13 +257,14 @@ export const buildMcpRequestHeaders = (
     if (server.proxyUrl && server.proxyKey) headers.set('X-Proxy-Key', server.proxyKey);
     if (server.proxyUrl && customNames.length) headers.set('X-MCP-Forward-Headers', customNames.join(','));
     if (sessionId) headers.set('Mcp-Session-Id', sessionId);
+    if (protocolVersion) headers.set('MCP-Protocol-Version', protocolVersion);
     return headers;
 };
 
 /** 一次请求的目标：代理包装和请求头都是浏览器侧独有的，在这里落地后交给 core。 */
 const targetFor = (server: McpServerConfig): McpTransportTarget => ({
     url: buildMcpFetchUrl(server),
-    headers: (sessionId) => buildMcpRequestHeaders(server, sessionId),
+    headers: (sessionId, protocolVersion) => buildMcpRequestHeaders(server, sessionId, protocolVersion),
     // 直连时 fetch 抛 TypeError 十有八九是 CORS，把排查方向直接告诉用户
     fetchErrorHint: server.proxyUrl
         ? '请检查代理 URL 是否可访问、代理密钥是否正确。'
@@ -243,9 +274,14 @@ const targetFor = (server: McpServerConfig): McpTransportTarget => ({
 // ========== 公开 API ==========
 
 /** 握手 + tools/list。调用方负责把返回的工具清单存回 McpServerConfig.tools */
-export const discoverMcpTools = async (server: McpServerConfig): Promise<McpToolDef[]> => {
+export type McpConnectionStage = 'initialize' | 'tools';
+
+export const discoverMcpTools = async (
+    server: McpServerConfig,
+    onStage?: (stage: McpConnectionStage) => void,
+): Promise<McpToolDef[]> => {
     resetMcpSession(server.id);
-    return discoverMcpToolsCore(targetFor(server), getSession(server.id), MCP_REQUEST_TIMEOUT_MS);
+    return discoverMcpToolsCore(targetFor(server), getSession(server.id), MCP_REQUEST_TIMEOUT_MS, { onStage });
 };
 
 /**
@@ -256,18 +292,60 @@ export const callMcpTool = async (
     server: McpServerConfig,
     toolName: string,
     args: Record<string, any> = {},
-): Promise<McpToolResult> =>
-    callMcpToolCore(targetFor(server), getSession(server.id), toolName, args, {
+): Promise<McpToolResult> => {
+    const tool = (server.tools || []).find(item => item.name === toolName);
+    const needsApproval = tool?.annotations?.destructiveHint === true;
+    if (needsApproval && typeof window !== 'undefined') {
+        let argsPreview = '';
+        try { argsPreview = JSON.stringify(args, null, 2).slice(0, 600); }
+        catch { argsPreview = String(args).slice(0, 600); }
+        const approved = window.confirm(
+            `Sully 想通过「${server.name || '未命名服务器'}」调用 ${tool?.title || toolName}。\n\n` +
+            `${argsPreview || '这次调用没有参数。'}\n\n允许这一次吗？`,
+        );
+        if (!approved) return { success: false, error: '用户拒绝了这次 MCP 调用。' };
+    }
+    return callMcpToolCore(targetFor(server), getSession(server.id), toolName, args, {
         inputSchema: (server.tools || []).find(tool => tool.name === toolName)?.inputSchema,
         serverLabel: server.name,
     });
+};
 
 /** 测试连接: 验证握手 + tools/list 能通，返回工具清单供持久化 */
-export const testMcpConnection = async (server: McpServerConfig): Promise<{ ok: boolean; message: string; tools?: McpToolDef[] }> => {
+export const testMcpConnection = async (
+    server: McpServerConfig,
+    onStage?: (stage: McpConnectionStage) => void,
+): Promise<{
+    ok: boolean;
+    message: string;
+    tools?: McpToolDef[];
+    connection?: NonNullable<McpServerConfig['lastConnection']>;
+}> => {
     try {
-        const tools = await discoverMcpTools(server);
-        if (!tools.length) return { ok: true, message: '已连接, 但工具清单为空', tools };
-        return { ok: true, message: `已连接, 发现 ${tools.length} 个工具: ${tools.map(t => t.name).slice(0, 8).join('、')}${tools.length > 8 ? '…' : ''}`, tools };
+        const tools = await discoverMcpTools(server, onStage);
+        const session = getSession(server.id);
+        const info = session.serverInfo;
+        const connection: NonNullable<McpServerConfig['lastConnection']> = {
+            testedAt: Date.now(),
+            protocolVersion: session.protocolVersion || '未知',
+            ...(info?.title || info?.name ? { serverName: info.title || info.name } : {}),
+            ...(info?.version ? { serverVersion: info.version } : {}),
+        };
+        const serverLabel = connection.serverName
+            ? `${connection.serverName}${connection.serverVersion ? ` ${connection.serverVersion}` : ''}`
+            : '服务器';
+        if (!tools.length) return {
+            ok: true,
+            message: `${serverLabel}已响应 · 协议 ${connection.protocolVersion} · 工具清单为空`,
+            tools,
+            connection,
+        };
+        return {
+            ok: true,
+            message: `${serverLabel}已响应 · 协议 ${connection.protocolVersion} · 发现 ${tools.length} 个工具`,
+            tools,
+            connection,
+        };
     } catch (e: any) {
         return { ok: false, message: e?.message || String(e) };
     }

@@ -118,8 +118,8 @@ importers:
         specifier: ^6.0.0
         version: 6.2.1
       '@rei-standard/amsg-server':
-        specifier: 2.6.0-next.23
-        version: 2.6.0-next.23(@neondatabase/serverless@1.1.0)(pg@8.22.0)
+        specifier: 2.6.0-next.26
+        version: 2.6.0-next.26(@neondatabase/serverless@1.1.0)(pg@8.22.0)
       '@types/qrcode':
         specifier: ^1.5.6
         version: 1.5.6
@@ -1069,8 +1069,8 @@ packages:
     resolution: {integrity: sha512-GsLzRvSXsp5cbJ/vNwQP+yHoZ4LJiilOvws0LemrzaFoG45ApQ7WW3YHux58DXdXOSN36prT5CsmipA3wUAmQQ==}
     engines: {node: '>=18'}
 
-  '@rei-standard/amsg-server@2.6.0-next.23':
-    resolution: {integrity: sha512-2VDkC2ljVCS5JA7fK127qSW0cHf0v02okUBB2ZFdxdGo7AhNyGKCnR5V+zWr2tU9MaNjWZMJEA51Jv5OgFH38Q==}
+  '@rei-standard/amsg-server@2.6.0-next.26':
+    resolution: {integrity: sha512-1arQovTz4nbZOrNaKNfdjyZTwA341WhsRUa2NiNLlX4FI0dVoWFrNdZaw4DQvGCs8RfVpbH00xwnsUx4N6WPAA==}
     engines: {node: '>=20'}
     peerDependencies:
       '@neondatabase/serverless': '>=0.9.0'
@@ -1091,6 +1091,10 @@ packages:
 
   '@rei-standard/amsg-shared@0.4.0-next.8':
     resolution: {integrity: sha512-jyxIbrNR8XPvVLEu7pAyiDnfECKByOhO0zu3zMtxbN7Jf5Ui1rKpX3qQbWRL6WidOTyXYO8jLjkzrCib4wDkgg==}
+    engines: {node: '>=20'}
+
+  '@rei-standard/amsg-shared@0.4.0-next.9':
+    resolution: {integrity: sha512-Jo3TROPfYoAM4KgV0zcZQkvpvtApA4kj70e9M0TXhgRcn3rsWwbv3nEY+8QM76KsmePrrOY0K5VCKTtxwuWU/w==}
     engines: {node: '>=20'}
 
   '@rei-standard/amsg-sw@2.4.0-next.6':
@@ -3516,10 +3520,10 @@ snapshots:
     dependencies:
       '@rei-standard/amsg-shared': 0.2.0
 
-  '@rei-standard/amsg-server@2.6.0-next.23(@neondatabase/serverless@1.1.0)(pg@8.22.0)':
+  '@rei-standard/amsg-server@2.6.0-next.26(@neondatabase/serverless@1.1.0)(pg@8.22.0)':
     dependencies:
       '@netlify/blobs': 8.2.0
-      '@rei-standard/amsg-shared': 0.4.0-next.8
+      '@rei-standard/amsg-shared': 0.4.0-next.9
       web-push: 3.6.7
     optionalDependencies:
       '@neondatabase/serverless': 1.1.0
@@ -3532,6 +3536,8 @@ snapshots:
   '@rei-standard/amsg-shared@0.4.0-next.7': {}
 
   '@rei-standard/amsg-shared@0.4.0-next.8': {}
+
+  '@rei-standard/amsg-shared@0.4.0-next.9': {}
 
   '@rei-standard/amsg-sw@2.4.0-next.6':
     dependencies:

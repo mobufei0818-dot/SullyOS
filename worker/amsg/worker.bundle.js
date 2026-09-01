@@ -3,7 +3,7 @@
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.23_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.26_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -22,7 +22,7 @@ var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
 var TASK_DELIVERY_COLUMNS = "id, user_id, uuid, encrypted_payload, message_type, next_send_at, retry_after, status, retry_count";
 var TASK_DETAIL_COLUMNS = "id, user_id, uuid, encrypted_payload, message_type, next_send_at, status, retry_count, last_error, created_at, updated_at";
 
-// node_modules/.pnpm/@rei-standard+amsg-shared@0.4.0-next.8/node_modules/@rei-standard/amsg-shared/dist/index.mjs
+// node_modules/.pnpm/@rei-standard+amsg-shared@0.4.0-next.9/node_modules/@rei-standard/amsg-shared/dist/index.mjs
 var TEXT_ENCODER = new TextEncoder();
 var TEXT_DECODER = new TextDecoder("utf-8", { fatal: false });
 function toUint8(buf) {
@@ -349,7 +349,10 @@ function looksLikeJson(raw) {
 function salvageJsonStringFields(raw) {
   const found = {};
   for (const match of raw.matchAll(JSON_STRING_FIELD)) {
-    if (found[match[1]] === void 0) found[match[1]] = unescapeJsonString(match[2]);
+    if (found[match[1]] !== void 0) continue;
+    const value = unescapeJsonString(match[2]);
+    if (match[1] === "type" && value === "error") continue;
+    found[match[1]] = value;
   }
   return {
     message: firstNonEmptyString(found.message, found.detail),
@@ -396,15 +399,27 @@ var UUID_SHAPE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 function alternationCount(segment) {
   return (segment.match(/[a-z]+|[0-9]+/g) || []).length;
 }
+var MOE_SIZE_SEGMENT = /^\d+x\d+b$/;
+var HEX_SEGMENT = /^[0-9a-f]+$/;
+var HEX_RUN_MAX_CHARS = 15;
 function looksLikeModelId(token) {
   if (token.length > MODEL_ID_MAX_CHARS) return false;
   if (!MODEL_ID_LIKE.test(token)) return false;
   if (UUID_SHAPE.test(token)) return false;
   const segments = token.split(/[.-]/);
   if (CREDENTIAL_PREFIX_SEGMENTS.has(segments[0])) return false;
-  const randomLooking = segments.filter((segment) => alternationCount(segment) >= 3);
-  if (randomLooking.length === 0) return true;
-  return randomLooking.length === 1 && randomLooking[0].length <= 5;
+  let hexRunChars = 0;
+  for (const segment of segments) {
+    if (HEX_SEGMENT.test(segment)) {
+      hexRunChars += segment.length;
+      if (hexRunChars > HEX_RUN_MAX_CHARS) return false;
+    } else {
+      hexRunChars = 0;
+    }
+  }
+  return segments.every(
+    (segment) => alternationCount(segment) < 3 || MOE_SIZE_SEGMENT.test(segment)
+  );
 }
 function redactCredentials(text) {
   let s = text;
@@ -1121,7 +1136,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.23_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-3JEWYDM4.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.26_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-4YH3TS4W.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -2111,14 +2126,17 @@ function planClientStateCleanup(ttl, now2) {
   }
   return targets;
 }
-async function writeClientStateEntries({ db, userId, userKey, entries }) {
+async function writeClientStateEntries({ db, userId, userKey, entries, now: now2 }) {
+  const nowFn = typeof now2 === "function" ? now2 : Date.now;
+  const at = nowFn();
   const physicalRows = [];
   const cleanups = [];
   const rootRowIndexes = [];
   const rootRowEntries = [];
   let deleted = 0;
   for (const entry of entries) {
-    const guardAt = Number.isInteger(entry.version) && entry.version > 0 ? entry.version : entry.updatedAt;
+    const rawGuardAt = Number.isInteger(entry.version) && entry.version > 0 ? entry.version : entry.updatedAt;
+    const guardAt = Math.min(rawGuardAt, at);
     cleanups.push({
       namespace: chunkNamespaceFor(entry.namespace),
       keyPrefix: chunkKeyPrefixFor(entry.key),
@@ -2164,7 +2182,7 @@ async function writeClientStateEntries({ db, userId, userKey, entries }) {
   if (physicalRows.length === 0 && cleanups.length === 0) {
     return { upserted: 0, skipped: 0, deleted: 0, skippedEntries: [] };
   }
-  const result = await db.upsertClientState(userId, physicalRows, cleanups);
+  const result = await db.upsertClientState(userId, physicalRows, cleanups, at);
   let upserted = 0;
   let skipped = 0;
   const skippedEntries = [];
@@ -2255,7 +2273,7 @@ function createStateAccessors({ db, userId, userKey, maxStateValueBytes, now: no
         ...entry.version !== void 0 ? { version: entry.version } : {}
       };
     });
-    return writeClientStateEntries({ db, userId, userKey, entries: normalized });
+    return writeClientStateEntries({ db, userId, userKey, entries: normalized, now: nowFn });
   };
   return { readState, writeState };
 }
@@ -2311,15 +2329,27 @@ async function discardUndeliveredPushes({ db, userId, pushes, sentIds }) {
 var OUTBOX_SCAN_PAGE_SIZE = 100;
 var OUTBOX_SCAN_MAX_ROWS = 5e3;
 async function discardUndeliveredPushesForTask({ db, userId, taskUuid }) {
-  if (!db || typeof db.listUnackedOutbox !== "function" || typeof db.discardOutboxMessages !== "function") return;
-  if (!taskUuid) return;
+  if (!db || !taskUuid) return;
+  if (typeof db.discardUndeliveredOutboxForTask === "function") {
+    try {
+      await db.discardUndeliveredOutboxForTask(userId, taskUuid);
+    } catch (error) {
+      console.warn("[amsg-server] outbox \u6309\u4EFB\u52A1\u64A4\u56DE\u672A\u6295\u9012\u7684\u884C\u5931\u8D25\uFF08\u5DF2\u5FFD\u7565\uFF09:", error && error.message);
+    }
+    return;
+  }
+  if (typeof db.listUnackedOutbox !== "function" || typeof db.discardOutboxMessages !== "function") return;
   const messageIds = [];
+  let exhausted = false;
   try {
     let cursor = 0;
     let scanned = 0;
     while (scanned < OUTBOX_SCAN_MAX_ROWS) {
       const rows = await db.listUnackedOutbox(userId, cursor, OUTBOX_SCAN_PAGE_SIZE);
-      if (!rows || rows.length === 0) break;
+      if (!rows || rows.length === 0) {
+        exhausted = true;
+        break;
+      }
       scanned += rows.length;
       let nextCursor = cursor;
       for (const row of rows) {
@@ -2330,11 +2360,19 @@ async function discardUndeliveredPushesForTask({ db, userId, taskUuid }) {
       }
       if (nextCursor <= cursor) break;
       cursor = nextCursor;
-      if (rows.length < OUTBOX_SCAN_PAGE_SIZE) break;
+      if (rows.length < OUTBOX_SCAN_PAGE_SIZE) {
+        exhausted = true;
+        break;
+      }
     }
   } catch (error) {
     console.warn("[amsg-server] outbox \u67E5\u672A\u6295\u9012\u7684\u884C\u5931\u8D25\uFF08\u5DF2\u5FFD\u7565\uFF09:", error && error.message);
     return;
+  }
+  if (!exhausted) {
+    console.warn(
+      `[amsg-server] outbox \u626B\u63CF\u5230 ${OUTBOX_SCAN_MAX_ROWS} \u884C\u4E0A\u9650\u4ECD\u672A\u626B\u5B8C\uFF0C\u4EFB\u52A1 ${taskUuid} \u53EF\u80FD\u8FD8\u6709\u672A\u6295\u9012\u7684\u884C\u6CA1\u64A4\u6389\uFF08\u88AB\u53D6\u6D88\u4EFB\u52A1\u7684\u884C\u901A\u5E38\u662F\u6700\u65B0\u7684\uFF0C\u6B63\u597D\u5728\u4E0A\u9650\u4E4B\u5916\uFF09\u3002\u7ED9\u9002\u914D\u5668\u5B9E\u73B0 discardUndeliveredOutboxForTask \u53EF\u7ED5\u5F00\u8FD9\u4E2A\u4E0A\u9650\u3002`
+    );
   }
   await discardPushesFromOutbox({ db, userId, messageIds });
 }
@@ -2391,10 +2429,17 @@ function createResultEmitter({
   sessionId,
   occurrenceMs,
   webpush,
-  now: now2
+  now: now2,
+  isCancelled
 }) {
   const nowFn = typeof now2 === "function" ? now2 : Date.now;
   let emitted = 0;
+  const assertNotCancelled = () => {
+    if (typeof isCancelled !== "function" || !isCancelled()) return;
+    const error = new Error("\u4EFB\u52A1\u5728\u6295\u9012\u671F\u95F4\u88AB\u53D6\u6D88\u6216\u9876\u66FF\uFF0C\u7ED3\u679C\u5DF2\u4E2D\u6B62");
+    error.code = TASK_CANCELLED_CODE;
+    throw error;
+  };
   const emitResult = async (payload) => {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
       throw new TypeError("emitResult(payload) \u9700\u8981\u4E00\u4E2A\u666E\u901A\u5BF9\u8C61");
@@ -2406,9 +2451,10 @@ function createResultEmitter({
       );
     }
     const seq = emitted++;
+    const messageType = decryptedPayload.messageType || "auto";
     const push = buildResultPush({
-      messageType: decryptedPayload.messageType || "auto",
-      source: "scheduled",
+      messageType,
+      source: messageType === "instant" ? "instant" : "scheduled",
       messageId: `${messageIdBase}_result_${seq}`,
       sessionId,
       ...payload,
@@ -2422,9 +2468,11 @@ function createResultEmitter({
       recurrenceType: decryptedPayload.recurrenceType || "none",
       occurrenceMs
     });
+    assertNotCancelled();
     await db.appendOutboxMessages(task.user_id, await toOutboxRows([push], userKey, nowFn()));
     let pushed;
     try {
+      assertNotCancelled();
       pushed = shouldSendPush(push, { outboxed: true }) ? await sendResultPush({ db, task, userKey, decryptedPayload, webpush, push }) : false;
     } catch (error) {
       await discardUndeliveredPushes({ db, userId: task.user_id, pushes: [push], sentIds: [] });
@@ -2620,7 +2668,10 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
     sessionId,
     occurrenceMs,
     webpush: ctx.webpush,
-    now: nowFn
+    now: nowFn,
+    // run-tick 在投递 ctx 上挂的取消信号（与 guardWebpushWithLease 读的是同一
+    // 个租约状态），emitResult 不发推送的那条路要靠它拦下已取消任务的落行。
+    isCancelled: typeof ctx.isTaskCancelled === "function" ? ctx.isTaskCancelled : null
   });
   const maxScheduledTasksPerFire = Number.isInteger(ctx.maxScheduledTasksPerFire) && ctx.maxScheduledTasksPerFire >= 0 ? ctx.maxScheduledTasksPerFire : DEFAULT_MAX_SCHEDULED_TASKS_PER_FIRE;
   let scheduledTaskCount = 0;
@@ -2806,6 +2857,9 @@ async function runAgenticFire({ task, decryptedPayload, userKey, ctx }) {
       );
     }
     const cancelled = await ctx.db.deleteTaskByUuid(uuid, task.user_id);
+    if (cancelled) {
+      await discardUndeliveredPushesForTask({ db: ctx.db, userId: task.user_id, taskUuid: uuid });
+    }
     return { cancelled: !!cancelled };
   };
   const renewTask = async (uuid, nextSendAt) => {
@@ -3262,12 +3316,36 @@ function sleepFor(ctx, ms) {
 }
 function resolveMultipartOptions(ctx) {
   const configured = ctx && ctx.multipart && typeof ctx.multipart === "object" ? ctx.multipart : {};
-  return {
+  const resolved = {
     maxChunkBytes: positiveIntegerOr(configured.maxChunkBytes, DEFAULT_MULTIPART_CHUNK_BYTES),
     maxChunks: positiveIntegerOr(configured.maxChunks, DEFAULT_MULTIPART_MAX_CHUNKS),
     maxTotalBytes: positiveIntegerOr(configured.maxTotalBytes, DEFAULT_MULTIPART_MAX_TOTAL_BYTES),
     ttlMs: positiveIntegerOr(configured.ttlMs, DEFAULT_MULTIPART_TTL_MS)
   };
+  assertChunkBytesFitPushLimit(resolved);
+  return resolved;
+}
+function assertChunkBytesFitPushLimit({ maxChunkBytes, maxChunks, ttlMs }) {
+  const PROBE_CHUNK_BYTES = 3;
+  const [probe] = buildMultipartPushPayloads(
+    { messageKind: "reasoning" },
+    { serializedPayload: "x".repeat(PROBE_CHUNK_BYTES), maxChunkBytes: PROBE_CHUNK_BYTES, ttlMs }
+  );
+  const digitHeadroom = 2 * (String(maxChunks).length - 1);
+  const envelopeOverhead = measurePushPayload(JSON.stringify(probe)).bytes - base64UrlLength(PROBE_CHUNK_BYTES) + digitHeadroom;
+  const worstEnvelopeBytes = envelopeOverhead + base64UrlLength(maxChunkBytes);
+  if (worstEnvelopeBytes <= MAX_PUSH_PAYLOAD_BYTES) return;
+  let maxAllowed = Math.floor((MAX_PUSH_PAYLOAD_BYTES - envelopeOverhead) * 3 / 4);
+  while (maxAllowed > 0 && envelopeOverhead + base64UrlLength(maxAllowed) > MAX_PUSH_PAYLOAD_BYTES) {
+    maxAllowed--;
+  }
+  throw new DeploymentConfigError(
+    `MULTIPART_CHUNK_BYTES_TOO_LARGE: multipart.maxChunkBytes = ${maxChunkBytes} \u5207\u51FA\u7684\u5206\u7247\u4FE1\u5C01\u6700\u574F ${worstEnvelopeBytes} \u5B57\u8282\uFF0C\u8D85\u8FC7\u5355\u6761 push \u660E\u6587\u4E0A\u9650 ${MAX_PUSH_PAYLOAD_BYTES} \u5B57\u8282\uFF0C\u6BCF\u4E00\u7247\u90FD\u4F1A\u88AB\u63A8\u9001\u670D\u52A1\u62D2\u6536\u3002\u8FD9\u4E2A\u65CB\u94AE\u53EA\u7528\u4E8E\u6536\u7A84\uFF0C\u5F53\u524D\u914D\u7F6E\u4E0B\u6700\u5927 ${maxAllowed}`,
+    { code: "MULTIPART_CHUNK_BYTES_TOO_LARGE" }
+  );
+}
+function base64UrlLength(n) {
+  return Math.ceil(n * 4 / 3);
 }
 function positiveIntegerOr(value, fallback) {
   return Number.isInteger(value) && /** @type {number} */
@@ -4021,13 +4099,14 @@ async function deliverTasks(ctx, tasks) {
     groupsTakenThisTick.add(scopedKey);
     return { taken: false, rawKey };
   }
-  function recordCancelled(task, status) {
+  async function recordCancelled(task, status) {
     results.cancelledTasks.push({
       taskId: task.id,
       reason: "\u4EFB\u52A1\u5728\u6295\u9012\u671F\u95F4\u88AB\u53D6\u6D88\u6216\u9876\u66FF",
       status
     });
     console.warn(`[amsg-server] \u4EFB\u52A1 ${task.id} \u5728\u6295\u9012\u671F\u95F4\u88AB\u53D6\u6D88\u6216\u9876\u66FF\uFF08${status}\uFF09`);
+    await discardUndeliveredPushesForTask({ db, userId: task.user_id, taskUuid: task.uuid });
   }
   async function payloadStillFresh(task) {
     if (typeof db.getTaskByUuid !== "function" || !task.uuid) return true;
@@ -4209,7 +4288,8 @@ async function deliverTasks(ctx, tasks) {
           messageIdBase: task.id != null ? `msg_task_${task.id}${occurrenceSuffix(task)}` : `msg_stale_${task.uuid || ""}`,
           sessionId: task.id != null ? `sess_task_${task.id}${occurrenceSuffix(task)}` : `sess_stale_${task.uuid || ""}`,
           occurrenceMs,
-          webpush: ctx.webpush
+          webpush: ctx.webpush,
+          isCancelled: () => lease.lost
         });
         const recurring = isRecurringType(recurrenceType);
         const plan = recurring ? planNextOccurrence(occurrenceMs, recurrenceType, Date.now(), tzId) : null;
@@ -4258,13 +4338,19 @@ async function deliverTasks(ctx, tasks) {
     try {
       sendResult = await processSingleMessage(
         task,
-        { ...ctx, db, masterKey, webpush: guardWebpushWithLease(ctx.webpush, lease) },
+        {
+          ...ctx,
+          db,
+          masterKey,
+          webpush: guardWebpushWithLease(ctx.webpush, lease),
+          isTaskCancelled: () => lease.lost
+        },
         masterKey,
         { userKey, payload: decryptedPayload }
       );
     } catch (error) {
       if (lease.lost) {
-        recordCancelled(task, "cancelled_mid_delivery");
+        await recordCancelled(task, "cancelled_mid_delivery");
         return;
       }
       await handleDeliveryFailure(
@@ -4279,7 +4365,7 @@ async function deliverTasks(ctx, tasks) {
     }
     if (!sendResult.success) {
       if (lease.lost) {
-        recordCancelled(task, "cancelled_mid_delivery");
+        await recordCancelled(task, "cancelled_mid_delivery");
         return;
       }
       await handleDeliveryFailure(
@@ -4302,7 +4388,7 @@ async function deliverTasks(ctx, tasks) {
       if (recurrenceType === "none") {
         markLeaseReleased(task.id);
         if (rowVanished(await db.deleteTaskById(task.id))) {
-          recordCancelled(task, "cancelled_after_delivery");
+          await recordCancelled(task, "cancelled_after_delivery");
           return;
         }
         results.deletedOnceOffTasks++;
@@ -4316,7 +4402,7 @@ async function deliverTasks(ctx, tasks) {
           ...clearedPayload ? { encrypted_payload: clearedPayload } : {}
         });
         if (rowVanished(updated)) {
-          recordCancelled(task, "cancelled_after_delivery");
+          await recordCancelled(task, "cancelled_after_delivery");
           return;
         }
         results.updatedRecurringTasks++;
@@ -4500,6 +4586,13 @@ function createUpdateMessageHandler(ctx) {
       return { status: 409, body: { success: false, error: { code: "TASK_ALREADY_COMPLETED", message: "\u4EFB\u52A1\u5DF2\u5B8C\u6210\u6216\u5DF2\u5931\u8D25\uFF0C\u65E0\u6CD5\u66F4\u65B0" } } };
     }
     const existingData = JSON.parse(await decryptFromStorage(existingTask.encrypted_payload, userKey));
+    if ((updates.apiUrl || updates.apiKey || updates.primaryModel) && hasChatCredRef(existingData)) {
+      return { status: 409, body: { success: false, error: {
+        code: "TASK_USES_CRED_REFS",
+        message: "\u4EFB\u52A1\u5DF2\u901A\u8FC7 credRefs.chat \u5F15\u7528\u51ED\u636E\uFF0C\u89E6\u53D1\u65F6\u4EE5\u51ED\u636E\u8868\u4E3A\u51C6\uFF0C\u5185\u8054 apiUrl / apiKey / primaryModel \u7684\u66F4\u65B0\u4E0D\u4F1A\u751F\u6548\u3002\u6362 Key \u8BF7\u7528 PUT /llm-credentials \u8986\u76D6\u5BF9\u5E94\u51ED\u636E\uFF0C\u6216\u5728\u672C\u6B21\u8BF7\u6C42\u91CC\u6539\u7528 credRefs \u6307\u5411\u65B0\u51ED\u636E",
+        details: { invalidFields: ["apiUrl", "apiKey", "primaryModel"].filter((name) => updates[name]) }
+      } } };
+    }
     const promptUpdates = {};
     if (updates.completePrompt) {
       promptUpdates.completePrompt = updates.completePrompt;
@@ -5576,8 +5669,17 @@ var D1Adapter = class {
    * than the stored row (updatedAt strictly lower) is skipped; equal or
    * newer overwrites. Values arrive pre-encrypted (the handler encrypts).
    *
+   * 例外是「来自未来」的行：`updated_at` 晚于服务端当前时间的行一律放行覆盖。
+   * 比较值是客户端自己报的时间戳，设备时钟只要领先过真实时间（用户改过系统
+   * 时间、时区或日期误操作），那一刻同步上来的行就带着一个还没到的时刻；之后
+   * 这台设备发什么都比它「旧」，条件写全被无声跳过，云端那行要等真实时间追上
+   * 去才解得开——客户端删本地数据、重装都碰不到它。合法写入不可能来自未来，
+   * 所以这种行按脏数据处理：服务端的钟是可信的那一个，拿它当判据放行。一次
+   * 正常写入就把 `updated_at` 拉回现实，之后旧不盖新照常生效。
+   *
    * `cleanups` 是删除项：在同一 batch 里先于 upsert 执行，`updated_at <= ?`
-   * 条件保证陈旧批次删不动更新写入的行。两种形态——
+   * 条件保证陈旧批次删不动更新写入的行（同样对未来时间戳的行放行，否则删一条
+   * 状态时切片行留在库里成孤儿）。两种形态——
    *   - `{ namespace, keyPrefix, updatedAt }` 删 key 前缀下的所有行，用来清掉
    *     大值旧写入留下的切片行（见 lib/state-chunks.js）；
    *   - `{ namespace, key, updatedAt }` 删这一个 key，用来删整条状态（前缀会
@@ -5595,24 +5697,30 @@ var D1Adapter = class {
    * @param {string} userId
    * @param {Array<{ namespace: string, key: string, value: string, updatedAt: number }>} entries
    * @param {Array<{ namespace: string, key?: string, keyPrefix?: string, updatedAt: number }>} [cleanups]
+   * @param {number} [now] - 服务端当前时刻（epoch 毫秒），判定「这行来自未来」用的
+   *   就是它。调用方（lib/client-state-store.js）传下来，测试可以钉住一个假时钟；
+   *   自定义调用方不传时退回本机时钟。
    * @returns {Promise<{ upserted: number, skipped: number, outcomes: boolean[] }>}
    *   `outcomes[i]` 对应 entries[i] 是否真的写入（changes > 0）。
    */
-  async upsertClientState(userId, entries, cleanups = []) {
+  async upsertClientState(userId, entries, cleanups = [], now2 = Date.now()) {
     const UPSERT_SQL = `INSERT INTO client_state (user_id, namespace, key, value, updated_at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (user_id, namespace, key) DO UPDATE SET
          value = excluded.value,
          updated_at = excluded.updated_at
-       WHERE excluded.updated_at >= client_state.updated_at`;
+       WHERE excluded.updated_at >= client_state.updated_at
+          OR client_state.updated_at > ?`;
     const CLEANUP_PREFIX_SQL = `DELETE FROM client_state
-       WHERE user_id = ? AND namespace = ? AND key >= ? AND key < ? AND updated_at <= ?`;
+       WHERE user_id = ? AND namespace = ? AND key >= ? AND key < ?
+         AND (updated_at <= ? OR updated_at > ?)`;
     const CLEANUP_KEY_SQL = `DELETE FROM client_state
-       WHERE user_id = ? AND namespace = ? AND key = ? AND updated_at <= ?`;
+       WHERE user_id = ? AND namespace = ? AND key = ?
+         AND (updated_at <= ? OR updated_at > ?)`;
     const buildStatements = () => [
-      ...cleanups.map((c) => typeof c.key === "string" ? this._db.prepare(CLEANUP_KEY_SQL).bind(userId, c.namespace, c.key, c.updatedAt) : this._db.prepare(CLEANUP_PREFIX_SQL).bind(userId, c.namespace, c.keyPrefix, prefixRangeEnd(c.keyPrefix), c.updatedAt)),
+      ...cleanups.map((c) => typeof c.key === "string" ? this._db.prepare(CLEANUP_KEY_SQL).bind(userId, c.namespace, c.key, c.updatedAt, now2) : this._db.prepare(CLEANUP_PREFIX_SQL).bind(userId, c.namespace, c.keyPrefix, prefixRangeEnd(c.keyPrefix), c.updatedAt, now2)),
       ...entries.map(
-        (entry) => this._db.prepare(UPSERT_SQL).bind(userId, entry.namespace, entry.key, entry.value, entry.updatedAt)
+        (entry) => this._db.prepare(UPSERT_SQL).bind(userId, entry.namespace, entry.key, entry.value, entry.updatedAt, now2)
       )
     ];
     let results;
@@ -5897,6 +6005,25 @@ var D1Adapter = class {
       [userId],
       messageIds
     );
+  }
+  /**
+   * 把某条任务名下还没发出去的行一次删掉（取消 / 顶替时的 outbox 清理）。
+   *
+   * 判据与 discardOutboxMessages 相同：只删 delivered_at 与 acked_at 均为
+   * NULL 的行——已经推给设备 / 已 ack 的照旧留着。按 task_uuid 直删是为了不
+   * 受未 ack 积压量的影响：靠翻页扫描挑行的话，积压一大这条任务的行就落在
+   * 扫描上限之外（见 lib/outbox-store.js 的 discardUndeliveredPushesForTask）。
+   *
+   * @param {string} userId
+   * @param {string} taskUuid
+   * @returns {Promise<number>} 删掉的行数
+   */
+  async discardUndeliveredOutboxForTask(userId, taskUuid) {
+    const res = await this._db.prepare(
+      `DELETE FROM message_outbox
+       WHERE user_id = ? AND task_uuid = ? AND delivered_at IS NULL AND acked_at IS NULL`
+    ).bind(userId, taskUuid).run();
+    return res.meta.changes || 0;
   }
   /**
    * 未 ack 的行（id 升序，游标翻页）。payload 仍是密文，解密在 handler。
@@ -6203,7 +6330,7 @@ function createClientStateHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.23" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.26" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -6769,8 +6896,101 @@ function createSingleUserCloudflareWorker(buildConfig, options = {}) {
   return { fetch: fetch2, scheduled, runTask: runTask2, getSchemaVersion: getSchemaVersion2, ensureSchema: ensureSchema22 };
 }
 
+// node_modules/.pnpm/@rei-standard+amsg-shared@0.4.0-next.8/node_modules/@rei-standard/amsg-shared/dist/index.mjs
+var TEXT_ENCODER2 = new TextEncoder();
+var TEXT_DECODER2 = new TextDecoder("utf-8", { fatal: false });
+function utf83(str) {
+  return TEXT_ENCODER2.encode(String(str));
+}
+var LLM_MESSAGES_ERROR2 = Object.freeze({
+  MESSAGES_NOT_ARRAY: "MESSAGES_NOT_ARRAY",
+  MESSAGE_NOT_OBJECT: "MESSAGE_NOT_OBJECT",
+  INVALID_ROLE: "INVALID_ROLE",
+  TOOL_CALL_MALFORMED: "TOOL_CALL_MALFORMED",
+  TOOL_CONTENT_INVALID: "TOOL_CONTENT_INVALID",
+  TOOL_CALL_ID_MISSING: "TOOL_CALL_ID_MISSING",
+  CONTENT_EMPTY_STRING: "CONTENT_EMPTY_STRING",
+  CONTENT_EMPTY_ARRAY: "CONTENT_EMPTY_ARRAY",
+  CONTENT_INVALID_TYPE: "CONTENT_INVALID_TYPE"
+});
+var UPSTREAM_ERROR_BODY_MAX_BYTES2 = 16 * 1024;
+var KEY_INFO_PREFIX2 = utf83("WebPush: info\0");
+var CEK_INFO2 = utf83("Content-Encoding: aes128gcm\0");
+var NONCE_INFO2 = utf83("Content-Encoding: nonce\0");
+var VAPID_TOKEN_LIFETIME2 = 12 * 3600;
+var REI_SW_EVENT2 = Object.freeze({
+  CONTENT_RECEIVED: "rei-amsg-content-received",
+  REASONING_RECEIVED: "rei-amsg-reasoning-received",
+  TOOL_REQUEST_RECEIVED: "rei-amsg-tool-request-received",
+  ERROR_RECEIVED: "rei-amsg-error-received",
+  /** 宿主自定义的一条结果（`messageKind: 'result'`），不是聊天内容。 */
+  RESULT_RECEIVED: "rei-amsg-result-received",
+  MULTIPART_EXPIRED: "rei-amsg-multipart-expired",
+  UNKNOWN_RECEIVED: "rei-amsg-unknown-received"
+});
+var MULTIPART_FAILURE_REASON2 = Object.freeze({
+  /** TTL 到期仍未收齐，或收到的分片本身已经过期。 */
+  TTL_EXPIRED: "ttl-expired",
+  /** 分片信封不合规：version / encoding 对不上、index 越界、chunk 不是合法 base64url。 */
+  INVALID_CHUNK: "invalid-chunk",
+  /** 同一个 id 的分片报了不一样的 total / encoding，已收的部分拼不回去。 */
+  CHUNK_CONFLICT: "chunk-conflict",
+  /** 累计字节数超过 maxTotalBytes。 */
+  SIZE_LIMIT_EXCEEDED: "size-limit-exceeded",
+  /** 收齐了但拼不回原 payload（缺片、超限、JSON 解不开）。 */
+  RESTORE_FAILED: "restore-failed",
+  /** 分片仓库（IndexedDB）读写失败。 */
+  STORAGE_FAILED: "storage-failed",
+  /** 接收端把 multipart 关了（`multipart.enabled === false`），分片没法重组。 */
+  DISABLED: "disabled"
+});
+var REI_SW_MESSAGE_TYPE2 = Object.freeze({
+  ENQUEUE_REQUEST: "REI_ENQUEUE_REQUEST",
+  DELIVER: "REI_AMSG_DELIVER",
+  FLUSH_QUEUE: "REI_FLUSH_QUEUE",
+  /**
+   * 入队的点对点回执：谁发的 ENQUEUE_REQUEST 就回给谁一条，一次一条。
+   * 没转 MessagePort 过来时会落到全局的 `navigator.serviceWorker` message
+   * 监听器上。
+   */
+  QUEUE_RESULT: "REI_QUEUE_RESULT",
+  /**
+   * 队列请求被永久拒绝、即将从队列里删掉时广播给所有窗口的一条。
+   *
+   * 跟 QUEUE_RESULT 分开是因为两者的收信人不是一回事：这条是广播，可能来自后台
+   * `sync` 冲刷、说的也可能是另一条八竿子打不着的旧请求。共用一个 type 的话，
+   * 页面等自己那条入队回执时会先收到这一条、当成自己的结果处理。
+   */
+  QUEUE_DROPPED: "REI_QUEUE_DROPPED"
+});
+var REI_AMSG_DELIVER_MESSAGE_TYPE2 = REI_SW_MESSAGE_TYPE2.DELIVER;
+var MESSAGE_KIND2 = Object.freeze({
+  CONTENT: "content",
+  REASONING: "reasoning",
+  TOOL_REQUEST: "tool_request",
+  ERROR: "error",
+  RESULT: "result"
+});
+var MESSAGE_TYPE2 = Object.freeze({
+  INSTANT: "instant",
+  FIXED: "fixed",
+  PROMPTED: "prompted",
+  AUTO: "auto"
+});
+var PUSH_SOURCE2 = Object.freeze({
+  INSTANT: "instant",
+  SCHEDULED: "scheduled"
+});
+var REASONING_CHUNK_ENCODER2 = new TextEncoder();
+var REASONING_CHUNK_DECODER2 = new TextDecoder("utf-8", { fatal: true });
+var REASONING_TAG_RE_G2 = /<(think|thinking|thought)>[\s\S]*?<\/\1>/gi;
+function stripReasoningTags2(content) {
+  if (typeof content !== "string" || !content.includes("<")) return content;
+  return content.replace(REASONING_TAG_RE_G2, "").trim();
+}
+
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-08-30.relationship-1";
+var AMSG_BUNDLE_VERSION = "2026-09-01.relationship-2";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -9775,9 +9995,22 @@ var extractTextFakedMcpCalls = (content, resolve, opts = {}) => {
   }
   return found.sort((a, b) => a.index - b.index).map(({ index: _index, ...call }) => call);
 };
-var MCP_PROTOCOL_VERSION = "2024-11-05";
+var MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION = "2025-11-25";
+var MCP_SUPPORTED_HANDSHAKE_PROTOCOL_VERSIONS = [
+  "2025-11-25",
+  "2025-06-18",
+  "2025-03-26"
+];
 var MCP_REQUEST_TIMEOUT_MS = 6e4;
-var createMcpSessionState = () => ({ sessionId: null, initialized: false, initPromise: null, nextId: 0 });
+var createMcpSessionState = () => ({
+  sessionId: null,
+  initialized: false,
+  initPromise: null,
+  protocolVersion: null,
+  serverInfo: null,
+  serverCapabilities: null,
+  nextId: 0
+});
 var buildRpcRequest = (session, method, params, isNotification = false) => {
   const req = { jsonrpc: "2.0", method, params };
   if (!isNotification) req.id = ++session.nextId;
@@ -9852,7 +10085,7 @@ var readSseResponse = async (resp, expectedId) => {
   }
 };
 var postCore = async (target, session, body, timeoutMs, expectResponse = true) => {
-  const headers = target.headers(session.sessionId);
+  const headers = target.headers(session.sessionId, session.protocolVersion);
   let resp;
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -9912,12 +10145,23 @@ var postCore = async (target, session, body, timeoutMs, expectResponse = true) =
 };
 var initializeCore = async (target, session, timeoutMs) => {
   const initReq = buildRpcRequest(session, "initialize", {
-    protocolVersion: MCP_PROTOCOL_VERSION,
+    protocolVersion: MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION,
     capabilities: {},
-    clientInfo: { name: "SullyOS-MCP", version: "1.0.0" }
+    clientInfo: { name: "sullyos", title: "SullyOS", version: "1.0.0" }
   });
   const { response: response2 } = await postCore(target, session, initReq, timeoutMs);
   if (response2?.error) throw new Error(`Initialize \u5931\u8D25: ${response2.error.message}`);
+  const negotiated = String(
+    response2?.result?.protocolVersion || MCP_LATEST_HANDSHAKE_PROTOCOL_VERSION
+  );
+  if (!MCP_SUPPORTED_HANDSHAKE_PROTOCOL_VERSIONS.includes(negotiated)) {
+    throw new Error(
+      `MCP \u534F\u8BAE\u7248\u672C\u4E0D\u517C\u5BB9\uFF1A\u670D\u52A1\u5668\u9009\u62E9\u4E86 ${negotiated}\u3002SullyOS \u7684 Streamable HTTP \u63A5\u7EBF\u652F\u6301 ${MCP_SUPPORTED_HANDSHAKE_PROTOCOL_VERSIONS.join(" / ")}\uFF1B2024-11-05 \u5C5E\u4E8E\u65E7 HTTP+SSE \u53CC\u7AEF\u70B9\uFF0C2026-07-28 \u5219\u9700\u8981\u65B0\u7684\u65E0\u63E1\u624B\u751F\u547D\u5468\u671F\u3002`
+    );
+  }
+  session.protocolVersion = negotiated;
+  session.serverInfo = response2?.result?.serverInfo || null;
+  session.serverCapabilities = response2?.result?.capabilities || null;
   const notif = buildRpcRequest(session, "notifications/initialized", {}, true);
   await postCore(target, session, notif, timeoutMs, false).catch(() => {
   });
@@ -10052,6 +10296,13 @@ var callMcpToolCore = async (target, session, toolName, args = {}, opts = {}) =>
     if (!response2) return finish({ success: false, error: "\u7A7A\u54CD\u5E94" });
     if (response2.error) return finish({ success: false, error: `MCP \u9519\u8BEF [${response2.error.code}]: ${response2.error.message}` });
     const result = response2.result;
+    if (result?.resultType === "input_required") {
+      return finish({
+        success: false,
+        error: "\u8FD9\u4E2A\u5DE5\u5177\u9700\u8981\u5728\u6267\u884C\u9014\u4E2D\u8865\u5145\u786E\u8BA4\u6216\u8F93\u5165\uFF1BSullyOS \u5F53\u524D\u4E0D\u4F1A\u66FF\u4F60\u81EA\u52A8\u56DE\u7B54\uFF0C\u8BF7\u56DE\u5230\u804A\u5929\u4E2D\u660E\u786E\u8981\u6C42\u540E\u91CD\u8BD5\u3002",
+        data: result
+      });
+    }
     if (result?.content && Array.isArray(result.content)) {
       const textParts = result.content.filter((c) => c?.type === "text").map((c) => c.text || "");
       const fullText = textParts.join("\n").trim();
@@ -10067,7 +10318,7 @@ var callMcpToolCore = async (target, session, toolName, args = {}, opts = {}) =>
     return finish({ success: false, error: e?.message || String(e) });
   }
 };
-var buildMcpDirectHeaders = (server, sessionId) => {
+var buildMcpDirectHeaders = (server, sessionId, protocolVersion = null) => {
   const headers = {
     "Content-Type": "application/json",
     "Accept": "application/json, text/event-stream"
@@ -10079,6 +10330,7 @@ var buildMcpDirectHeaders = (server, sessionId) => {
   }
   if (server.token) headers["Authorization"] = `Bearer ${server.token}`;
   if (sessionId) headers["Mcp-Session-Id"] = sessionId;
+  if (protocolVersion) headers["MCP-Protocol-Version"] = protocolVersion;
   return headers;
 };
 var filterMcpServersForChar = (servers, charId) => (servers || []).filter(
@@ -12980,13 +13232,13 @@ function buildScheduleChangeResult(args) {
 
 // worker/amsg/src/nativeFcm.ts
 var accessTokenCache = null;
-var utf83 = new TextEncoder();
+var utf84 = new TextEncoder();
 var bytesToB64u = (bytes) => {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 };
-var textToB64u = (value) => bytesToB64u(utf83.encode(value));
+var textToB64u = (value) => bytesToB64u(utf84.encode(value));
 var pemToPkcs8 = (raw) => {
   const base642 = raw.replace(/\\n/g, "\n").replace(/-----BEGIN PRIVATE KEY-----/g, "").replace(/-----END PRIVATE KEY-----/g, "").replace(/\s+/g, "");
   if (!base642) throw new Error("FCM_SERVICE_ACCOUNT_PRIVATE_KEY \u4E0D\u662F\u6709\u6548\u7684 PKCS#8 PEM");
@@ -13023,7 +13275,7 @@ var fetchFcmAccessToken = async (env) => {
     false,
     ["sign"]
   );
-  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, utf83.encode(unsigned));
+  const signature = await crypto.subtle.sign("RSASSA-PKCS1-v1_5", key, utf84.encode(unsigned));
   const assertion = `${unsigned}.${bytesToB64u(new Uint8Array(signature))}`;
   const response2 = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -13076,7 +13328,7 @@ var buildFcmMessage = (token, rawPayload) => {
       }
     }
   };
-  const bytes = utf83.encode(JSON.stringify(result)).byteLength;
+  const bytes = utf84.encode(JSON.stringify(result)).byteLength;
   if (bytes > 4e3) throw new Error(`FCM_PAYLOAD_TOO_LARGE: ${bytes} bytes\uFF08\u5B89\u5168\u4E0A\u9650 4000\uFF09`);
   return result;
 };
@@ -13680,7 +13932,10 @@ var runMcpFireTool = async (stash, name, args) => {
   const started = Date.now();
   const result = await callMcpToolCore(
     // worker 侧 fetch 没有 CORS，直连用户配的地址，不经代理。
-    { url: hit.server.url, headers: (sid) => buildMcpDirectHeaders(hit.server, sid) },
+    {
+      url: hit.server.url,
+      headers: (sid, protocolVersion) => buildMcpDirectHeaders(hit.server, sid, protocolVersion)
+    },
     session,
     hit.toolName,
     args,
@@ -13990,7 +14245,7 @@ var amsgHooks = {
       }
       return handler.llmOutput({ ctx, state: kindFire.state });
     }
-    const content = stripReasoningTags(ctx.llmOutputText || "").trim();
+    const content = stripReasoningTags2(ctx.llmOutputText || "").trim();
     const taskId = ctx.taskId != null ? String(ctx.taskId) : null;
     if (taskId == null) {
       console.warn("[amsg:agentic] ctx \u4E0A\u6CA1\u6709 taskId\uFF0C\u9001\u8FBE\u5F52\u5C5E\u4F1A\u5931\u6548", ctx.sessionId);

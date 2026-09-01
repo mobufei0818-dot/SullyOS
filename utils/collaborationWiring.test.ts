@@ -65,6 +65,7 @@ describe('collaboration sidecar wiring', () => {
       '新建协同窗口', '保存协同设置', '协同上传文件', '协同生成文件', '选择协同制作类型',
       '预览协同作品', '使用协同作品', '发送协同上下文到聊天',
       '归档协同窗口', '打开协同文件库', '删除协同文件', '切换日常聊天协同',
+      '重新生成协同回复', '删除协同消息',
     ]) {
       expect(windowSource).toContain(`trackEvent('${event}'`);
     }
@@ -215,6 +216,27 @@ describe('collaboration sidecar wiring', () => {
     expect(windowSource).toContain('永久删除窗口');
     expect(windowSource).toContain('永久删除文件');
     expect(windowSource).not.toMatch(/window\.(confirm|prompt|alert)\s*\(/);
+  });
+
+  it('rerolls the latest user turn after an API switch without duplicating its uploaded file', () => {
+    const windowSource = read('features/collaboration/CollaborationWindow.tsx');
+    const store = read('features/collaboration/store.ts');
+    expect(windowSource).toContain('重新生成上一条回复');
+    expect(windowSource).toContain('const rerollLatestReply = async () =>');
+    expect(windowSource).toContain('const requestMessages = messages.slice(0, lastUserIndex + 1)');
+    expect(windowSource).toContain('await CollaborationStore.deleteMessages(replacedMessages.map(message => message.id))');
+    expect(windowSource).toContain('await generateCollaborationReply(activeSession, requestMessages, latestUserMessage)');
+    expect(store).toContain('deleteMessages: async (messageIds: string[])');
+    expect(store).toContain('Remove message rows without deleting their canonical assets');
+  });
+
+  it('deletes long-pressed collaboration content through the themed dialog', () => {
+    const windowSource = read('features/collaboration/CollaborationWindow.tsx');
+    expect(windowSource).toContain('useCollaborationLongPress');
+    expect(windowSource).toContain('onLongPress={deleteMessage}');
+    expect(windowSource).toContain("message.role === 'user' ? '删除这一轮协同？'");
+    expect(windowSource).toContain("tone: 'danger'");
+    expect(windowSource).toContain('while (deleteEnd < messages.length');
   });
 
   it('uses the ChatApp thinking prompt and keeps model reasoning separate from the deliverable', () => {

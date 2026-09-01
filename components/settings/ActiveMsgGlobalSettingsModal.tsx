@@ -107,8 +107,16 @@ const REQUIRED_WORKER_FEATURES = [
 //            `silent: 'when-visible'`（静音改由 Service Worker 按窗口可见性算）。
 //            server 侧没有行为变化，单升这一档不解决任何问题；这批真正要用户去点
 //            一次「更新 Worker」的是通知策略本身，见 utils/amsgBundleVersion.ts。
+//   next.26 — client_state 的条件写不再被「来自未来」的时间戳锁死。设备时钟只要
+//            领先过真实时间，那一刻同步上去的行就带着一个还没到的时刻，之后这台
+//            设备发什么都被判成「旧的」，云端那行要等真实时间追上来才解得开；用户
+//            侧的表现是某个角色的即时对话一直发不出去，删消息、重装、重填地址全都
+//            不管用。这一档两件事：库里那种行不再有拦人的资格（存量能被覆盖回来），
+//            以及新写入的护栏值钳到服务端当前时刻（不再产生新的脏行）。旧部署上前端
+//            的水位（utils/amsgStateClock.ts）能兜住发不出去这一半，但云端那行会一直
+//            停在未来，只有升上来才会第一次写入就回到现实。
 // 不比版本的话，旧粘贴部署会被误判为最新，问题全在 worker 侧静默发生。
-const REQUIRED_WORKER_VERSION = '2.6.0-next.23';
+const REQUIRED_WORKER_VERSION = '2.6.0-next.26';
 
 /** 装着打包好的 worker 代码的部署仓库：fork 它 → 在 Cloudflare 连上 → 以后点 Sync fork 更新。 */
 const WORKERS_REPO_URL = 'https://github.com/Tosd0/sullyos-workers';

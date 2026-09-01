@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { normalizePhoneEvidence, phoneFieldToText } from './phoneEvidence';
+import { buildPhoneEvidenceChatCard, normalizePhoneEvidence, phoneFieldToText } from './phoneEvidence';
 
 describe('phone evidence safety', () => {
     it('把 LLM 返回的对象字段转成可读文本，而不是 React 对象子节点', () => {
@@ -26,5 +26,18 @@ describe('phone evidence safety', () => {
         expect(record.title).toBe('chapter: 第一章');
         expect(record.detail).toBe('第一段\n第二段');
         expect(record.value).toBe('reading_progress: 70%');
+    });
+
+    it('事后同步复用首次生成时的 phone_card 内容和元数据', () => {
+        const card = buildPhoneEvidenceChatCard({
+            id: 'record-1',
+            type: 'novel',
+            title: '第三章 夜航',
+            detail: '她把没发出去的话藏进草稿箱。',
+            value: '1.2万字',
+            timestamp: 1,
+        }, '阅读');
+        expect(card.content).toBe('[你手机的阅读] 第三章 夜航 · 1.2万字 — 她把没发出去的话藏进草稿箱。');
+        expect(card.metadata.phoneCard).toMatchObject({ app: '阅读', kind: 'novel', title: '第三章 夜航' });
     });
 });

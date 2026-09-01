@@ -83,6 +83,28 @@ describe('collaboration context isolation', () => {
     ]);
   });
 
+  it('keeps a full-length uploaded paper available on the next follow-up turn', () => {
+    const paper = `摘要之后的论文全文：${'正文段落。'.repeat(55_000)}`;
+    const messages = buildCollaborationModelMessages('角色快照', [
+      {
+        id: 'upload', sessionId: 'session-a', role: 'user', content: '请阅读这篇论文', createdAt: 1,
+        attachments: [{ id: 'att', assetId: 'asset', kind: 'source', name: '论文.pdf', mimeType: 'application/pdf', size: 1, createdAt: 1, pageCount: 18, extractedText: paper }],
+      },
+      { id: 'summary', sessionId: 'session-a', role: 'assistant', content: '先说摘要。', createdAt: 2 },
+      { id: 'follow-up', sessionId: 'session-a', role: 'user', content: '请继续分析正文第三节。', createdAt: 3 },
+    ]);
+    expect(messages.some(message => typeof message.content === 'string' && message.content.includes('摘要之后的论文全文'))).toBe(true);
+    expect(messages.some(message => typeof message.content === 'string' && message.content.includes('PDF 共 18 页'))).toBe(true);
+  });
+
+  it('passes an explicitly selected Word format as an invisible delivery requirement', () => {
+    const messages = buildCollaborationModelMessages('角色快照', [
+      { id: 'm1', sessionId: 'session-a', role: 'user', content: '整理成报告', requestedFormat: 'docx', createdAt: 1 },
+    ]);
+    expect(messages[1].content).toContain('[本轮文件交付格式：docx');
+    expect(messages[1].content).toContain('artifact 真文件');
+  });
+
   it('removes stale one-time recall blocks from pre-upgrade session snapshots', () => {
     const cleaned = stripFrozenCollaborationMemoryContext(`### 角色设定
 保留我是谁

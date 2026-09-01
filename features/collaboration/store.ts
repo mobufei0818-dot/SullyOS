@@ -146,6 +146,20 @@ export const CollaborationStore = {
   saveMessage: (message: CollaborationMessage): Promise<void> => put(STORE_MESSAGES, message),
 
   /**
+   * Remove message rows without deleting their canonical assets. Generated or
+   * uploaded files may already have been delivered to ChatApp by assetId, so a
+   * message edit must never invalidate those existing file cards.
+   */
+  deleteMessages: async (messageIds: string[]): Promise<void> => {
+    if (messageIds.length === 0) return;
+    const db = await openCollaborationDatabase();
+    const transaction = db.transaction(STORE_MESSAGES, 'readwrite');
+    const store = transaction.objectStore(STORE_MESSAGES);
+    messageIds.forEach(messageId => store.delete(messageId));
+    await commitTransaction(transaction);
+  },
+
+  /**
    * Permanently remove one canonical file and every collaboration-message
    * attachment that points at it. ChatApp cards deliberately keep only the
    * asset id, so an explicit library deletion also makes old deliveries

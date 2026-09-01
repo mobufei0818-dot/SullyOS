@@ -1,6 +1,9 @@
 import { extractContent, safeFetchJson } from '../../utils/safeApi';
 import { buildCollaborationModelMessages } from './context';
-import type { CollaborationApiProfile, CollaborationContextMessage, CollaborationMakerKind, CollaborationMessage } from './types';
+import type { ModelMessage } from './context';
+import { collaborationBlobToDataUrl } from './files';
+import { CollaborationStore } from './store';
+import type { CollaborationApiProfile, CollaborationAttachment, CollaborationContextMessage, CollaborationMakerKind, CollaborationMessage } from './types';
 import { parseCollaborationReply, visibleCollaborationStreamText, type ParsedCollaborationReply } from './reasoning';
 
 export const isCollaborationApiConfigured = (profile: CollaborationApiProfile): boolean => (
@@ -19,6 +22,66 @@ export interface RunCollaborationTurnInput {
   turnContext?: string;
 }
 
+const recentUndescribedImages = (messages: CollaborationMessage[]): CollaborationAttachment[] => {
+  const selected: CollaborationAttachment[] = [];
+  const seen = new Set<string>();
+  for (let messageIndex = messages.length - 1; messageIndex >= 0 && selected.length < 4; messageIndex -= 1) {
+    const attachments = messages[messageIndex].attachments || [];
+    for (let attachmentIndex = attachments.length - 1; attachmentIndex >= 0 && selected.length < 4; attachmentIndex -= 1) {
+      const attachment = attachments[attachmentIndex];
+      if (!/^image\//i.test(attachment.mimeType) || attachment.extractedText?.trim() || seen.has(attachment.assetId)) continue;
+      seen.add(attachment.assetId);
+      selected.push(attachment);
+    }
+  }
+  return selected.reverse();
+};
+
+/**
+ * 把最近上传、且没有独立识图描述的参考图真正挂到最后一条用户消息上。
+ * 读取器可注入，方便不依赖 IndexedDB/FileReader 的纯逻辑测试。
+ */
+export const attachCollaborationImageInputs = async (
+  modelMessages: ModelMessage[],
+  sessionMessages: CollaborationMessage[],
+  readAsset: (assetId: string) => Promise<Blob | null> = CollaborationStore.getAsset,
+  toDataUrl: (blob: Blob) => Promise<string> = collaborationBlobToDataUrl,
+): Promise<ModelMessage[]> => {
+  const attachments = recentUndescribedImages(sessionMessages);
+  if (attachments.length === 0) return modelMessages;
+  const images: Array<{ name: string; url: string }> = [];
+  for (const attachment of attachments) {
+    const blob = await readAsset(attachment.assetId);
+    if (!blob) continue;
+    images.push({ name: attachment.name, url: await toDataUrl(blob) });
+  }
+  if (images.length === 0) return modelMessages;
+
+  let lastUserIndex = -1;
+  for (let index = modelMessages.length - 1; index >= 0; index -= 1) {
+    if (modelMessages[index].role === 'user') {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  if (lastUserIndex < 0) return modelMessages;
+  const target = modelMessages[lastUserIndex];
+  const originalParts = typeof target.content === 'string'
+    ? [{ type: 'text' as const, text: target.content }]
+    : target.content;
+  const imageLabel = `以下 ${images.length} 张图片是用户在本协同会话上传的参考图（${images.map(image => image.name).join('、')}）。请结合最近的任务直接观察画面细节。`;
+  const next = [...modelMessages];
+  next[lastUserIndex] = {
+    ...target,
+    content: [
+      ...originalParts,
+      { type: 'text', text: imageLabel },
+      ...images.map(image => ({ type: 'image_url' as const, image_url: { url: image.url } })),
+    ],
+  };
+  return next;
+};
+
 export const runCollaborationTurn = async ({
   profile,
   contextSnapshot,
@@ -36,7 +99,10 @@ export const runCollaborationTurn = async ({
   if (profile.apiKey.trim()) headers.Authorization = `Bearer ${profile.apiKey.trim()}`;
   const requestBody: Record<string, unknown> = {
     model: profile.model.trim(),
-    messages: buildCollaborationModelMessages(contextSnapshot, messages, makerKind, chatContextSnapshot, turnContext),
+    messages: await attachCollaborationImageInputs(
+      buildCollaborationModelMessages(contextSnapshot, messages, makerKind, chatContextSnapshot, turnContext),
+      messages,
+    ),
     temperature: Math.max(0, Math.min(2, Number(profile.temperature) || 0.7)),
     stream: profile.stream,
   };

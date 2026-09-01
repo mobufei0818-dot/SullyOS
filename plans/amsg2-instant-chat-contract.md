@@ -43,8 +43,12 @@
 - 处理步骤（严格顺序，两个 await 失败即向客户端返回明确错误，不落任务）：
   1. 内部 `upstream.fetch` 转发 `PUT /client-state`（statePayload）→ 必须成功。
      HTTP ok 还不够：上游按 updatedAt 条件写（旧不盖新），成功体 `data.skippedEntries`
-     里点名了 `fire_pack` 条目（典型成因：设备时钟被回拨过）时同样打回——
-     `409 INSTANT_CHAT_STATE_STALE`，绝不落任务（否则 fire 拿旧 chat 段答话）。
+     里点名了 `fire_pack` 条目时同样打回——`409 INSTANT_CHAT_STATE_STALE`，绝不落任务
+     （否则 fire 拿旧 chat 段答话）。
+     客户端拿到这个码会自愈一次：读回云端那几行的 `updatedAt`、把本地水位抬过去
+     （`utils/amsgStateClock.ts`）、重新盖戳再发一次。设备时钟只要领先过真实时间，云端
+     那一行就带着一个还没到的时刻，本地墙钟从此跨不过去，那个角色发一句挂一句，把系统
+     时间调回来也没用；水位是这条路的唯一出路。对齐不动才是真被别人写了新的，那时不重发。
   2. 内部转发 `POST /schedule-message`（taskPayload）→ 必须成功，拿到 uuid
      （顶替在上游事务内完成）。
   3. 返回 `202 { status: 'accepted', uuid }`。

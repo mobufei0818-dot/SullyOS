@@ -48,6 +48,7 @@ beforeEach(() => {
 
 afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
 });
 
@@ -92,10 +93,11 @@ describe('buildMcpRequestHeaders', () => {
                 { name: 'XBY-APIKEY', value: 'secret-xby' },
                 { name: 'Authorization', value: 'Custom auth' },
             ],
-        }, 'session-1');
+        }, 'session-1', '2025-11-25');
         expect(headers.get('XBY-APIKEY')).toBe('secret-xby');
         expect(headers.get('Authorization')).toBe('Bearer bearer-token');
         expect(headers.get('Mcp-Session-Id')).toBe('session-1');
+        expect(headers.get('MCP-Protocol-Version')).toBe('2025-11-25');
         expect(headers.get('X-Proxy-Key')).toBe('proxy-secret');
         expect(headers.get('X-MCP-Forward-Headers')).toBe('XBY-APIKEY,Authorization');
     });
@@ -229,6 +231,25 @@ describe('buildMcpOpenAITools', () => {
         // 单服务器可见时描述不带 [来源] 前缀（multi 按角色可见数算）
         expect(buildMcpOpenAITools('char_b').tools[0].function.description).not.toContain('[通用]');
         expect(buildMcpOpenAITools('char_a').tools[0].function.description).toContain('[通用]');
+    });
+});
+
+describe('MCP 高风险工具保护', () => {
+    it('服务端明确标注为 destructive 的工具会自动确认，用户拒绝后不发请求', async () => {
+        const server = mkServer({
+            tools: [{
+                name: 'delete_note',
+                title: '删除笔记',
+                inputSchema: { type: 'object', properties: {} },
+                annotations: { destructiveHint: true },
+            }],
+        });
+        vi.stubGlobal('window', { confirm: vi.fn().mockReturnValue(false) });
+        const fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+        const result = await callMcpTool(server, 'delete_note', { id: 'n1' });
+        expect(result.success).toBe(false);
+        expect(fetchSpy).not.toHaveBeenCalled();
     });
 });
 
@@ -581,6 +602,22 @@ describe('collectMcpFireServers', () => {
         expect(isMcpChatAvailable('char_a')).toBe(true);
         expect(collectMcpFireServers()).toEqual([]);
         expect(hasWorkerUnreachableMcpServer('char_a')).toBe(true);
+    });
+
+    it('无人值守后台不带 destructive 工具', () => {
+        saveMcpServers([
+            mkServer({
+                id: 'guarded',
+                tools: [
+                    { name: 'read_note', annotations: { readOnlyHint: true } },
+                    { name: 'delete_note', annotations: { destructiveHint: true } },
+                ],
+            }),
+        ]);
+
+        const out = collectMcpFireServers();
+        expect(out.map(server => server.id)).toEqual(['guarded']);
+        expect(out[0].tools?.map(tool => tool.name)).toEqual(['read_note']);
     });
 
     it('其余 worker 够不着的地址一并挡掉（链路本地 / 占位地址 / 局域网域名 / IPv6 ULA）', () => {

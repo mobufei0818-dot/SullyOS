@@ -4,6 +4,46 @@ import type { CollaborationMessage, CollaborationSession } from '../features/col
 import { DEFAULT_COLLABORATION_SETTINGS } from '../features/collaboration/types';
 
 describe('collaboration file library and backup', () => {
+  it('deletes message rows while retaining their canonical files for ChatApp deliveries', async () => {
+    const stamp = Date.now();
+    const charId = `collab-message-delete-char-${stamp}`;
+    const session: CollaborationSession = {
+      id: `collab-message-delete-session-${stamp}`,
+      charId,
+      title: '消息删除测试',
+      mode: 'focused',
+      createdAt: stamp,
+      updatedAt: stamp,
+    };
+    const assetId = `collab-message-delete-asset-${stamp}`;
+    const message: CollaborationMessage = {
+      id: `collab-message-delete-message-${stamp}`,
+      sessionId: session.id,
+      role: 'assistant',
+      content: '文件做好了。',
+      createdAt: stamp,
+      attachments: [{
+        id: `collab-message-delete-attachment-${stamp}`,
+        assetId,
+        kind: 'artifact',
+        name: '仍可打开.pdf',
+        mimeType: 'application/pdf',
+        size: 4,
+        createdAt: stamp,
+        format: 'pdf',
+      }],
+    };
+
+    await CollaborationStore.saveSession(session);
+    await CollaborationStore.saveMessage(message);
+    await CollaborationStore.saveAsset({ id: assetId, blob: new Blob(['keep'], { type: 'application/pdf' }), createdAt: stamp });
+    await CollaborationStore.deleteMessages([message.id]);
+
+    expect(await CollaborationStore.listMessages(session.id)).toEqual([]);
+    expect((await CollaborationStore.getAsset(assetId))?.size).toBe(4);
+    expect(await CollaborationStore.listLibraryFiles(charId)).toEqual([]);
+  });
+
   it('deletes the canonical file and restores the sidecar database from backup', async () => {
     const stamp = Date.now();
     const charId = `collab-store-char-${stamp}`;

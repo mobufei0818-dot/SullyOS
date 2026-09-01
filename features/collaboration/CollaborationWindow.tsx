@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import {
   Archive,
   ArrowLeft,
+  ArrowCounterClockwise,
   ArrowUUpLeft,
   Briefcase,
   CaretDown,
@@ -15,6 +16,7 @@ import {
   FileText,
   Folder,
   GearSix,
+  ImageSquare,
   List,
   MagnifyingGlass,
   PaperPlaneRight,
@@ -27,7 +29,9 @@ import {
 import type { APIConfig, ApiPreset, CharacterProfile, ChatTheme, Emoji, EmojiCategory, GroupProfile, Message, RealtimeConfig, UserProfile } from '../../types';
 import TokenImg from '../../components/os/TokenImg';
 import { bucketFewCount, trackEvent } from '../../utils/analytics';
+import { processImageToBlob } from '../../utils/file';
 import { shareOrDownloadBlob } from '../../utils/shareExport';
+import { describeImageWithVisionApi } from '../../utils/visionApi';
 import {
   collaborationProfileFromApi,
   collaborationProfileMatches,
@@ -36,7 +40,7 @@ import {
 } from './api';
 import { buildCollaborationContextSnapshot, buildCollaborationTurnMemoryContext, buildImmersiveChatContextSnapshot } from './context';
 import { runCollaborationTurn, isCollaborationApiConfigured, summarizeCollaborationForMemory } from './engine';
-import { extractSourceFile, materializeArtifact, parseArtifactBlocks } from './files';
+import { collaborationBlobToDataUrl, extractSourceFile, isCollaborationImageFile, materializeArtifact, parseArtifactBlocks } from './files';
 import { normalizeCollaborationVisibleText, parseCollaborationMarkdown } from './markdown';
 import type { CollaborationInlineSpan } from './markdown';
 import { parseCollaborationRichOutput, resolveCollaborationEmoji, sanitizeCollaborationRichOutputSource } from './richOutput';
@@ -53,6 +57,7 @@ import {
 } from './makers';
 import type {
   CollaborationApiProfile,
+  CollaborationArtifactFormat,
   CollaborationAvatarMode,
   CollaborationAvatarStyle,
   CollaborationAttachment,
@@ -101,6 +106,20 @@ interface CollaborationWindowProps {
 type PendingAttachment = { attachment: CollaborationAttachment; blob: Blob };
 type SessionFilter = 'active' | 'archived';
 
+const OUTPUT_FORMAT_OPTIONS: Array<{ value: '' | CollaborationArtifactFormat; label: string }> = [
+  { value: '', label: '格式：自动' },
+  { value: 'docx', label: 'Word (.docx)' },
+  { value: 'pdf', label: 'PDF (.pdf)' },
+  { value: 'md', label: 'Markdown (.md)' },
+  { value: 'txt', label: '纯文本 (.txt)' },
+  { value: 'html', label: '网页 (.html)' },
+  { value: 'json', label: 'JSON (.json)' },
+];
+
+const OUTPUT_FORMAT_LABELS = Object.fromEntries(
+  OUTPUT_FORMAT_OPTIONS.filter(option => option.value).map(option => [option.value, option.label]),
+) as Record<CollaborationArtifactFormat, string>;
+
 const MODE_LABELS: Record<CollaborationMode, string> = {
   immersive: '沉浸式协同',
   focused: '中度协同',
@@ -132,12 +151,12 @@ const COLLABORATION_UI_THEMES: Array<{
   emptyDescription: string;
   swatches: [string, string, string];
 }> = [
-  { id: 'sully', label: '角色气泡', caption: 'SullyOS 原生布局', presence: '默认双方头像', emptyTitle: '从一件具体的事开始', emptyDescription: '上传资料，或者直接告诉角色想完成什么。', swatches: ['#f4f6fa', '#ffffff', '#6366f1'] },
-  { id: 'gpt', label: '黑白助手', caption: '克制的 AI 对话布局', presence: '默认不显示头像', emptyTitle: '有什么可以帮忙完成？', emptyDescription: '输入任务、上传文件，或者选择一个制作能力开始。', swatches: ['#ffffff', '#f4f4f4', '#000000'] },
+  { id: 'sully', label: '角色气泡', caption: 'SullyOS 原生布局', presence: '默认双方头像', emptyTitle: '从一件具体的事开始', emptyDescription: '上传资料或参考图，也可以直接告诉角色想完成什么。', swatches: ['#f4f6fa', '#ffffff', '#6366f1'] },
+  { id: 'gpt', label: '黑白助手', caption: '克制的 AI 对话布局', presence: '默认不显示头像', emptyTitle: '有什么可以帮忙完成？', emptyDescription: '输入任务、上传文件或图片，或者选择一个制作能力开始。', swatches: ['#ffffff', '#f4f4f4', '#000000'] },
   { id: 'claude', label: '暖纸长文', caption: '适合阅读与写作', presence: '默认不显示头像', emptyTitle: '今天想一起做些什么？', emptyDescription: '把资料和目标交给角色，适合整理、写作与长文制作。', swatches: ['#f7f6f2', '#eee9df', '#d97757'] },
   { id: 'gemini', label: '渐光协作', caption: '轻盈的助手工作台', presence: '默认只显示角色', emptyTitle: '你好，今天一起完成什么？', emptyDescription: '角色会带着最近聊天里的连续感，在这里专心处理任务。', swatches: ['#ffffff', '#eef3ff', '#4d75e8'] },
-  { id: 'kimi', label: '轻量资料', caption: '资料与文档优先', presence: '默认不显示头像', emptyTitle: '嗨，想从什么任务开始？', emptyDescription: '上传长文档或直接描述目标，角色会整理好再交付。', swatches: ['#f6f8fc', '#ffffff', '#2864ff'] },
-  { id: 'deepseek', label: '理性工作台', caption: '清楚的推理分区', presence: '默认不显示头像', emptyTitle: '有什么可以帮到你？', emptyDescription: '描述问题或上传资料，角色会按步骤分析并完成。', swatches: ['#f5f7fb', '#ffffff', '#4d6bfe'] },
+  { id: 'kimi', label: '轻量资料', caption: '资料与文档优先', presence: '默认不显示头像', emptyTitle: '嗨，想从什么任务开始？', emptyDescription: '上传长文档、参考图或直接描述目标，角色会整理好再交付。', swatches: ['#f6f8fc', '#ffffff', '#2864ff'] },
+  { id: 'deepseek', label: '理性工作台', caption: '清楚的推理分区', presence: '默认不显示头像', emptyTitle: '有什么可以帮到你？', emptyDescription: '描述问题或上传资料、图片，角色会按步骤分析并完成。', swatches: ['#f5f7fb', '#ffffff', '#4d6bfe'] },
 ];
 type CollaborationUiThemeSpec = (typeof COLLABORATION_UI_THEMES)[number];
 
@@ -312,6 +331,23 @@ const abortCollaborationRequest = (controller: AbortController | null, reason: s
   } catch {
     controller.abort();
   }
+};
+
+const collaborationMessageTaskText = (message: CollaborationMessage): string => [
+  message.content,
+  ...(message.attachments || []).map(attachment => attachment.extractedText || ''),
+].join('\n').slice(0, 80_000);
+
+const collaborationMessagePreview = (message?: CollaborationMessage): string | undefined => {
+  if (!message) return undefined;
+  if (message.role === 'assistant') {
+    const rich = parseCollaborationRichOutput(message.content);
+    const label = rich.text
+      || (rich.voice ? '[语音]' : '')
+      || (rich.emojiNames.length > 0 ? `[表情包：${rich.emojiNames[0]}]` : '');
+    return shortPreview(label || message.attachments?.[0]?.name || '已完成');
+  }
+  return shortPreview(message.content || message.attachments?.[0]?.name || (message.role === 'system' ? '系统提示' : '上传了文件'));
 };
 
 type CollaborationDialogResult = 'confirm' | 'secondary' | 'cancel';
@@ -798,18 +834,22 @@ const ApiSettingsPanel: React.FC<{
 const AttachmentButton: React.FC<{
   attachment: CollaborationAttachment;
   onOpen: () => void;
-}> = ({ attachment, onOpen }) => (
+}> = ({ attachment, onOpen }) => {
+  const isImage = /^image\//i.test(attachment.mimeType);
+  const isPdf = attachment.format === 'pdf' || /pdf/i.test(attachment.mimeType);
+  return (
   <button type="button" onClick={onOpen} className="mt-2 flex w-full min-w-[210px] items-center gap-3 rounded-2xl border border-black/8 bg-white/72 px-3 py-2.5 text-left text-slate-700 shadow-sm backdrop-blur-sm active:scale-[.99]">
-    <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${attachment.format === 'pdf' || /pdf/i.test(attachment.mimeType) ? 'bg-rose-100 text-rose-600' : 'bg-indigo-100 text-indigo-600'}`}>
-      {attachment.kind === 'installable' ? <Briefcase size={21} weight="fill" /> : attachment.format === 'pdf' || /pdf/i.test(attachment.mimeType) ? <FilePdf size={21} weight="fill" /> : <FileText size={21} weight="fill" />}
+    <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${isImage ? 'bg-sky-100 text-sky-600' : isPdf ? 'bg-rose-100 text-rose-600' : 'bg-indigo-100 text-indigo-600'}`}>
+      {attachment.kind === 'installable' ? <Briefcase size={21} weight="fill" /> : isImage ? <ImageSquare size={21} weight="fill" /> : isPdf ? <FilePdf size={21} weight="fill" /> : <FileText size={21} weight="fill" />}
     </span>
     <span className="min-w-0 flex-1">
       <span className="block truncate text-xs font-semibold">{attachment.name}</span>
-      <span className="mt-0.5 block text-[10px] text-slate-400">{attachment.kind === 'installable' ? `${attachment.installableKind ? COLLABORATION_MAKER_MAP[attachment.installableKind].label : '可安装作品'} · 点击预览` : `${readableSize(attachment.size)}${attachment.pageCount ? ` · ${attachment.pageCount} 页` : ''}`}</span>
+      <span className="mt-0.5 block text-[10px] text-slate-400">{attachment.kind === 'installable' ? `${attachment.installableKind ? COLLABORATION_MAKER_MAP[attachment.installableKind].label : '可安装作品'} · 点击预览` : `${isImage ? '参考图 · ' : ''}${readableSize(attachment.size)}${attachment.pageCount ? ` · ${attachment.pageCount} 页` : ''}`}</span>
     </span>
     {attachment.kind === 'installable' ? <Eye size={17} className="shrink-0 text-slate-400" /> : <DownloadSimple size={17} className="shrink-0 text-slate-400" />}
   </button>
-);
+  );
+};
 
 const MakerStudio: React.FC<{
   activeKind?: CollaborationMakerKind;
@@ -1094,6 +1134,55 @@ const CollaborationEmojiCard: React.FC<{ name: string; emoji?: Emoji }> = ({ nam
     : <div className="mt-2 rounded-xl border border-dashed border-current/15 px-3 py-2 text-[10px] opacity-55">表情包未找到：{name}</div>
 );
 
+const useCollaborationLongPress = (onLongPress: () => void) => {
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const longPressedRef = useRef(false);
+  const originRef = useRef<{ x: number; y: number } | null>(null);
+  const clearTimer = useCallback(() => {
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = null;
+    originRef.current = null;
+  }, []);
+  useEffect(() => clearTimer, [clearTimer]);
+  const isInteractiveTarget = (target: EventTarget | null) => (
+    target instanceof Element && !!target.closest('button, a, input, textarea, select, label')
+  );
+  return {
+    onPointerDown: (event: React.PointerEvent<HTMLElement>) => {
+      if (event.button !== 0 || isInteractiveTarget(event.target)) return;
+      clearTimer();
+      longPressedRef.current = false;
+      originRef.current = { x: event.clientX, y: event.clientY };
+      timerRef.current = setTimeout(() => {
+        longPressedRef.current = true;
+        originRef.current = null;
+        if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') navigator.vibrate(12);
+        onLongPress();
+      }, 520);
+    },
+    onPointerMove: (event: React.PointerEvent<HTMLElement>) => {
+      const origin = originRef.current;
+      if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > 10) clearTimer();
+    },
+    onPointerUp: clearTimer,
+    onPointerCancel: clearTimer,
+    onPointerLeave: clearTimer,
+    onContextMenu: (event: React.MouseEvent<HTMLElement>) => {
+      if (isInteractiveTarget(event.target)) return;
+      event.preventDefault();
+      clearTimer();
+      if (longPressedRef.current) return;
+      onLongPress();
+    },
+    onClickCapture: (event: React.MouseEvent<HTMLElement>) => {
+      if (!longPressedRef.current) return;
+      event.preventDefault();
+      event.stopPropagation();
+      longPressedRef.current = false;
+    },
+  };
+};
+
 const MessageBubble: React.FC<{
   message: CollaborationMessage;
   character: CharacterProfile;
@@ -1105,16 +1194,18 @@ const MessageBubble: React.FC<{
   voiceState?: CollaborationVoiceUiState;
   onPlayVoice: (message: CollaborationMessage) => void;
   onOpenAttachment: (attachment: CollaborationAttachment) => void;
-}> = ({ message, character, user, theme, uiTheme, emojis, emojiCategories, voiceState, onPlayVoice, onOpenAttachment }) => {
+  onLongPress: (message: CollaborationMessage) => void;
+}> = ({ message, character, user, theme, uiTheme, emojis, emojiCategories, voiceState, onPlayVoice, onOpenAttachment, onLongPress }) => {
+  const longPressHandlers = useCollaborationLongPress(() => onLongPress(message));
   if (message.role === 'system') {
-    return <div className="collab-message-system mx-auto my-3 max-w-[82%] rounded-full bg-slate-900/6 px-4 py-2 text-center text-[11px] leading-relaxed text-slate-500">{message.content}</div>;
+    return <div {...longPressHandlers} className="collab-message-system mx-auto my-3 max-w-[82%] rounded-full bg-slate-900/6 px-4 py-2 text-center text-[11px] leading-relaxed text-slate-500">{message.content}</div>;
   }
   const isUser = message.role === 'user';
   const richOutput = isUser ? null : parseCollaborationRichOutput(message.content);
   const style = isUser ? theme.user : theme.ai;
   const avatar = isUser ? (user.perCharAvatars?.[character.id] || user.avatar) : character.avatar;
   return (
-    <div className={`collab-message-row ${isUser ? 'collab-message-row-user flex-row-reverse' : 'collab-message-row-assistant'} flex items-end gap-2.5 px-4 py-2`}>
+    <div {...longPressHandlers} className={`collab-message-row ${isUser ? 'collab-message-row-user flex-row-reverse' : 'collab-message-row-assistant'} flex items-end gap-2.5 px-4 py-2`}>
       <TokenImg value={avatar} alt={isUser ? user.name : character.name} className={`collab-message-avatar ${isUser ? 'collab-message-avatar-user' : 'collab-message-avatar-assistant'} h-8 w-8 shrink-0 rounded-full object-cover shadow-sm ring-1 ring-black/5`} />
       <div className={`collab-message-stack min-w-0 max-w-[78%] ${isUser ? 'items-end' : 'items-start'} flex flex-col`} data-ui-theme={uiTheme}>
         <div
@@ -1126,6 +1217,7 @@ const MessageBubble: React.FC<{
           }}
         >
           {!isUser && message.thinkingChain && <CollaborationThinkingBlock chain={message.thinkingChain} />}
+          {isUser && message.requestedFormat && <div className="mb-1.5 text-[9px] font-semibold opacity-65">交付格式 · {OUTPUT_FORMAT_LABELS[message.requestedFormat]}</div>}
           {isUser && message.content && <CollaborationMarkdownView content={message.content} />}
           {!isUser && richOutput?.text && <CollaborationMarkdownView content={richOutput.text} />}
           {!isUser && richOutput?.voice && (
@@ -1193,8 +1285,8 @@ const CollaborationLibraryRow: React.FC<{
       }}
       className="collab-library-row flex w-full items-center gap-3 border-b border-slate-200/65 px-4 py-3.5 text-left transition-colors active:bg-slate-100"
     >
-      <span className={`grid h-11 w-11 shrink-0 place-items-center rounded-[14px] ${file.kind === 'installable' ? 'bg-violet-50 text-violet-500' : file.format === 'pdf' ? 'bg-rose-50 text-rose-500' : 'bg-indigo-50 text-indigo-500'}`}>
-        {file.kind === 'installable' ? <Briefcase size={22} weight="duotone" /> : file.format === 'pdf' ? <FilePdf size={22} weight="duotone" /> : <FileText size={22} weight="duotone" />}
+      <span className={`grid h-11 w-11 shrink-0 place-items-center rounded-[14px] ${file.kind === 'installable' ? 'bg-violet-50 text-violet-500' : /^image\//i.test(file.mimeType) ? 'bg-sky-50 text-sky-500' : file.format === 'pdf' ? 'bg-rose-50 text-rose-500' : 'bg-indigo-50 text-indigo-500'}`}>
+        {file.kind === 'installable' ? <Briefcase size={22} weight="duotone" /> : /^image\//i.test(file.mimeType) ? <ImageSquare size={22} weight="duotone" /> : file.format === 'pdf' ? <FilePdf size={22} weight="duotone" /> : <FileText size={22} weight="duotone" />}
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[13px] font-semibold text-slate-700">{file.name}</span>
@@ -1420,6 +1512,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   const [categoryFilter, setCategoryFilter] = useState('all');
   const [draft, setDraft] = useState('');
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [requestedOutputFormat, setRequestedOutputFormat] = useState<CollaborationArtifactFormat | null>(null);
   const [uploadStatus, setUploadStatus] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [streamingText, setStreamingText] = useState('');
@@ -1838,19 +1931,52 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       }
       try {
         setUploadStatus(`正在读取 ${file.name}`);
-        const extracted = await extractSourceFile(file, setUploadStatus);
+        const isImage = isCollaborationImageFile(file);
+        const inferredImageType = file.type || (/\.png$/i.test(file.name)
+          ? 'image/png'
+          : /\.webp$/i.test(file.name)
+            ? 'image/webp'
+            : /\.gif$/i.test(file.name)
+              ? 'image/gif'
+              : 'image/jpeg');
+        const readableImageFile = isImage && !file.type
+          ? new File([file], file.name, { type: inferredImageType, lastModified: file.lastModified })
+          : file;
+        const blob = isImage
+          ? await processImageToBlob(readableImageFile, { maxWidth: 2048, quality: 0.88 })
+          : file;
+        let extractedText: string | undefined;
+        let pageCount: number | undefined;
+        if (isImage) {
+          if (chatApi.visionApi?.enabled) {
+            try {
+              setUploadStatus(`正在识别 ${file.name}`);
+              const description = await describeImageWithVisionApi(
+                await collaborationBlobToDataUrl(blob),
+                chatApi.visionApi,
+              );
+              extractedText = `[参考图片视觉描述]\n${description}`;
+            } catch (error: any) {
+              notify(`${file.name} 的独立识图暂不可用，将交给当前协同模型直接看图：${error?.message || '识别失败'}`, 'info');
+            }
+          }
+        } else {
+          const extracted = await extractSourceFile(file, setUploadStatus);
+          extractedText = extracted.text;
+          pageCount = extracted.pageCount;
+        }
         const attachment: CollaborationAttachment = {
           id: collaborationId('attachment'),
           assetId: collaborationId('asset'),
           kind: 'source',
           name: file.name,
-          mimeType: file.type || 'application/octet-stream',
-          size: file.size,
+          mimeType: blob.type || file.type || 'application/octet-stream',
+          size: blob.size,
           createdAt: Date.now(),
-          extractedText: extracted.text,
-          pageCount: extracted.pageCount,
+          extractedText,
+          pageCount,
         };
-        setPendingAttachments(previous => [...previous, { attachment, blob: file }]);
+        setPendingAttachments(previous => [...previous, { attachment, blob }]);
         acceptedCount += 1;
       } catch (error: any) {
         notify(`${file.name}：${error?.message || '读取失败'}`, 'error');
@@ -1952,87 +2078,73 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     })));
   };
 
-  const send = async () => {
-    if (!activeSession || isGenerating || uploadStatus) return;
-    const content = draft.trim();
-    if (!content && pendingAttachments.length === 0) return;
-    const profile = settings[activeSession.mode];
+  const generateCollaborationReply = async (
+    sessionAtStart: CollaborationSession,
+    requestMessages: CollaborationMessage[],
+    latestUserMessage: CollaborationMessage,
+  ) => {
+    const profile = settings[sessionAtStart.mode];
     if (!isCollaborationApiConfigured(profile)) {
       setSettingsOpen(true);
-      notify(`请先配置${MODE_LABELS[activeSession.mode]}使用的 API`, 'info');
+      notify(`请先配置${MODE_LABELS[sessionAtStart.mode]}使用的 API`, 'info');
       return;
     }
-
-    const now = Date.now();
-    const userMessage: CollaborationMessage = {
-      id: collaborationId('message'),
-      sessionId: activeSession.id,
-      role: 'user',
-      content,
-      createdAt: now,
-      attachments: pendingAttachments.map(item => item.attachment),
-    };
-    await persistPendingAttachments();
-    await CollaborationStore.saveMessage(userMessage);
-    const nextMessages = [...messages, userMessage];
-    setMessages(nextMessages);
-    setDraft('');
-    setPendingAttachments([]);
-
-    const taskText = [content, ...userMessage.attachments!.map(attachment => attachment.extractedText || '')].join('\n').slice(0, 80_000);
-    let contextSnapshot = activeSession.contextSnapshot || '';
-    let chatContextSnapshot = activeSession.chatContextSnapshot;
-    if (activeSession.mode === 'immersive' && (!contextSnapshot || !chatContextSnapshot?.length)) {
-      const immersiveSnapshot = await buildImmersiveChatContextSnapshot({
-        char: character,
-        user,
-        groups,
-        emojis,
-        categories: emojiCategories,
-        recentChatMessages,
-        realtimeConfig,
-      });
-      contextSnapshot = immersiveSnapshot.contextSnapshot;
-      chatContextSnapshot = immersiveSnapshot.chatContextSnapshot;
-    } else if (!contextSnapshot) {
-      contextSnapshot = await buildCollaborationContextSnapshot({
-        char: character,
-        user,
-        mode: activeSession.mode,
-        taskText,
-        emojis,
-        categories: emojiCategories,
-      });
-    }
-    const turnMemoryContext = await buildCollaborationTurnMemoryContext({
-      char: character,
-      user,
-      mode: activeSession.mode,
-      messages: nextMessages,
-      taskText,
-    });
-    const nextTitle = activeSession.title === '新的协同'
-      ? shortPreview(content || userMessage.attachments?.[0]?.name || '新的协同', 28)
-      : activeSession.title;
-    const startedSession = {
-      ...activeSession,
-      title: nextTitle,
-      contextSnapshot,
-      chatContextSnapshot,
-      updatedAt: now,
-      lastMessagePreview: shortPreview(content || `上传了 ${userMessage.attachments?.length || 0} 个文件`),
-    };
-    await updateSession(startedSession);
 
     const abortController = new AbortController();
     abortRef.current = abortController;
     setIsGenerating(true);
     setStreamingText('');
+    const taskText = collaborationMessageTaskText(latestUserMessage);
+    let startedSession = sessionAtStart;
     try {
+      let contextSnapshot = sessionAtStart.contextSnapshot || '';
+      let chatContextSnapshot = sessionAtStart.chatContextSnapshot;
+      if (sessionAtStart.mode === 'immersive' && (!contextSnapshot || !chatContextSnapshot?.length)) {
+        const immersiveSnapshot = await buildImmersiveChatContextSnapshot({
+          char: character,
+          user,
+          groups,
+          emojis,
+          categories: emojiCategories,
+          recentChatMessages,
+          realtimeConfig,
+        });
+        contextSnapshot = immersiveSnapshot.contextSnapshot;
+        chatContextSnapshot = immersiveSnapshot.chatContextSnapshot;
+      } else if (!contextSnapshot) {
+        contextSnapshot = await buildCollaborationContextSnapshot({
+          char: character,
+          user,
+          mode: sessionAtStart.mode,
+          taskText,
+          emojis,
+          categories: emojiCategories,
+        });
+      }
+      const turnMemoryContext = await buildCollaborationTurnMemoryContext({
+        char: character,
+        user,
+        mode: sessionAtStart.mode,
+        messages: requestMessages,
+        taskText,
+      });
+      const nextTitle = sessionAtStart.title === '新的协同'
+        ? shortPreview(latestUserMessage.content || latestUserMessage.attachments?.[0]?.name || '新的协同', 28)
+        : sessionAtStart.title;
+      startedSession = {
+        ...sessionAtStart,
+        title: nextTitle,
+        contextSnapshot,
+        chatContextSnapshot,
+        updatedAt: Date.now(),
+        lastMessagePreview: collaborationMessagePreview(latestUserMessage),
+      };
+      await updateSession(startedSession);
+
       const reply = await runCollaborationTurn({
         profile,
         contextSnapshot,
-        messages: nextMessages,
+        messages: requestMessages,
         signal: abortController.signal,
         onDelta: setStreamingText,
         makerKind: startedSession.makerKind,
@@ -2064,7 +2176,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
       }
       const assistantMessage: CollaborationMessage = {
         id: collaborationId('message'),
-        sessionId: activeSession.id,
+        sessionId: sessionAtStart.id,
         role: 'assistant',
         content: visibleReply || (generatedAttachments.length ? '我做好了，作品放在这里。' : sanitizeCollaborationRichOutputSource(normalizeCollaborationVisibleText(reply.content))),
         thinkingChain: reply.thinkingChain,
@@ -2072,33 +2184,137 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
         attachments: generatedAttachments,
       };
       await CollaborationStore.saveMessage(assistantMessage);
-      setMessages(previous => [...previous, assistantMessage]);
-      const assistantRichPreview = parseCollaborationRichOutput(assistantMessage.content);
-      const richPreviewLabel = assistantRichPreview.text
-        || (assistantRichPreview.voice ? '[语音]' : '')
-        || (assistantRichPreview.emojiNames.length > 0 ? `[表情包：${assistantRichPreview.emojiNames[0]}]` : '');
+      setMessages([...requestMessages, assistantMessage]);
       await updateSession({
         ...startedSession,
         updatedAt: assistantMessage.createdAt,
-        lastMessagePreview: shortPreview(richPreviewLabel || generatedAttachments[0]?.name || '已完成'),
+        lastMessagePreview: collaborationMessagePreview(assistantMessage),
       });
+      if (libraryOpen) void refreshLibrary();
     } catch (error: any) {
       const stopped = abortController.signal.aborted || /abort/i.test(error?.message || '');
       const systemMessage: CollaborationMessage = {
         id: collaborationId('message'),
-        sessionId: activeSession.id,
+        sessionId: sessionAtStart.id,
         role: 'system',
         content: stopped ? '已停止这次生成。' : `这次没有完成：${error?.message || 'API 请求失败'}`,
         createdAt: Date.now(),
       };
       await CollaborationStore.saveMessage(systemMessage);
-      setMessages(previous => [...previous, systemMessage]);
+      setMessages([...requestMessages, systemMessage]);
+      await updateSession({
+        ...startedSession,
+        updatedAt: systemMessage.createdAt,
+        lastMessagePreview: collaborationMessagePreview(systemMessage),
+      });
       if (!stopped) notify(error?.message || '协同请求失败', 'error');
     } finally {
       if (abortRef.current === abortController) abortRef.current = null;
       setIsGenerating(false);
       setStreamingText('');
     }
+  };
+
+  const send = async () => {
+    if (!activeSession || isGenerating || uploadStatus) return;
+    const content = draft.trim();
+    if (!content && pendingAttachments.length === 0) return;
+    const profile = settings[activeSession.mode];
+    if (!isCollaborationApiConfigured(profile)) {
+      setSettingsOpen(true);
+      notify(`请先配置${MODE_LABELS[activeSession.mode]}使用的 API`, 'info');
+      return;
+    }
+
+    const now = Date.now();
+    const userMessage: CollaborationMessage = {
+      id: collaborationId('message'),
+      sessionId: activeSession.id,
+      role: 'user',
+      content,
+      ...(requestedOutputFormat ? { requestedFormat: requestedOutputFormat } : {}),
+      createdAt: now,
+      attachments: pendingAttachments.map(item => item.attachment),
+    };
+    await persistPendingAttachments();
+    await CollaborationStore.saveMessage(userMessage);
+    const nextMessages = [...messages, userMessage];
+    setMessages(nextMessages);
+    setDraft('');
+    setPendingAttachments([]);
+    setRequestedOutputFormat(null);
+
+    await generateCollaborationReply(activeSession, nextMessages, userMessage);
+  };
+
+  const rerollLatestReply = async () => {
+    if (!activeSession || isGenerating || uploadStatus) return;
+    let lastUserIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === 'user') {
+        lastUserIndex = index;
+        break;
+      }
+    }
+    if (lastUserIndex < 0) {
+      notify('还没有可以重新生成的用户消息', 'info');
+      return;
+    }
+    const profile = settings[activeSession.mode];
+    if (!isCollaborationApiConfigured(profile)) {
+      setSettingsOpen(true);
+      notify(`请先配置${MODE_LABELS[activeSession.mode]}使用的 API`, 'info');
+      return;
+    }
+    const requestMessages = messages.slice(0, lastUserIndex + 1);
+    const latestUserMessage = requestMessages[lastUserIndex];
+    const replacedMessages = messages.slice(lastUserIndex + 1);
+    await CollaborationStore.deleteMessages(replacedMessages.map(message => message.id));
+    setMessages(requestMessages);
+    trackEvent('重新生成协同回复', {
+      上次结果: replacedMessages.some(message => message.role === 'assistant') ? '已完成' : replacedMessages.length > 0 ? '失败或停止' : '无回复',
+    });
+    await generateCollaborationReply(activeSession, requestMessages, latestUserMessage);
+  };
+
+  const deleteMessage = async (message: CollaborationMessage) => {
+    if (!activeSession || isGenerating) {
+      if (isGenerating) notify('请先停止这次生成，再删除消息', 'info');
+      return;
+    }
+    const messageIndex = messages.findIndex(item => item.id === message.id);
+    if (messageIndex < 0) return;
+    let deleteEnd = messageIndex + 1;
+    if (message.role === 'user') {
+      while (deleteEnd < messages.length && messages[deleteEnd].role !== 'user') deleteEnd += 1;
+    }
+    const rowsToDelete = messages.slice(messageIndex, deleteEnd);
+    const choice = await requestActionDialog({
+      title: message.role === 'user' ? '删除这一轮协同？' : message.role === 'assistant' ? '删除这条回复？' : '删除这条提示？',
+      description: message.role === 'user'
+        ? `这条用户消息和 ${character.name} 紧随其后的回复会一起删除。`
+        : '只会删除你刚刚长按的这一条内容。',
+      detail: rowsToDelete.some(row => (row.attachments || []).length > 0)
+        ? '消息中的文件会从协同文件柜列表移除；已经发到 ChatApp 的附件仍可打开。此操作不可撤销。'
+        : '删除后不会影响其它协同窗口，也不会改动普通聊天与角色记忆。此操作不可撤销。',
+      confirmLabel: message.role === 'user' ? '永久删除这一轮' : '永久删除这条内容',
+      cancelLabel: '保留内容',
+      tone: 'danger',
+    });
+    if (choice !== 'confirm') return;
+    await CollaborationStore.deleteMessages(rowsToDelete.map(row => row.id));
+    const deletedIds = new Set(rowsToDelete.map(row => row.id));
+    const remainingMessages = messages.filter(row => !deletedIds.has(row.id));
+    setMessages(remainingMessages);
+    const lastMessage = remainingMessages[remainingMessages.length - 1];
+    await updateSession({
+      ...activeSession,
+      updatedAt: Date.now(),
+      lastMessagePreview: collaborationMessagePreview(lastMessage),
+    });
+    if (libraryOpen) void refreshLibrary();
+    trackEvent('删除协同消息', { 范围: message.role === 'user' ? '整轮' : '单条' });
+    notify(message.role === 'user' ? '这一轮协同已删除' : '这条内容已删除', 'success');
   };
 
   const transferToChat = async () => {
@@ -2172,7 +2388,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
             <p className="collab-header-meta truncate text-[9px] text-slate-400">{activeSession ? `${character.name} · ${MODE_LABELS[activeSession.mode]}${activeSession.makerKind ? ` · ${COLLABORATION_MAKER_MAP[activeSession.makerKind].shortLabel}` : ''}` : showEntryChooser ? '新建或继续一项协同' : '选择协同模式'}</p>
           </div>
         </div>
-        <button type="button" onClick={transferToChat} disabled={!activeSession || messages.length === 0} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 disabled:opacity-25 active:bg-slate-100/80" aria-label="发送上下文到 ChatApp"><PaperPlaneRight size={20} /></button>
+        <button type="button" onClick={() => void rerollLatestReply()} disabled={!activeSession || isGenerating || !messages.some(message => message.role === 'user')} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 disabled:opacity-25 active:bg-slate-100/80" aria-label="重新生成上一条回复" title="重新生成上一条回复"><ArrowCounterClockwise size={20} /></button>
+        <button type="button" onClick={transferToChat} disabled={!activeSession || messages.length === 0} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 disabled:opacity-25 active:bg-slate-100/80" aria-label="发送上下文到 ChatApp" title="发送上下文到 ChatApp"><PaperPlaneRight size={20} /></button>
         <button type="button" onClick={() => { setLibraryOpen(true); trackEvent('打开协同文件库'); }} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 active:bg-slate-100/80" aria-label="协同文件库"><Folder size={20} /></button>
         <button type="button" onClick={() => setSettingsOpen(true)} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 active:bg-slate-100/80" aria-label="协同设置"><GearSix size={20} /></button>
       </header>
@@ -2225,6 +2442,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
                 }}
                 onPlayVoice={playCollaborationVoice}
                 onOpenAttachment={openAttachment}
+                onLongPress={deleteMessage}
               />
             ))}
             {isGenerating && (
@@ -2244,6 +2462,16 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
           <div className="collab-ui-composer relative z-20 shrink-0 border-t border-white/70 bg-white/82 px-3 pb-[max(.75rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl">
             <div className="collab-composer-tools mb-2 flex items-center gap-2 overflow-x-auto no-scrollbar">
               <button type="button" onClick={() => setMakerOpen(true)} disabled={isGenerating} className="collab-primary-action flex shrink-0 items-center gap-1.5 rounded-full bg-slate-900 px-3 py-1.5 text-[10px] font-semibold text-white disabled:opacity-40"><Plus size={12} weight="bold" />制作</button>
+              <select
+                value={requestedOutputFormat || ''}
+                onChange={event => setRequestedOutputFormat((event.target.value || null) as CollaborationArtifactFormat | null)}
+                disabled={isGenerating}
+                aria-label="选择文件交付格式"
+                title="支持 Word、PDF、Markdown、纯文本、HTML 和 JSON"
+                className="h-7 shrink-0 rounded-full border-0 bg-slate-100 px-3 text-[10px] font-medium text-slate-600 outline-none disabled:opacity-40"
+              >
+                {OUTPUT_FORMAT_OPTIONS.map(option => <option key={option.value || 'auto'} value={option.value}>{option.label}</option>)}
+              </select>
               {COLLABORATION_MAKERS.slice(0, 5).map(maker => (
                 <button key={maker.kind} type="button" onClick={() => void chooseMaker(maker.kind)} disabled={isGenerating} className={`shrink-0 rounded-full px-3 py-1.5 text-[10px] font-medium transition-colors disabled:opacity-40 ${activeSession.makerKind === maker.kind ? 'collab-accent-chip bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'}`}>{maker.shortLabel}</button>
               ))}
@@ -2252,7 +2480,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
               <div className="mb-2 flex gap-2 overflow-x-auto no-scrollbar">
                 {pendingAttachments.map(item => (
                   <div key={item.attachment.id} className="flex max-w-[220px] shrink-0 items-center gap-2 rounded-xl bg-slate-100 px-3 py-2">
-                    <FileText size={16} className="shrink-0 text-indigo-500" />
+                    {/^image\//i.test(item.attachment.mimeType) ? <ImageSquare size={16} className="shrink-0 text-sky-500" /> : <FileText size={16} className="shrink-0 text-indigo-500" />}
                     <span className="truncate text-[10px] text-slate-600">{item.attachment.name}</span>
                     <button type="button" onClick={() => setPendingAttachments(previous => previous.filter(pending => pending.attachment.id !== item.attachment.id))} className="text-slate-400"><X size={13} /></button>
                   </div>
@@ -2261,8 +2489,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
               </div>
             )}
             <div className="collab-composer-field flex items-end gap-2 rounded-[24px] border border-slate-200/90 bg-white px-2 py-2 shadow-[0_8px_30px_rgba(15,23,42,.08)]">
-              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isGenerating || !!uploadStatus} className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-slate-500 active:bg-slate-100 disabled:opacity-40" aria-label="上传文件"><FileArrowUp size={21} /></button>
-              <input ref={fileInputRef} type="file" multiple accept=".pdf,.docx,.doc,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml" className="hidden" onChange={event => void handleFiles(event.target.files)} />
+              <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isGenerating || !!uploadStatus} className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-slate-500 active:bg-slate-100 disabled:opacity-40" aria-label="上传文件或参考图片" title="支持图片、PDF、Word 与文本资料"><FileArrowUp size={21} /></button>
+              <input ref={fileInputRef} type="file" multiple accept="image/png,image/jpeg,image/webp,image/gif,.pdf,.docx,.doc,.txt,.md,.markdown,.json,.csv,.tsv,.html,.htm,.xml,.yaml,.yml" className="hidden" onChange={event => void handleFiles(event.target.files)} />
               <textarea
                 value={draft}
                 onChange={event => setDraft(event.target.value)}

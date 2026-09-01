@@ -23,6 +23,7 @@ import {
     buildTheaterWorldbookSlots,
     compileStoryPreset,
     prepareStoryGenerationSettings,
+    reconcileStoryAffinityScores,
     dedupeTheaterWorldbooks,
     describeEmptyStoryCompletion,
     describeStoryApiError,
@@ -749,7 +750,17 @@ const StoryTheaterSession: React.FC<Props> = ({ entry, preset, masks, onBack, on
                 setContextTokensExact(true);
             });
             const prefill = compiled.assistantPrefill?.content || '';
-            const content = prefill && !generated.startsWith(prefill) ? `${prefill}${generated}` : generated;
+            const rawContent = prefill && !generated.startsWith(prefill) ? `${prefill}${generated}` : generated;
+            // 关系绝对值要承接最近一轮，即使那轮刚被折叠进事件盒，也不能回退到 50。
+            const previousAssistantContent = [...history].reverse().find(message => message.role === 'assistant')?.content || '';
+            const content = affinityEnabled
+                ? reconcileStoryAffinityScores(
+                    rawContent,
+                    previousAssistantContent,
+                    affinityInputs,
+                    actors.map(actor => ({ id: actor.id, name: actor.name })),
+                )
+                : rawContent;
             if (isReroll && rerollTarget) {
                 const mirrorIds = Object.values((rerollTarget.metadata?.theaterMirrorIds || {}) as Record<string, number>).map(Number).filter(Boolean);
                 await DB.deleteMessages([rerollTarget.id, ...mirrorIds]);

@@ -35,6 +35,7 @@ import VersionInfo from '../components/settings/VersionInfo';
 import { isPushVapidReady } from '../utils/pushVapid';
 import ApiCallLogModal from '../components/settings/ApiCallLogModal';
 import StorageUsagePanel from '../components/settings/StorageUsagePanel';
+import McpConnectionConsole from '../components/settings/McpConnectionConsole';
 import { DB } from '../utils/db';
 import { getBackupReminderState, setBackupReminderIntervalDays, daysSinceLastBackup, BACKUP_REMINDER_MIN_DAYS, BACKUP_REMINDER_MAX_DAYS } from '../utils/backupReminder';
 import {
@@ -196,7 +197,7 @@ const flushMcpToolConfigSync = () => {
 };
 
 /**
- * 通用 MCP 工具服务器管理卡片（对标麦当劳/瑞幸卡片的样式，但服务器是用户自配的列表）。
+ * 旧版通用 MCP 管理卡片。保留一小段迁移期，实际入口已切到新版 MCP 管理面板。
  * 配置存 localStorage（utils/mcpClient），启用且发现过工具的服务器会在聊天里
  * 以 function-calling 注入，详见 docs/mcp-client.md。
  */
@@ -3131,12 +3132,12 @@ const Settings: React.FC = () => {
             </div>
         </SettingsSection>
 
-        {/* MCP 工具服务器（高级玩法）—— 通用外接工具，独立于实时感知 */}
+        {/* 通用 MCP，独立于实时感知 */}
         <SettingsSection
-            title="MCP 工具服务器"
-            badge={<span className="text-[9px] bg-violet-100 text-violet-600 px-1.5 py-0.5 rounded-full font-bold shrink-0">高级玩法</span>}
+            title="MCP"
+            badge={<span className="text-[9px] bg-violet-100 text-violet-600 px-1.5 py-0.5 rounded-full font-bold shrink-0">本机配置</span>}
             icon={
-                <div className="p-2 bg-violet-100/50 rounded-xl text-violet-600">
+                <div className="p-2 bg-violet-100/60 rounded-xl text-violet-600">
                     <PlugsConnected size={16} weight="fill" />
                 </div>
             }
@@ -3148,17 +3149,16 @@ const Settings: React.FC = () => {
                         className="w-7 h-7 rounded-full border border-slate-200 bg-white text-[12px] font-bold text-slate-400 active:scale-90 transition-all"
                     >?</button>
                     <button onClick={() => { trackEvent('打开MCP工具服务器配置'); setShowMcpModal(true); }} className="text-[10px] bg-violet-100 text-violet-600 px-3 py-1.5 rounded-full font-bold shadow-sm active:scale-95 transition-transform">
-                        配置
+                        管理
                     </button>
                 </>
             }
         >
             <p className="text-xs text-slate-500 leading-relaxed">
-                给角色外接任意标准 MCP 工具服务器：记忆库、联网搜索、笔记、智能家居……接上什么，角色就多什么本事。
+                连接标准 MCP 服务器，让聊天可以调用资料库、搜索、笔记或智能家居等工具。
             </p>
-            <p className="text-[10px] text-amber-600 mt-2 leading-relaxed bg-amber-50/80 border border-amber-100 rounded-lg px-2 py-1.5">
-                💡 这个板块推荐<b>本身就在用 MCP</b> 的玩家：你需要自己准备并维护工具服务器。
-                完全没听说过 MCP 的话，跳过这里不影响任何其他功能；真想入坑就先点「?」看说明。
+            <p className="text-[10px] text-slate-400 mt-2 leading-relaxed border-l-2 border-violet-200 pl-2">
+                需要自行准备 Streamable HTTP 服务；不配置不会影响内置 Sully、记忆或普通聊天。
             </p>
             {(() => {
                 const list = loadMcpServers();
@@ -4588,10 +4588,10 @@ const Settings: React.FC = () => {
           </div>
       </Modal>
 
-      {/* MCP 工具服务器配置 Modal（高级玩法, 从实时感知里独立出来） */}
-      <Modal isOpen={showMcpModal} title="MCP 工具服务器" onClose={() => { setShowMcpModal(false); flushMcpToolConfigSync(); }}>
+      {/* 通用 MCP 管理（从实时感知里独立出来） */}
+      <Modal isOpen={showMcpModal} title="MCP" onClose={() => { setShowMcpModal(false); flushMcpToolConfigSync(); }}>
           <div className="space-y-4">
-              <McpServersCard addToast={addToast} onMcpConfigChanged={() => {
+              <McpConnectionConsole addToast={addToast} onMcpConfigChanged={() => {
                   // MCP 配置变更只需重传 tool_config：提示词块与 tools 数组由 worker 在 fire 时
                   // 从 tool_config 现场生成（见 mcpFireCore），不经过 fire_pack，没有陈旧问题，
                   // 所以不用像实时感知那样连提示词一起刷（syncAmsgToolConfigAndPrompts）。
@@ -4602,23 +4602,21 @@ const Settings: React.FC = () => {
           </div>
       </Modal>
 
-      {/* MCP 帮助 Modal —— 面向完全不懂 MCP 的用户, 讲清"是什么/为什么要自备服务器/三条路" */}
+      {/* MCP 帮助 Modal —— 面向完全不懂 MCP 的用户，讲清用途与部署方式 */}
       <Modal isOpen={showMcpHelp} title="MCP 是什么？" onClose={() => setShowMcpHelp(false)}>
           <div className="space-y-3 text-xs text-slate-600 leading-relaxed">
               <div className="bg-violet-50/60 rounded-xl p-3 space-y-1.5">
-                  <p className="font-bold text-violet-700">🔌 给 AI 用的通用工具接口</p>
+                  <p className="font-bold text-violet-700">MCP 工具服务器</p>
                   <p>
-                      MCP（Model Context Protocol）是一套开放协议，相当于给角色开了个「外接技能插槽」：
-                      任何按这个标准做的工具服务器——记忆库、联网搜索、笔记、智能家居——插上就能用，
-                      角色会在聊天里自己决定什么时候调用。
+                      MCP（Model Context Protocol）是一套开放协议。接上资料库、联网搜索、笔记或智能家居后，
+                      Sully 可以在聊天中调用它们。MCP 配置不会覆盖角色设定、关系或记忆。
                   </p>
               </div>
               <div className="bg-sky-50/60 rounded-xl p-3 space-y-1.5">
                   <p className="font-bold text-sky-700">🏠 为什么服务器要自己准备？</p>
                   <p>
-                      本应用是<b>纯静态网页</b>——没有自己的后端服务器，所有请求都由你的浏览器直接发出，
-                      数据也全存在你本机。好处是隐私和自由都在你手里；代价是工具服务器没人替你跑，
-                      需要你自己准备，三选一：
+                      SullyOS 的核心前端可以静态部署，也没有强制所有 MCP 流量经过项目方的中央代理。
+                      URL 和凭据默认留在本机，工具服务器需要你自己准备，三选一：
                   </p>
                   <p>
                       ☁️ <b>用现成的云端 MCP 服务</b>：对方给你一个公网 https 地址（可能还有 Token），直接填进配置即可。<br/>

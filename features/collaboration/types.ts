@@ -53,6 +53,8 @@ export interface CollaborationMessage {
   sessionId: string;
   role: CollaborationMessageRole;
   content: string;
+  /** 用户为这一轮显式选择的文件交付格式；不混进可见气泡正文。 */
+  requestedFormat?: CollaborationArtifactFormat;
   /** Native reasoning_content / inline <think>, kept separate from the deliverable. */
   thinkingChain?: string;
   createdAt: number;

@@ -14,7 +14,7 @@ export const BUILD_LABEL = `${__BUILD_BRANCH__}@${__BUILD_COMMIT__}`;
 export const BUILD_TIME_LABEL = __BUILD_TIME__;
 
 /** 设置页底部的产品版本名（手工维护），跟构建 hash 是两码事——发版前改这里。 */
-export const APP_VERSION = 'v3.8 (Slimdown)';
+export const APP_VERSION = 'v3.9 (MCP)';
 
 /**
  * 版本号那半截（`v3.0`）。统计给每条记录打的标签用它，面板里按版本切分数据时

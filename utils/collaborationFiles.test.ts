@@ -1,8 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import JSZip from 'jszip';
-import { assembleImagePdf, createDocxBlob, parseArtifactBlocks } from '../features/collaboration/files';
+import { assembleImagePdf, createDocxBlob, isCollaborationImageFile, parseArtifactBlocks } from '../features/collaboration/files';
 
 describe('collaboration artifact files', () => {
+  it('accepts common reference-image MIME types and extension-only mobile files', () => {
+    expect(isCollaborationImageFile({ name: '参考图.png', type: 'image/png' } as File)).toBe(true);
+    expect(isCollaborationImageFile({ name: '鸿蒙相册.JPG', type: '' } as File)).toBe(true);
+    expect(isCollaborationImageFile({ name: '论文.pdf', type: 'application/pdf' } as File)).toBe(false);
+  });
+
   it('parses the resilient header-based artifact protocol', () => {
     const parsed = parseArtifactBlocks(`我整理好了。\n\n\`\`\`artifact\ntitle: 项目提案
 format: docx

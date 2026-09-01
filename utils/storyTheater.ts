@@ -750,6 +750,101 @@ export const appendStoryAffinityInputs = (content: string, inputs: StoryAffinity
     return `${content}\n\n<u_affinity_updates>\n${rows.join('\n')}\n</u_affinity_updates>`;
 };
 
+interface StoryAffinityScoreState {
+    cToU: number;
+    uToC: number;
+}
+
+const affinityTagValue = (source: string, tag: string): string => (
+    new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}\\s*>`, 'i').exec(source)?.[1]?.replace(/<[^>]+>/g, '').trim() || ''
+);
+
+const affinityInteger = (value: unknown, fallback: number): number => {
+    const parsed = Number(String(value ?? '').replace(/[^+\d.-]/g, ''));
+    return Number.isFinite(parsed) ? Math.round(parsed) : fallback;
+};
+
+const clampAffinityScore = (value: number): number => Math.max(0, Math.min(100, Math.round(value)));
+const clampAffinityDelta = (value: number): number => Math.max(-100, Math.min(100, Math.round(value)));
+const affinityIdentityKey = (value: string): string => value.trim().toLocaleLowerCase().normalize('NFKC');
+
+const setAffinityTagValue = (source: string, tag: string, value: string): string => {
+    const pattern = new RegExp(`(<${tag}\\b[^>]*>)[\\s\\S]*?(<\\/${tag}\\s*>)`, 'i');
+    if (pattern.test(source)) return source.replace(pattern, `$1${value}$2`);
+    return `${source.trimEnd()}\n<${tag}>${value}</${tag}>`;
+};
+
+const readAffinityScoreStates = (
+    content: string,
+    actors: Array<{ id: string; name: string }>,
+): Map<string, StoryAffinityScoreState> => {
+    const states = new Map<string, StoryAffinityScoreState>();
+    const personPattern = /<affinity_person\b[^>]*>([\s\S]*?)<\/affinity_person\s*>/gi;
+    for (const match of content.matchAll(personPattern)) {
+        const body = match[1];
+        const state = {
+            cToU: clampAffinityScore(affinityInteger(affinityTagValue(body, 'c_to_u_score'), 50)),
+            uToC: clampAffinityScore(affinityInteger(affinityTagValue(body, 'u_to_c_score'), 50)),
+        };
+        const id = affinityIdentityKey(affinityTagValue(body, 'character_id'));
+        const name = affinityIdentityKey(affinityTagValue(body, 'character_name'));
+        if (id) states.set(`id:${id}`, state);
+        if (name) states.set(`name:${name}`, state);
+    }
+    // 兼容升级前的单角色根级面板；多人时绝不猜这一个旧槽属于谁。
+    if (states.size === 0 && actors.length === 1) {
+        const cScore = affinityTagValue(content, 'c_score');
+        const uScore = affinityTagValue(content, 'u_score');
+        if (cScore || uScore) {
+            const state = {
+                cToU: clampAffinityScore(affinityInteger(cScore, 50)),
+                uToC: clampAffinityScore(affinityInteger(uScore, 50)),
+            };
+            states.set(`id:${affinityIdentityKey(actors[0].id)}`, state);
+            states.set(`name:${affinityIdentityKey(actors[0].name)}`, state);
+        }
+    }
+    return states;
+};
+
+/**
+ * 模型只决定“本轮变化多少”，绝对值由前端按上一轮 + delta 复算。
+ * 这样 U→C 的用户输入与 C→U 的模型变化都不会再依赖 LLM 心算。
+ */
+export const reconcileStoryAffinityScores = (
+    generated: string,
+    previousAssistantContent: string,
+    inputs: StoryAffinityInput[],
+    actors: Array<{ id: string; name: string }>,
+): string => {
+    const previous = readAffinityScoreStates(previousAssistantContent, actors);
+    const actorById = new Map(actors.map(actor => [affinityIdentityKey(actor.id), actor]));
+    const actorByName = new Map(actors.map(actor => [affinityIdentityKey(actor.name), actor]));
+    const inputById = new Map(inputs.filter(input => input.characterId).map(input => [affinityIdentityKey(input.characterId || ''), input]));
+    const inputByName = new Map(inputs.filter(input => input.characterName).map(input => [affinityIdentityKey(input.characterName || ''), input]));
+    const personPattern = /(<affinity_person\b[^>]*>)([\s\S]*?)(<\/affinity_person\s*>)/gi;
+
+    return generated.replace(personPattern, (_whole, opening: string, rawBody: string, closing: string) => {
+        const rawId = affinityIdentityKey(affinityTagValue(rawBody, 'character_id'));
+        const rawName = affinityIdentityKey(affinityTagValue(rawBody, 'character_name'));
+        const actor = actorById.get(rawId) || actorByName.get(rawName);
+        const id = affinityIdentityKey(actor?.id || rawId);
+        const name = affinityIdentityKey(actor?.name || rawName);
+        const prior = previous.get(`id:${id}`) || previous.get(`name:${name}`) || { cToU: 50, uToC: 50 };
+        const input = inputById.get(id) || inputByName.get(name);
+        const cDelta = clampAffinityDelta(affinityInteger(affinityTagValue(rawBody, 'c_to_u_delta'), 0));
+        const uDelta = clampAffinityDelta(input?.delta == null ? 0 : affinityInteger(input.delta, 0));
+        const cScore = clampAffinityScore(prior.cToU + cDelta);
+        const uScore = clampAffinityScore(prior.uToC + uDelta);
+        let body = rawBody;
+        body = setAffinityTagValue(body, 'c_to_u_score', String(cScore));
+        body = setAffinityTagValue(body, 'c_to_u_delta', cDelta >= 0 ? `+${cDelta}` : String(cDelta));
+        body = setAffinityTagValue(body, 'u_to_c_score', String(uScore));
+        body = setAffinityTagValue(body, 'u_to_c_delta', uDelta >= 0 ? `+${uDelta}` : String(uDelta));
+        return `${opening}${body}${closing}`;
+    });
+};
+
 export const buildStoryMultiAffinityGuide = (characters: Array<{ id: string; name: string }>): string => {
     if (characters.length === 0) return '';
     const cast = characters.map(character => `- ${character.id}：${character.name}`).join('\n');
@@ -764,6 +859,7 @@ export const buildStoryMultiAffinityGuide = (characters: Array<{ id: string; nam
         '- C→U 与 trust、security、possessive_pull、emotional_pressure、repair_will 只读取对应角色的亲历事实、性格、处境与后果；不得用某个角色的变化影响另一位角色。',
         '- 最新 <u_affinity_updates> 只出现本轮由用户填写变化的角色。某角色没有对应更新时，其 U→C 绝对值保持不变，delta 记 +0，原因写“本轮未填写”。',
         '- U→C 新值 = 该角色上一轮 U→C + 对应 delta，并限制在 0—100。不得用某个角色的变化影响另一位角色。',
+        '- 你只需正确决定每个 delta；前端会依据上一轮绝对值复算 C→U 与 U→C score，防止心算错误。',
         '- 察觉规则只作用于同一条 u_affinity 指向的角色；其他角色不会因为同伴被选择为“已察觉”而共享透视。',
         '',
         '【输出】',

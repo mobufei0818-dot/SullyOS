@@ -19,6 +19,20 @@ export interface ExtractedSourceFile {
   pageCount?: number;
 }
 
+export const isCollaborationImageFile = (file: Pick<File, 'name' | 'type'>): boolean => (
+  /^image\/(?:png|jpe?g|webp|gif)$/i.test(file.type)
+  || /\.(?:png|jpe?g|webp|gif)$/i.test(file.name)
+);
+
+export const collaborationBlobToDataUrl = (blob: Blob): Promise<string> => new Promise((resolve, reject) => {
+  const reader = new FileReader();
+  reader.onload = () => typeof reader.result === 'string'
+    ? resolve(reader.result)
+    : reject(new Error('图片读取失败'));
+  reader.onerror = () => reject(reader.error || new Error('图片读取失败'));
+  reader.readAsDataURL(blob);
+});
+
 const clampExtractedText = (text: string): string => {
   const trimmed = text.trim();
   if (trimmed.length <= MAX_EXTRACTED_CHARS) return trimmed;
@@ -55,7 +69,12 @@ export const extractSourceFile = async (
     if (!result.text.trim()) {
       throw new Error('这个 PDF 没有可提取的文字；扫描版 PDF 暂时需要先做 OCR');
     }
-    return { text: clampExtractedText(result.text), pageCount: result.pageCount };
+    const clamped = clampExtractedText(result.text);
+    const complete = !clamped.includes('[文件内容过长，协同工作仅读取了前');
+    const coverage = complete
+      ? `[PDF 全文已提取：共 ${result.pageCount} 页，已读取 ${result.extractedPages} 页]`
+      : `[PDF 已提取 ${result.extractedPages}/${result.pageCount} 页；正文超过字符上限，以下内容已标注截断]`;
+    return { text: `${coverage}\n\n${clamped}`, pageCount: result.pageCount };
   }
   if (/\.docx$/i.test(file.name)) {
     onProgress?.(`正在读取 ${file.name}`);
@@ -70,7 +89,7 @@ export const extractSourceFile = async (
     onProgress?.(`正在读取 ${file.name}`);
     return { text: clampExtractedText(await file.text()) };
   }
-  throw new Error('暂时支持 PDF、DOCX、TXT、Markdown、JSON、CSV 和 HTML 文件');
+  throw new Error('暂时支持常见图片、PDF、DOCX、TXT、Markdown、JSON、CSV 和 HTML 文件');
 };
 
 const escapeXml = (value: string): string => value

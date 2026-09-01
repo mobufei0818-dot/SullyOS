@@ -1514,7 +1514,10 @@ export const runMcpFireTool = async (
   const started = Date.now();
   const result = await callMcpToolCore(
     // worker 侧 fetch 没有 CORS，直连用户配的地址，不经代理。
-    { url: hit.server.url, headers: (sid) => buildMcpDirectHeaders(hit.server, sid) },
+    {
+      url: hit.server.url,
+      headers: (sid, protocolVersion) => buildMcpDirectHeaders(hit.server, sid, protocolVersion),
+    },
     session,
     hit.toolName,
     args as Record<string, any>,
