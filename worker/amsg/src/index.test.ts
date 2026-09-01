@@ -12,6 +12,7 @@ import worker, {
   buildWorkerConfig, configureInstantErrorPush, inspectWorkerEnv,
   offloadOversizedPush, resolveVapidEmail, runFireCancelTool, runFireRenewTool,
   inspectPushDelivery,
+  OUTBOX_CLEANUP_INDEX_SQL, shouldRunHourlyOutboxCleanup,
   runFireScheduleTool, runMcpFireTool, splitSchemaMissing, classifySchemaProbeError,
 } from './index';
 import * as workerEntry from './index';
@@ -817,6 +818,21 @@ describe('VAPID 配置', () => {
     expect(resolveVapidEmail('')).toMatch(/^mailto:/);
     expect(resolveVapidEmail('  ')).toMatch(/^mailto:/);
     expect(resolveVapidEmail('mailto:a@b.c')).toBe('mailto:a@b.c');
+  });
+});
+
+describe('outbox 清理的 D1 免费额度保护', () => {
+  it('只在整点 Cron 清理；到点任务检查仍由每分钟 scheduled 正常执行', () => {
+    expect(shouldRunHourlyOutboxCleanup(Date.UTC(2026, 8, 2, 0, 0, 0))).toBe(true);
+    expect(shouldRunHourlyOutboxCleanup(Date.UTC(2026, 8, 2, 0, 1, 0))).toBe(false);
+    expect(shouldRunHourlyOutboxCleanup(Date.UTC(2026, 8, 2, 0, 59, 0))).toBe(false);
+    expect(shouldRunHourlyOutboxCleanup(Number.NaN)).toBe(false);
+  });
+
+  it('重新连接会为两条范围清理各建一个索引', () => {
+    expect(OUTBOX_CLEANUP_INDEX_SQL).toHaveLength(2);
+    expect(OUTBOX_CLEANUP_INDEX_SQL.join('\n')).toContain('message_outbox (acked_at)');
+    expect(OUTBOX_CLEANUP_INDEX_SQL.join('\n')).toContain('message_outbox (created_at)');
   });
 });
 

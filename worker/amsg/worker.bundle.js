@@ -14578,6 +14578,31 @@ ${FINAL_ROUND_NOTICE}`;
   }
 };
 var resolveVapidEmail = (raw) => raw?.trim() || "mailto:noreply@sullyos.app";
+var OUTBOX_CLEANUP_INDEX_SQL = [
+  `CREATE INDEX IF NOT EXISTS idx_outbox_acked_cleanup
+     ON message_outbox (acked_at)
+     WHERE acked_at IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_outbox_created_cleanup
+     ON message_outbox (created_at)`
+];
+var shouldRunHourlyOutboxCleanup = (scheduledTime) => {
+  if (!Number.isFinite(scheduledTime)) return false;
+  return new Date(scheduledTime).getUTCMinutes() === 0;
+};
+var activeScheduledTime = null;
+var createIndexedHourlyCleanupDb = (env) => {
+  const db = createD1Adapter(env.DB);
+  const initSchema = db.initSchema.bind(db);
+  const cleanupOutbox = db.cleanupOutbox.bind(db);
+  const cleanupThisTick = activeScheduledTime !== null && shouldRunHourlyOutboxCleanup(activeScheduledTime);
+  db.initSchema = async () => {
+    const result = await initSchema();
+    for (const sql of OUTBOX_CLEANUP_INDEX_SQL) await env.DB.prepare(sql).run();
+    return result;
+  };
+  db.cleanupOutbox = cleanupThisTick ? cleanupOutbox : async () => 0;
+  return db;
+};
 var buildWorkerConfig = (env) => {
   const vapid = {
     email: resolveVapidEmail(env.VAPID_EMAIL),
@@ -14590,7 +14615,8 @@ var buildWorkerConfig = (env) => {
   configureInstantErrorPush(env.DB && env.AMSG_MASTER_KEY ? { webpush, db: env.DB, masterKey: env.AMSG_MASTER_KEY } : null);
   configureRelationshipEngine(env.DB && env.AMSG_MASTER_KEY ? env : null);
   return {
-    // db 缺省时 factory 自动用 createD1Adapter(env.DB)
+    // 显式适配 D1：给 outbox 清理补索引，并把高成本清理从每分钟降到每小时。
+    db: createIndexedHourlyCleanupDb(env),
     masterKey: env.AMSG_MASTER_KEY,
     serverToken: env.AMSG_SERVER_TOKEN,
     vapid: effectiveVapid,
@@ -15019,11 +15045,18 @@ var src_default2 = {
     } catch (error) {
       console.warn("[relationship] tick failed", error);
     }
-    await upstream.scheduled(event, env);
+    const previousScheduledTime = activeScheduledTime;
+    activeScheduledTime = event.scheduledTime;
+    try {
+      await upstream.scheduled(event, env);
+    } finally {
+      activeScheduledTime = previousScheduledTime;
+    }
   }
 };
 export {
   InstantTickDO,
+  OUTBOX_CLEANUP_INDEX_SQL,
   amsgFireSettled,
   amsgHooks,
   amsgReasoningKey,
@@ -15041,5 +15074,6 @@ export {
   runFireRenewTool,
   runFireScheduleTool,
   runMcpFireTool,
+  shouldRunHourlyOutboxCleanup,
   splitSchemaMissing
 };

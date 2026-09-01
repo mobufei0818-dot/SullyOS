@@ -26,6 +26,7 @@
 
 import { DurableObject } from 'cloudflare:workers';
 import {
+  createD1Adapter,
   createSingleUserCloudflareWorker,
   createWebCryptoWebPush,
   decryptFromStorage,
@@ -2474,6 +2475,49 @@ export const amsgHooks = {
 export const resolveVapidEmail = (raw: string | undefined): string =>
   raw?.trim() || 'mailto:noreply@sullyos.app';
 
+/**
+ * outbox 是推送的可靠投递缓存，不是任务表：已确认消息留 7 天，未确认消息留 28 天。
+ * 上游默认每分钟 Cron 都全表清理一次；免费 D1 会因此把同一批行每天反复扫描 1440 次。
+ *
+ * 这里保留原来的保留期，只把清理降到每小时一次，并为两条范围删除补索引。任务到点
+ * 检查仍然每分钟跑，主动消息准时性不受影响。
+ */
+export const OUTBOX_CLEANUP_INDEX_SQL = [
+  `CREATE INDEX IF NOT EXISTS idx_outbox_acked_cleanup
+     ON message_outbox (acked_at)
+     WHERE acked_at IS NOT NULL`,
+  `CREATE INDEX IF NOT EXISTS idx_outbox_created_cleanup
+     ON message_outbox (created_at)`,
+] as const;
+
+export const shouldRunHourlyOutboxCleanup = (scheduledTime: number): boolean => {
+  if (!Number.isFinite(scheduledTime)) return false;
+  return new Date(scheduledTime).getUTCMinutes() === 0;
+};
+
+// scheduled() 把本次 Cron 的名义时刻放进来；buildWorkerConfig 当场捕获成 boolean，
+// 不依赖 isolate 能不能活满一小时，也不会因为 Worker 重启退回每分钟清理。
+let activeScheduledTime: number | null = null;
+
+const createIndexedHourlyCleanupDb = (env: Env) => {
+  const db = createD1Adapter(env.DB as any);
+  const initSchema = db.initSchema.bind(db);
+  const cleanupOutbox = db.cleanupOutbox.bind(db);
+  const cleanupThisTick = activeScheduledTime !== null
+    && shouldRunHourlyOutboxCleanup(activeScheduledTime);
+
+  db.initSchema = async () => {
+    const result = await initSchema();
+    // 表由上游 initSchema 先建好；已有库点一次“重新连接”也会幂等补上索引。
+    for (const sql of OUTBOX_CLEANUP_INDEX_SQL) await (env.DB as any).prepare(sql).run();
+    return result;
+  };
+  db.cleanupOutbox = cleanupThisTick
+    ? cleanupOutbox
+    : async () => 0;
+  return db;
+};
+
 /** worker 运行配置；导出便于单测钉住 VAPID 兜底。 */
 export const buildWorkerConfig = (env: Env) => {
   // vapid 与 webpush 必须同源同一份：两处各读一次 env 时，改了一处漏另一处
@@ -2495,8 +2539,12 @@ export const buildWorkerConfig = (env: Env) => {
     ? { webpush, db: env.DB as unknown as InstantErrorPushDeps['db'], masterKey: env.AMSG_MASTER_KEY }
     : null);
   configureRelationshipEngine(env.DB && env.AMSG_MASTER_KEY ? env as RelationshipEngineEnv : null);
+  const indexedDb = typeof (env.DB as any)?.prepare === 'function'
+    ? createIndexedHourlyCleanupDb(env)
+    : null;
   return {
-    // db 缺省时 factory 自动用 createD1Adapter(env.DB)
+    // 显式适配 D1：给 outbox 清理补索引，并把高成本清理从每分钟降到每小时。
+    ...(indexedDb ? { db: indexedDb } : {}),
     masterKey: env.AMSG_MASTER_KEY,
     serverToken: env.AMSG_SERVER_TOKEN,
     vapid: effectiveVapid,
@@ -3208,6 +3256,12 @@ export default {
     }
     // 整轮出错时上游把原因放在返回值里（同一份也会经 onError 记一行）。这里不再重复
     // 打印，但要把它咽掉——CF 不看 scheduled 的返回值，往外抛只会变成一条没上下文的堆栈。
-    await upstream.scheduled(event, env);
+    const previousScheduledTime = activeScheduledTime;
+    activeScheduledTime = event.scheduledTime;
+    try {
+      await upstream.scheduled(event, env);
+    } finally {
+      activeScheduledTime = previousScheduledTime;
+    }
   },
 };
