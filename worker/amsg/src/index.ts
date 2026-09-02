@@ -1036,7 +1036,7 @@ export const amsgFireSettled = async (
 
 /** config 级 stale 回执 hook（见 buildWorkerConfig）。export 只为单测。 */
 export const amsgStaleSkip = async (
-  task: { id?: unknown; uuid?: unknown } | null | undefined,
+  task: { id?: unknown; uuid?: unknown; user_id?: unknown } | null | undefined,
   info: {
     reason: string;
     action: 'expired' | 'fast_forwarded';
@@ -1066,6 +1066,23 @@ export const amsgStaleSkip = async (
   if (!charId) {
     console.warn('[amsg:stale-skip] 任务 metadata 缺 charId，这次过期跳过没法留痕', { taskId: task?.id ?? null });
     return;
+  }
+  // 关系任务排队超过原版补发窗口时会直接走 stale hook，不进入 onBeforeFire，因而
+  // amsgFireSettled 拿不到 scratch。这里必须按“未发送”结算并释放 pending 锁；否则
+  // 原版任务已作废，关系层却会永久等待它。写失败也不挡后续 last_skip，自愈核对会补救。
+  if (meta.amsgRelationship === true
+    && typeof task?.uuid === 'string' && task.uuid
+    && typeof task.user_id === 'string' && task.user_id) {
+    try {
+      await settleRelationshipTask({
+        userId: task.user_id,
+        charId,
+        taskUuid: task.uuid,
+        sent: false,
+      });
+    } catch (error) {
+      console.warn('[relationship] stale task settlement write failed', error);
+    }
   }
   // 被过期跳过的是即时对话（服务停摆恢复时可能发生）→ 也写一份 chat_fail：
   // 客户端点名判到「行已出清」后靠它说出「排队太久没轮到」，而不是笼统的生成失败。

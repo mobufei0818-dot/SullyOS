@@ -12,6 +12,7 @@ import {
   relationshipSleepWindowFromClocks,
   type RelationshipSleepWindow,
 } from '../../../utils/relationshipSleep';
+import { planRelationshipTaskLockReconciliation } from '../../../utils/relationshipPending';
 
 type Style = 'reserved' | 'natural' | 'clingy';
 type D1Statement = { bind: (...values: unknown[]) => D1Statement; first: <T = Record<string, unknown>>() => Promise<T | null>; run: () => Promise<unknown>; all: <T = Record<string, unknown>>() => Promise<{ results?: T[] }> };
@@ -309,6 +310,32 @@ const advance = (state: RelationshipRecord, now: number) => {
 };
 
 /**
+ * pendingTaskUuid 只是关系层的防重复锁。原版任务如果已经 sent / failed，或终态行已被
+ * 保留期清掉，锁必须按原版事实源自愈；查询失败时宁可继续锁住，也不能误判后双发。
+ */
+const reconcilePendingTaskLocks = async (env: RelationshipEngineEnv, state: RelationshipRecord) => {
+  const uuids = [state.pendingTaskUuid, state.criticalPendingTaskUuid]
+    .filter((uuid): uuid is string => typeof uuid === 'string' && uuid.length > 0);
+  if (!uuids.length) return;
+  const placeholders = uuids.map(() => '?').join(', ');
+  const result = await dbOf(env)
+    .prepare(`SELECT uuid, status FROM scheduled_messages WHERE user_id = ? AND uuid IN (${placeholders})`)
+    .bind(state.userId, ...uuids)
+    .all<{ uuid?: string; status?: string }>();
+  const plans = planRelationshipTaskLockReconciliation(state, result.results || []);
+  for (const plan of plans) {
+    if (plan.critical) state.criticalPendingTaskUuid = undefined;
+    else state.pendingTaskUuid = undefined;
+    if (plan.sent && !plan.critical) {
+      state.longing = clamp(state.longing - sentRelief(state.config.initiativeStyle));
+      state.nextThreshold = clamp(state.longing + 30);
+      state.lastDispatchAt = Date.now();
+      state.dailySent += 1;
+    }
+  }
+};
+
+/**
  * 用户回来的“安心感”取决于离开多久：热聊里不能每句都大幅扣分。
  * 内部保留小数，关系卡只显示取整，且 clamp 保证永不跌到负数。
  */
@@ -493,6 +520,12 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
     // 反而会让检查永远达不到 10 分钟。Cron 专用的 lastTickAt 只在本循环成功检查后更新。
     if (!criticalDueBeforeAdvance && state.lastTickAt && now - state.lastTickAt < 10 * 60_000) continue;
     advance(state, now);
+    try {
+      await reconcilePendingTaskLocks(env, state);
+    } catch (error) {
+      // 额度耗尽、表暂时不可读时必须保留锁；下一轮恢复后再核对，绝不能冒险双发。
+      console.warn('[relationship] pending task reconciliation failed', state.charId, error);
+    }
     state.nextThreshold = clamp(state.nextThreshold);
     state.lastTickAt = now;
     const target = Math.max(0, state.config.dailyLimit || 0);

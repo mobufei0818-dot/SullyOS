@@ -6990,7 +6990,7 @@ function stripReasoningTags2(content) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-09-02.d1-cleanup-1";
+var AMSG_BUNDLE_VERSION = "2026-09-02.relationship-stale-lock-1";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -9259,6 +9259,24 @@ var awakeRelationshipElapsedMs = (startMs, endMs, tzId, windows, maxAwakeMs = Nu
   return Math.min(awake, maximum);
 };
 
+// utils/relationshipPending.ts
+var planRelationshipTaskLockReconciliation = (locks, rows) => {
+  const statuses = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    if (typeof row.uuid === "string" && row.uuid) statuses.set(row.uuid, String(row.status || ""));
+  }
+  const plans = [];
+  const append = (uuid, critical) => {
+    if (!uuid) return;
+    const status = statuses.get(uuid);
+    if (status === "pending") return;
+    plans.push({ uuid, critical, sent: status === "sent" });
+  };
+  append(locks.pendingTaskUuid, false);
+  append(locks.criticalPendingTaskUuid, true);
+  return plans;
+};
+
 // worker/amsg/src/relationshipEngine.ts
 var configuredEnv = null;
 var schemaReady = null;
@@ -9423,6 +9441,23 @@ var advance = (state, now2) => {
   );
   state.longing = clamp(state.longing + awakeElapsed * rate);
   state.lastCalculatedAt = now2;
+};
+var reconcilePendingTaskLocks = async (env, state) => {
+  const uuids = [state.pendingTaskUuid, state.criticalPendingTaskUuid].filter((uuid) => typeof uuid === "string" && uuid.length > 0);
+  if (!uuids.length) return;
+  const placeholders = uuids.map(() => "?").join(", ");
+  const result = await dbOf(env).prepare(`SELECT uuid, status FROM scheduled_messages WHERE user_id = ? AND uuid IN (${placeholders})`).bind(state.userId, ...uuids).all();
+  const plans = planRelationshipTaskLockReconciliation(state, result.results || []);
+  for (const plan of plans) {
+    if (plan.critical) state.criticalPendingTaskUuid = void 0;
+    else state.pendingTaskUuid = void 0;
+    if (plan.sent && !plan.critical) {
+      state.longing = clamp(state.longing - sentRelief(state.config.initiativeStyle));
+      state.nextThreshold = clamp(state.longing + 30);
+      state.lastDispatchAt = Date.now();
+      state.dailySent += 1;
+    }
+  }
 };
 var replyDelta = (gapMs, signal) => {
   const gapMinutes = Math.max(0, gapMs) / 6e4;
@@ -9600,6 +9635,11 @@ var runRelationshipTick = async (env, schedule) => {
     if (!state.config.enabled && !criticalDueBeforeAdvance) continue;
     if (!criticalDueBeforeAdvance && state.lastTickAt && now2 - state.lastTickAt < 10 * 6e4) continue;
     advance(state, now2);
+    try {
+      await reconcilePendingTaskLocks(env, state);
+    } catch (error) {
+      console.warn("[relationship] pending task reconciliation failed", state.charId, error);
+    }
     state.nextThreshold = clamp(state.nextThreshold);
     state.lastTickAt = now2;
     const target = Math.max(0, state.config.dailyLimit || 0);
@@ -13748,6 +13788,18 @@ var amsgStaleSkip = async (task, info) => {
   if (!charId) {
     console.warn("[amsg:stale-skip] \u4EFB\u52A1 metadata \u7F3A charId\uFF0C\u8FD9\u6B21\u8FC7\u671F\u8DF3\u8FC7\u6CA1\u6CD5\u7559\u75D5", { taskId: task?.id ?? null });
     return;
+  }
+  if (meta.amsgRelationship === true && typeof task?.uuid === "string" && task.uuid && typeof task.user_id === "string" && task.user_id) {
+    try {
+      await settleRelationshipTask({
+        userId: task.user_id,
+        charId,
+        taskUuid: task.uuid,
+        sent: false
+      });
+    } catch (error) {
+      console.warn("[relationship] stale task settlement write failed", error);
+    }
   }
   if (isInstantChatTask(meta) && typeof task?.uuid === "string" && task.uuid) {
     await writeChatFail(info.writeState, charId, { uuid: task.uuid, reason: "stale", retryCount: 0 });
