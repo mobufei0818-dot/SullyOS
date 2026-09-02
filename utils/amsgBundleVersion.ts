@@ -12,8 +12,8 @@
 //   - utils/amsgWorkerVersion.ts 比的是**上游库** @rei-standard/amsg-server 的 semver；
 //   - utils/buildInfo.ts 的 APP_VERSION 是整个 SullyOS App 的版本。
 //   这里管的只有一样：用户自己那台 Worker 上跑的这份 bundle 是哪天的。
-// 2026-09-02：关系任务过期/终态后释放 pending 锁，并保留 D1 outbox 降频修复。
-export const AMSG_BUNDLE_VERSION = '2026-09-02.relationship-stale-lock-1';
+// 2026-09-02：修复关系 next_tick_at 被页面同步后推，并保留 stale 锁与 D1 降频修复。
+export const AMSG_BUNDLE_VERSION = '2026-09-02.relationship-tick-clock-1';
 
 const readBundleDate = (value: string): number | null => {
   const match = /^(\d{4})-(\d{2})-(\d{2})(?:\.|$)/.exec(value.trim());

@@ -217,6 +217,21 @@ describe('远端对账（applyRemoteTaskDelta / isRemoteMissingTask）', () => {
   });
 });
 
+describe('pruneExplicitlySkippedTask', () => {
+  it('Worker 已明确跳过的一次性任务立即从本地清单收束', async () => {
+    const { pruneExplicitlySkippedTask } = await import('./amsg2Tasks');
+    const once = task({ taskUuid: 'once-skipped', recurrenceType: 'none' });
+    const daily = task({ taskUuid: 'daily-skipped', recurrenceType: 'daily' });
+    expect(pruneExplicitlySkippedTask([once, daily], once.taskUuid)).toEqual([daily]);
+  });
+
+  it('循环任务只跳过本轮，仍保留下一轮', async () => {
+    const { pruneExplicitlySkippedTask } = await import('./amsg2Tasks');
+    const daily = task({ taskUuid: 'daily-skipped', recurrenceType: 'daily' });
+    expect(pruneExplicitlySkippedTask([daily], daily.taskUuid)).toEqual([daily]);
+  });
+});
+
 // 回归守卫：循环任务的 firstSendTime 是「第一次」的锚点，可能在好几天前。
 // 直接把它显示出来，一条每天的任务看着就像「过点了还没触发」——设置面板、角色查到的
 // 清单、注入角色的排程现状块三处都栽在这上面，所以时间一律走 currentOccurrenceMs。

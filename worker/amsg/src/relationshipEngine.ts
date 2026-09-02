@@ -13,6 +13,7 @@ import {
   type RelationshipSleepWindow,
 } from '../../../utils/relationshipSleep';
 import { planRelationshipTaskLockReconciliation } from '../../../utils/relationshipPending';
+import { resolveRelationshipNextTickAt } from '../../../utils/relationshipTick';
 
 type Style = 'reserved' | 'natural' | 'clingy';
 type D1Statement = { bind: (...values: unknown[]) => D1Statement; first: <T = Record<string, unknown>>() => Promise<T | null>; run: () => Promise<unknown>; all: <T = Record<string, unknown>>() => Promise<{ results?: T[] }> };
@@ -215,20 +216,27 @@ const ensureTable = (env: RelationshipEngineEnv) => {
 
 const load = async (env: RelationshipEngineEnv, userId: string, charId: string): Promise<RelationshipRecord | null> => {
   await ensureTable(env);
-  const row = await dbOf(env).prepare('SELECT payload FROM sully_relationship_state WHERE user_id = ? AND char_id = ?').bind(userId, charId).first<{ payload?: string }>();
+  const row = await dbOf(env).prepare('SELECT payload, next_tick_at FROM sully_relationship_state WHERE user_id = ? AND char_id = ?').bind(userId, charId).first<{ payload?: string; next_tick_at?: number }>();
   if (!row?.payload) return null;
   try {
     const key = await deriveUserEncryptionKey(userId, env.AMSG_MASTER_KEY);
-    return JSON.parse(await decryptFromStorage(row.payload, key)) as RelationshipRecord;
+    const state = JSON.parse(await decryptFromStorage(row.payload, key)) as RelationshipRecord;
+    // 列是 Cron 的查询事实源。旧版本在加密 payload 之前才给 nextTickAt 赋值，导致 payload
+    // 永远缺这个字段；从列回填后，第一次保存就会把旧记录修正为一致状态。
+    const columnTickAt = Number(row.next_tick_at);
+    if (Number.isFinite(columnTickAt) && columnTickAt > 0) state.nextTickAt = columnTickAt;
+    return state;
   } catch (error) {
     console.warn('[relationship] state decrypt failed', charId, error);
     return null;
   }
 };
 
-const save = async (env: RelationshipEngineEnv, record: RelationshipRecord) => {
-  const key = await deriveUserEncryptionKey(record.userId, env.AMSG_MASTER_KEY);
-  const payload = await encryptForStorage(JSON.stringify(record), key);
+const save = async (
+  env: RelationshipEngineEnv,
+  record: RelationshipRecord,
+  options: { tickCompleted?: boolean } = {},
+) => {
   const now = Date.now();
   // 原版 Cron 仍是一分钟一次；关系层每十分钟才需要结算，关闭时则一天后再看。
   const normalTickAt = record.config.enabled ? now + 10 * 60_000 : now + 24 * HOUR;
@@ -242,12 +250,14 @@ const save = async (env: RelationshipEngineEnv, record: RelationshipRecord) => {
       || Boolean((record.config.followUpPromises || isTakeoutPromise(record.promiseKind)) && record.promiseDueAt && record.promiseDueAt <= now)))
     || isCriticalDue(record, now);
   const requestedTickAt = shouldCheckImmediately ? now : scheduledPromiseAt;
-  // 关键：聊天页面的同步可每分钟发生一次，不能把已经安排好的 10 分钟检查反复推迟。
-  // 仅保留「仍在未来的更早时刻」；已到期的时刻由本次保存重新排下一轮。
-  const nextTickAt = record.nextTickAt && record.nextTickAt > now
-    ? Math.min(record.nextTickAt, requestedTickAt)
-    : requestedTickAt;
+  // 页面同步只允许提前，绝不能推进检查游标；包括已经到期但尚未被 Cron 认领的时刻。
+  // 只有 runRelationshipTick 完成一轮检查后才传 tickCompleted，把游标排到下一轮。
+  const nextTickAt = resolveRelationshipNextTickAt(record.nextTickAt, requestedTickAt, options.tickCompleted === true);
   record.nextTickAt = nextTickAt;
+  // 必须在 nextTickAt 赋值以后再加密。旧顺序会让数据库列更新、payload 却永远没有新时间，
+  // 下一次页面同步读回空值后又写成“当前 + 10 分钟”，形成用户截图中的无限后推。
+  const key = await deriveUserEncryptionKey(record.userId, env.AMSG_MASTER_KEY);
+  const payload = await encryptForStorage(JSON.stringify(record), key);
   await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at, next_tick_at)
     VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, next_tick_at = excluded.next_tick_at`)
     .bind(record.userId, record.charId, payload, now, nextTickAt).run();
@@ -503,7 +513,7 @@ export const handleRelationshipRequest = async (
  */
 export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: (state: RelationshipRecord, kind?: 'normal' | 'jealousy-critical') => Promise<{ uuid?: string; error?: string }>) => {
   await ensureTable(env);
-  const rows = await dbOf(env).prepare('SELECT user_id, char_id, payload FROM sully_relationship_state WHERE next_tick_at <= ? LIMIT 200').bind(Date.now()).all<{ user_id?: string; char_id?: string; payload?: string }>();
+  const rows = await dbOf(env).prepare('SELECT user_id, char_id, payload, next_tick_at FROM sully_relationship_state WHERE next_tick_at <= ? LIMIT 200').bind(Date.now()).all<{ user_id?: string; char_id?: string; payload?: string; next_tick_at?: number }>();
   const now = Date.now();
   let scheduled = 0;
   for (const row of rows.results || []) {
@@ -513,9 +523,17 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
       if (!row.user_id || !row.char_id) continue;
       const key = await deriveUserEncryptionKey(row.user_id, env.AMSG_MASTER_KEY);
       state = JSON.parse(await decryptFromStorage(row.payload, key)) as RelationshipRecord;
+      const columnTickAt = Number(row.next_tick_at);
+      if (Number.isFinite(columnTickAt) && columnTickAt > 0) state.nextTickAt = columnTickAt;
     } catch { continue; }
     const criticalDueBeforeAdvance = isCriticalDue(state, now);
-    if (!state.config.enabled && !criticalDueBeforeAdvance) continue;
+    if (!state.config.enabled && !criticalDueBeforeAdvance) {
+      // 关闭的角色不做关系判断，但仍需由 Cron 把已到期游标推进到低频检查，避免每分钟反复扫中。
+      advance(state, now);
+      state.lastTickAt = now;
+      await save(env, state, { tickCompleted: true });
+      continue;
+    }
     // `lastCalculatedAt` 会在前端每次同步时推进，不能拿它节流 Cron；否则打开聊天页
     // 反而会让检查永远达不到 10 分钟。Cron 专用的 lastTickAt 只在本循环成功检查后更新。
     if (!criticalDueBeforeAdvance && state.lastTickAt && now - state.lastTickAt < 10 * 60_000) continue;
@@ -566,7 +584,7 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
         }
       }
     }
-    await save(env, state);
+    await save(env, state, { tickCompleted: true });
   }
   return { scheduled };
 };

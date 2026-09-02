@@ -544,6 +544,18 @@ export const pruneFiredTasks = (
 };
 
 /**
+ * Worker 已明确写下 last_skip 的一次性任务是终态，不必再等 90 秒 fire 宽限后才从本地
+ * 清单消失。循环任务只跳过当前一轮，后续仍要保留。
+ */
+export const pruneExplicitlySkippedTask = (
+  tasks: ActiveMsg2TaskRecord[],
+  skippedTaskUuid: string | null | undefined,
+): ActiveMsg2TaskRecord[] => {
+  if (!skippedTaskUuid) return tasks;
+  return tasks.filter(task => task.taskUuid !== skippedTaskUuid || task.recurrenceType !== 'none');
+};
+
+/**
  * 排程 / 替换成功后把新记录并进清单。
  *
  * 替换失败时**保留旧记录并标错**，绝不静默丢掉：远端此时新旧并存，本地要是只留新的，

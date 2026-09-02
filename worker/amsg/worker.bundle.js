@@ -6990,7 +6990,7 @@ function stripReasoningTags2(content) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-09-02.relationship-stale-lock-1";
+var AMSG_BUNDLE_VERSION = "2026-09-02.relationship-tick-clock-1";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -9277,6 +9277,13 @@ var planRelationshipTaskLockReconciliation = (locks, rows) => {
   return plans;
 };
 
+// utils/relationshipTick.ts
+var resolveRelationshipNextTickAt = (previousTickAt, requestedTickAt, tickCompleted) => {
+  if (tickCompleted) return requestedTickAt;
+  if (!Number.isFinite(previousTickAt) || Number(previousTickAt) <= 0) return requestedTickAt;
+  return Math.min(Number(previousTickAt), requestedTickAt);
+};
+
 // worker/amsg/src/relationshipEngine.ts
 var configuredEnv = null;
 var schemaReady = null;
@@ -9364,26 +9371,29 @@ var ensureTable = (env) => {
 };
 var load = async (env, userId, charId) => {
   await ensureTable(env);
-  const row = await dbOf(env).prepare("SELECT payload FROM sully_relationship_state WHERE user_id = ? AND char_id = ?").bind(userId, charId).first();
+  const row = await dbOf(env).prepare("SELECT payload, next_tick_at FROM sully_relationship_state WHERE user_id = ? AND char_id = ?").bind(userId, charId).first();
   if (!row?.payload) return null;
   try {
     const key = await deriveUserEncryptionKey(userId, env.AMSG_MASTER_KEY);
-    return JSON.parse(await decryptFromStorage(row.payload, key));
+    const state = JSON.parse(await decryptFromStorage(row.payload, key));
+    const columnTickAt = Number(row.next_tick_at);
+    if (Number.isFinite(columnTickAt) && columnTickAt > 0) state.nextTickAt = columnTickAt;
+    return state;
   } catch (error) {
     console.warn("[relationship] state decrypt failed", charId, error);
     return null;
   }
 };
-var save = async (env, record) => {
-  const key = await deriveUserEncryptionKey(record.userId, env.AMSG_MASTER_KEY);
-  const payload = await encryptForStorage(JSON.stringify(record), key);
+var save = async (env, record, options = {}) => {
   const now2 = Date.now();
   const normalTickAt = record.config.enabled ? now2 + 10 * 6e4 : now2 + 24 * HOUR;
   const scheduledPromiseAt = record.promiseDueAt && record.promiseDueAt > now2 ? Math.min(normalTickAt, record.promiseDueAt) : normalTickAt;
   const shouldCheckImmediately = record.config.enabled && canDispatchNow(record, now2) && (record.longing >= record.nextThreshold || Boolean((record.config.followUpPromises || isTakeoutPromise(record.promiseKind)) && record.promiseDueAt && record.promiseDueAt <= now2)) || isCriticalDue(record, now2);
   const requestedTickAt = shouldCheckImmediately ? now2 : scheduledPromiseAt;
-  const nextTickAt = record.nextTickAt && record.nextTickAt > now2 ? Math.min(record.nextTickAt, requestedTickAt) : requestedTickAt;
+  const nextTickAt = resolveRelationshipNextTickAt(record.nextTickAt, requestedTickAt, options.tickCompleted === true);
   record.nextTickAt = nextTickAt;
+  const key = await deriveUserEncryptionKey(record.userId, env.AMSG_MASTER_KEY);
+  const payload = await encryptForStorage(JSON.stringify(record), key);
   await dbOf(env).prepare(`INSERT INTO sully_relationship_state (user_id, char_id, payload, updated_at, next_tick_at)
     VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, char_id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at, next_tick_at = excluded.next_tick_at`).bind(record.userId, record.charId, payload, now2, nextTickAt).run();
 };
@@ -9618,7 +9628,7 @@ var handleRelationshipRequest = async (request, env, scheduleCritical) => {
 };
 var runRelationshipTick = async (env, schedule) => {
   await ensureTable(env);
-  const rows = await dbOf(env).prepare("SELECT user_id, char_id, payload FROM sully_relationship_state WHERE next_tick_at <= ? LIMIT 200").bind(Date.now()).all();
+  const rows = await dbOf(env).prepare("SELECT user_id, char_id, payload, next_tick_at FROM sully_relationship_state WHERE next_tick_at <= ? LIMIT 200").bind(Date.now()).all();
   const now2 = Date.now();
   let scheduled = 0;
   for (const row of rows.results || []) {
@@ -9628,11 +9638,18 @@ var runRelationshipTick = async (env, schedule) => {
       if (!row.user_id || !row.char_id) continue;
       const key = await deriveUserEncryptionKey(row.user_id, env.AMSG_MASTER_KEY);
       state = JSON.parse(await decryptFromStorage(row.payload, key));
+      const columnTickAt = Number(row.next_tick_at);
+      if (Number.isFinite(columnTickAt) && columnTickAt > 0) state.nextTickAt = columnTickAt;
     } catch {
       continue;
     }
     const criticalDueBeforeAdvance = isCriticalDue(state, now2);
-    if (!state.config.enabled && !criticalDueBeforeAdvance) continue;
+    if (!state.config.enabled && !criticalDueBeforeAdvance) {
+      advance(state, now2);
+      state.lastTickAt = now2;
+      await save(env, state, { tickCompleted: true });
+      continue;
+    }
     if (!criticalDueBeforeAdvance && state.lastTickAt && now2 - state.lastTickAt < 10 * 6e4) continue;
     advance(state, now2);
     try {
@@ -9679,7 +9696,7 @@ var runRelationshipTick = async (env, schedule) => {
         }
       }
     }
-    await save(env, state);
+    await save(env, state, { tickCompleted: true });
   }
   return { scheduled };
 };

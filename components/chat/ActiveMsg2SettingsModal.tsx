@@ -34,6 +34,7 @@ import {
   isPendingTask,
   isRemoteMissingTask,
   keepUncancelledTasks,
+  pruneExplicitlySkippedTask,
   pruneFiredTasks,
   reconcileTasksWithRemote,
   resolveExpirePolicy,
@@ -189,7 +190,18 @@ const ActiveMsg2SettingsModal: React.FC<ActiveMsg2SettingsModalProps> = ({
 
     // 防穿帮闸最近拦下了哪次触发。闸是静默的，不说一声的话「让路了」在用户看来
     // 跟「没发出去」一模一样。
-    void (async () => setLastSkip(await ActiveMsgClient.readLastSkip(char.id)))();
+    void (async () => {
+      const skip = await ActiveMsgClient.readLastSkip(char.id);
+      setLastSkip(skip);
+      if (skip?.taskUuid) {
+        // last_skip 是 Worker 已消费这次任务的明确终态。一次性任务立即从本地清单收束，
+        // 不再在 90 秒 fire 宽限内误显“待触发 / 远端不存在”；循环任务仍保留下一轮。
+        onSave((prev) => ({
+          ...(prev ?? { enabled: true, tasks: [] }),
+          tasks: pruneExplicitlySkippedTask(prev?.tasks ?? [], skip.taskUuid),
+        }));
+      }
+    })();
 
     void (async () => {
       let remote: Set<string>;
