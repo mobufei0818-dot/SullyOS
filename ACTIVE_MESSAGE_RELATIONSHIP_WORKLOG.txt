@@ -1,7 +1,7 @@
 SullyOS 主动消息 2.0 与关系主动消息层：维护记录
 ================================================
 
-最后更新：2026-09-02
+最后更新：2026-08-31
 当前网页版本：
 https://mobufei0818-dot.github.io/SullyOS/?v=91f76818
 
@@ -289,31 +289,3 @@ source: 'relationship'
   模块预览/测试，不能覆盖用户正在运行的 AMSG bundle。
 - 后续原版 Worker 更新必须先比较 `worker/amsg` 的上游差异，再重新确认这个 `/moments/*` wrapper、token
   fallback 和路由前缀仍在；构建后仍只升级现有 AMSG Worker。网页 Pages 发布不会自动升级 Cloudflare Worker。
-
-
-十四、原版 AMSG outbox 清理的 D1 免费额度修复（2026-09-02）
-------------------------------------------------------------
-
-1. 本次确实改动了二改 fork 中的原版 AMSG Worker 公共路径，位于
-   `worker/amsg/src/index.ts`。没有向 `qegj567-cloud/SullyOS` 原版远程写入任何内容；而是在用户 fork
-   内包装上游 AMSG 的 D1 adapter 和 `scheduled()`。它不是朋友圈独立模块的修复。
-2. 根因：上游默认在每分钟 Cron 中都执行两条 `message_outbox` 保留期清理。同一批行被每日
-   重复扫描 1440 次，实测单日 D1 rows read 约 900 万，超过免费层 500 万限额，导致数据库、
-   设备登记和更新后的自动验证一起报错。
-3. 保留的修复规则：
-   - `* * * * *` 每分钟定时触发器和到点任务检查保持不变，不影响主动消息准时性；
-   - 仅 `message_outbox` 清理改为每个 UTC 整点执行一次（每小时一次）；
-   - 已确认消息保留 7 天、未确认消息保留 28 天的上游语义不变；
-   - 为 `message_outbox(acked_at)` 补部分索引 `idx_outbox_acked_cleanup`；
-   - 为 `message_outbox(created_at)` 补索引 `idx_outbox_created_cleanup`；
-   - 索引在 `initSchema` 后幂等创建，老数据库在额度恢复后点一次“重新连接并验证”即会补齐。
-4. 以后合并原版时，本节是不可静默回退的二改保留项。冲突时不得直接选上游 `theirs`，必须复核：
-   - `createD1Adapter` 包装和 `OUTBOX_CLEANUP_INDEX_SQL` 仍在；
-   - `shouldRunHourlyOutboxCleanup` 仍以 Cron 的 `scheduledTime` 判断 UTC 整点；
-   - `buildWorkerConfig` 仍向上游注入包装后的 db；
-   - `scheduled()` 仍只在本次触发上下文中传递时间，并在 `finally` 恢复；
-   - 每分钟任务拾取、关系 tick、朋友圈离线任务仍正常，只有 outbox 保留期清理是小时级。
-   如果上游以后重写了 outbox 清理接口，应迁移“低频率 + 可用索引 + 保留期不变”的语义，不能为了
-   保留旧实现而阻止上游更正确的新方案，但也绝不能回到每分钟全表扫描。
-5. 源码修复提交：`958dc399`；Worker 版本标记为
-   `2026-09-02.d1-cleanup-1`，补标提交：`9550f1f0`。之前显示 9.1 只是版本常量漏递增，不代表清理修复没有进入 bundle。
