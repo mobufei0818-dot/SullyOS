@@ -15,7 +15,7 @@ import {
   UserProfile,
 } from '../types';
 import { getLastRealUserMessageAt } from './amsg2ExpireGuard';
-import { AMSG_BUNDLE_VERSION } from './amsgBundleVersion';
+import { AMSG_BUNDLE_VERSION, isAmsgBundleCurrentOrNewer } from './amsgBundleVersion';
 import { buildTaskInstruction, resolveSendAtMs } from './amsgFireSchedule';
 import {
   getPendingTasks, isAmsg2EnabledForChar, MAX_ACTIVE_TASKS_PER_CHAR,
@@ -3017,8 +3017,8 @@ export const ActiveMsgClient = {
    * 用户那台 Worker 上跑的后端代码是不是最新的。
    *
    * 比的是 `GET /config-check` 报的 workerVersion 和本 App 编译进来的
-   * AMSG_WORKER_VERSION——两者同源（都出自 utils/amsgWorkerVersion.ts），所以只要不相等
-   * 就是「那台 Worker 贴的是旧 bundle」。
+   * AMSG_BUNDLE_VERSION。精确相同当然是最新；若 Worker 的日期更新，说明只是
+   * 手机上还开着旧网页，也必须视为 current，不得提示把新 Worker 倒退。
    *
    * 三种拿不到结论的情况分开表态，因为界面上该说的话不一样：
    *   - 老 bundle 根本不报这个字段 → outdated（它确实旧，只是旧到还不会自报家门）；
@@ -3038,7 +3038,11 @@ export const ActiveMsgClient = {
       if (status !== 200 || body?.success !== true) return { state: 'unknown', deployed: null, expected };
       const deployed = typeof body?.data?.workerVersion === 'string' ? body.data.workerVersion : null;
       if (!deployed) return { state: 'outdated', deployed: null, expected };
-      return { state: deployed === expected ? 'current' : 'outdated', deployed, expected };
+      return {
+        state: isAmsgBundleCurrentOrNewer(deployed, expected) ? 'current' : 'outdated',
+        deployed,
+        expected,
+      };
     } catch {
       return { state: 'unknown', deployed: null, expected };
     }

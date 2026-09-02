@@ -14,3 +14,31 @@
 //   这里管的只有一样：用户自己那台 Worker 上跑的这份 bundle 是哪天的。
 // 2026-09-02：为 D1 免费额度降低 outbox 清理频率，并补齐清理索引。
 export const AMSG_BUNDLE_VERSION = '2026-09-02.d1-cleanup-1';
+
+const readBundleDate = (value: string): number | null => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:\.|$)/.exec(value.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const time = Date.UTC(year, month - 1, day);
+  const date = new Date(time);
+  if (
+    date.getUTCFullYear() !== year
+    || date.getUTCMonth() !== month - 1
+    || date.getUTCDate() !== day
+  ) return null;
+  return time;
+};
+
+/**
+ * 页面和 Worker 不是原子发布：用户可能先更新 Worker，手机上还开着旧网页。
+ * 此时线上 Worker 的日期比网页内置目标更新，应视为 current，绝不能提示倒退。
+ * 同日但后缀不同时无法安全推断先后，仍要求精确一致。
+ */
+export const isAmsgBundleCurrentOrNewer = (deployed: string, expected: string): boolean => {
+  if (deployed === expected) return true;
+  const deployedDate = readBundleDate(deployed);
+  const expectedDate = readBundleDate(expected);
+  return deployedDate !== null && expectedDate !== null && deployedDate > expectedDate;
+};
