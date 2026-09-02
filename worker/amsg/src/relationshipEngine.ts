@@ -121,8 +121,39 @@ export const configureRelationshipEngine = (env: RelationshipEngineEnv | null) =
 
 const HOUR = 60 * 60_000;
 const clamp = (value: number, min = 0, max = 100) => Math.max(min, Math.min(max, value));
+const FIRST_LONGING_THRESHOLD = 30;
+const MAX_LONGING = 100;
 const isTakeoutPromise = (kind?: string) => kind === 'takeout_to_user' || kind === 'takeout_to_character';
 const ratePerMs = (style: Style) => (style === 'clingy' ? 30 / HOUR : style === 'reserved' ? 6 / HOUR : 9 / HOUR);
+
+export interface RelationshipLongingSettlement {
+  longing: number;
+  nextThreshold: number;
+  cycled: boolean;
+}
+
+/**
+ * 思念值只是普通关系主动消息的频率计量器，不代表好感、性格或关系质量。
+ * 当计量器和阈值都已走到上限，确认消息真正送达后开启下一轮 0 → 30 → … → 100；
+ * 其它成功发送仍沿用原有的性格释放量和“释放后 +30”阈值。
+ */
+export const settleRelationshipLongingAfterSent = (
+  longing: number,
+  nextThreshold: number,
+  relief: number,
+): RelationshipLongingSettlement => {
+  const currentLonging = clamp(longing);
+  const currentThreshold = clamp(nextThreshold);
+  if (currentLonging >= MAX_LONGING && currentThreshold >= MAX_LONGING) {
+    return { longing: 0, nextThreshold: FIRST_LONGING_THRESHOLD, cycled: true };
+  }
+  const settledLonging = clamp(currentLonging - Math.max(0, relief));
+  return {
+    longing: settledLonging,
+    nextThreshold: clamp(settledLonging + FIRST_LONGING_THRESHOLD),
+    cycled: false,
+  };
+};
 const dayKey = (time: number, tzId: string) => {
   try {
     return new Intl.DateTimeFormat('en-CA', { timeZone: tzId, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(time));
@@ -337,8 +368,13 @@ const reconcilePendingTaskLocks = async (env: RelationshipEngineEnv, state: Rela
     if (plan.critical) state.criticalPendingTaskUuid = undefined;
     else state.pendingTaskUuid = undefined;
     if (plan.sent && !plan.critical) {
-      state.longing = clamp(state.longing - sentRelief(state.config.initiativeStyle));
-      state.nextThreshold = clamp(state.longing + 30);
+      const settlement = settleRelationshipLongingAfterSent(
+        state.longing,
+        state.nextThreshold,
+        sentRelief(state.config.initiativeStyle),
+      );
+      state.longing = settlement.longing;
+      state.nextThreshold = settlement.nextThreshold;
       state.lastDispatchAt = Date.now();
       state.dailySent += 1;
     }
@@ -359,7 +395,7 @@ const createRelationshipState = (userId: string, input: RelationshipSyncInput, n
   v: 1, userId, charId: input.charId, charName: input.charName, tzId: input.tzId || 'UTC',
   credRef: input.credRef || `char:${input.charId}/chat`, config: input.config,
   sleepWindows: normalizeRelationshipSleepWindows(input.sleepWindows),
-  longing: clamp(input.initialLonging ?? 20), nextThreshold: 30,
+  longing: clamp(input.initialLonging ?? 20), nextThreshold: FIRST_LONGING_THRESHOLD,
   affection: clamp(input.affection ?? 58), jealousy: clamp(initialJealousy ?? input.jealousy ?? 8),
   innerVoice: String(input.innerVoice || '把想说的话先悄悄留在心里。'),
   lastCalculatedAt: now, lastUserAt: input.lastUserAt || 0, lastAssistantAt: input.lastAssistantAt || 0,
@@ -608,10 +644,15 @@ export const settleRelationshipTask = async (args: { userId: string; charId: str
       await save(env, state);
       return;
     }
-    // 只有用户实际收到了角色消息，才视为角色获得一次情绪释放。
-    // 以回落后的实时思念值重新设定下一个 +30 阈值，而不是沿用旧阈值累加。
-    state.longing = clamp(state.longing - sentRelief(state.config.initiativeStyle));
-    state.nextThreshold = clamp(state.longing + 30);
+    // 只有用户实际收到了角色消息，才结算频率计量器。到达 100/100 后从 0/30 开启新循环；
+    // 未饱和时仍按角色风格释放，并以释放后的实时值设置下一个 +30 阈值。
+    const settlement = settleRelationshipLongingAfterSent(
+      state.longing,
+      state.nextThreshold,
+      sentRelief(state.config.initiativeStyle),
+    );
+    state.longing = settlement.longing;
+    state.nextThreshold = settlement.nextThreshold;
     state.lastDispatchAt = now;
     state.dailySent += 1;
   }

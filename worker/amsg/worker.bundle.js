@@ -7091,7 +7091,7 @@ function stripReasoningTags2(content) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-09-02.r2.upstream-cron-pause";
+var AMSG_BUNDLE_VERSION = "2026-09-02.r3.relationship-longing-cycle";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -9397,8 +9397,23 @@ var configureRelationshipEngine = (env) => {
 };
 var HOUR = 60 * 6e4;
 var clamp = (value, min = 0, max = 100) => Math.max(min, Math.min(max, value));
+var FIRST_LONGING_THRESHOLD = 30;
+var MAX_LONGING = 100;
 var isTakeoutPromise = (kind) => kind === "takeout_to_user" || kind === "takeout_to_character";
 var ratePerMs = (style) => style === "clingy" ? 30 / HOUR : style === "reserved" ? 6 / HOUR : 9 / HOUR;
+var settleRelationshipLongingAfterSent = (longing, nextThreshold, relief) => {
+  const currentLonging = clamp(longing);
+  const currentThreshold = clamp(nextThreshold);
+  if (currentLonging >= MAX_LONGING && currentThreshold >= MAX_LONGING) {
+    return { longing: 0, nextThreshold: FIRST_LONGING_THRESHOLD, cycled: true };
+  }
+  const settledLonging = clamp(currentLonging - Math.max(0, relief));
+  return {
+    longing: settledLonging,
+    nextThreshold: clamp(settledLonging + FIRST_LONGING_THRESHOLD),
+    cycled: false
+  };
+};
 var dayKey = (time, tzId) => {
   try {
     return new Intl.DateTimeFormat("en-CA", { timeZone: tzId, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(time));
@@ -9567,8 +9582,13 @@ var reconcilePendingTaskLocks = async (env, state) => {
     if (plan.critical) state.criticalPendingTaskUuid = void 0;
     else state.pendingTaskUuid = void 0;
     if (plan.sent && !plan.critical) {
-      state.longing = clamp(state.longing - sentRelief(state.config.initiativeStyle));
-      state.nextThreshold = clamp(state.longing + 30);
+      const settlement = settleRelationshipLongingAfterSent(
+        state.longing,
+        state.nextThreshold,
+        sentRelief(state.config.initiativeStyle)
+      );
+      state.longing = settlement.longing;
+      state.nextThreshold = settlement.nextThreshold;
       state.lastDispatchAt = Date.now();
       state.dailySent += 1;
     }
@@ -9589,7 +9609,7 @@ var createRelationshipState = (userId, input, now2, initialJealousy) => ({
   config: input.config,
   sleepWindows: normalizeRelationshipSleepWindows(input.sleepWindows),
   longing: clamp(input.initialLonging ?? 20),
-  nextThreshold: 30,
+  nextThreshold: FIRST_LONGING_THRESHOLD,
   affection: clamp(input.affection ?? 58),
   jealousy: clamp(initialJealousy ?? input.jealousy ?? 8),
   innerVoice: String(input.innerVoice || "\u628A\u60F3\u8BF4\u7684\u8BDD\u5148\u6084\u6084\u7559\u5728\u5FC3\u91CC\u3002"),
@@ -9820,8 +9840,13 @@ var settleRelationshipTask = async (args) => {
       await save(env, state);
       return;
     }
-    state.longing = clamp(state.longing - sentRelief(state.config.initiativeStyle));
-    state.nextThreshold = clamp(state.longing + 30);
+    const settlement = settleRelationshipLongingAfterSent(
+      state.longing,
+      state.nextThreshold,
+      sentRelief(state.config.initiativeStyle)
+    );
+    state.longing = settlement.longing;
+    state.nextThreshold = settlement.nextThreshold;
     state.lastDispatchAt = now2;
     state.dailySent += 1;
   }
