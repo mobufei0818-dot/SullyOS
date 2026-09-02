@@ -653,7 +653,8 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
   /**
    * 暂停 / 恢复后台任务：让 Worker 摘掉或加回自己的 cron trigger（见 worker/amsg/src/cronTrigger.ts）。
    *
-   * 暂停期间到点的任务在 D1 里排着，不会丢；恢复后的第一跳一起补发。
+   * 暂停期间到点的主动/定时消息在 D1 里排着，不会丢；关系状态和朋友圈离线任务
+   * 因共用同一个 Cron 暂停推进，恢复后再继续检查。
    * 走 GitHub 的 Sync fork 重新部署会按 wrangler.toml 把 cron 加回来，所以这不是永久开关。
    */
   const applyCronTrigger = async (enabled: boolean) => {
@@ -954,7 +955,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         {/* 后台任务暂停着的时候常驻这一条：下面的按钮在折叠区里，不然一眼看不出角色为什么都不响。 */}
         {cronState?.kind === 'known' && !cronState.enabled ? (
           <div className="bg-amber-50 border border-amber-200 rounded-2xl px-4 py-3 text-xs leading-relaxed text-amber-700">
-            后台任务已暂停，到点的消息先攒着，恢复后一起补发。
+            后台任务已暂停：到点的主动/定时消息会保留；关系状态和朋友圈离线任务暂不推进，恢复后继续。
           </div>
         ) : null}
 
@@ -1539,7 +1540,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                         : '暂停后台任务'}
                   </button>
                   <p className="text-xs leading-relaxed text-slate-500">
-                    暂停会摘掉 Worker 的定时触发，到点的主动消息和定时消息先攒在云端，不会丢；恢复后一起补发。
+                    暂停会摘掉 Worker 的定时触发：到点的主动/定时消息会保留；关系状态和朋友圈离线任务暂不推进，恢复后继续。
                   </p>
                 </>
               ) : null}
@@ -1761,7 +1762,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
     <ConfirmDialog
       isOpen={pauseConfirmOpen}
       title="暂停后台任务"
-      message="暂停后，到点的主动消息和定时消息会先攒着，不会丢。点「恢复后台任务」之后，攒下的会一起补发。"
+      message="暂停后，到点的主动/定时消息会保留；关系状态和朋友圈离线任务暂不推进。点「恢复后台任务」后继续运行。"
       confirmText="暂停"
       variant="warning"
       onConfirm={() => void applyCronTrigger(false)}
