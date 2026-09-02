@@ -575,9 +575,9 @@ const MomentsApp: React.FC = () => {
       }] }];
     });
     if (!targets.length) return;
-    try { await reportRelationshipJealousyEvents(targets, settings.jealousyForceEnabled); }
+    try { await reportRelationshipJealousyEvents(targets, settings.jealousyForceEnabled, apiConfig); }
     catch (error: any) { addToast(`醋意关系事实暂未同步：${error?.message || '网络错误'}`, 'error'); }
-  }, [addToast, characters, settings.jealousyForceEnabled]);
+  }, [addToast, apiConfig, characters, settings.jealousyForceEnabled]);
 
   const saveMomentsSettingsPatch = useCallback(async (patch: Partial<MomentsSettings>) => {
     // 保持这个写入器稳定：Worker 失败时若它随 settings 改变而重建，依赖它的
@@ -1954,7 +1954,7 @@ const MomentsApp: React.FC = () => {
             <button type="button" onClick={() => {
               const next = !settings.jealousyForceEnabled;
               void saveMomentsSettingsPatch({ jealousyForceEnabled: next });
-              void setRelationshipJealousyForceEnabled(characters, next).catch((error: any) => addToast(`醋意开关暂未同步到 Worker：${error?.message || '网络错误'}`, 'error'));
+              void setRelationshipJealousyForceEnabled(characters, next, apiConfig).catch((error: any) => addToast(`醋意开关暂未同步到 Worker：${error?.message || '网络错误'}`, 'error'));
             }} className="flex w-full items-center gap-3 px-4 py-4 text-left">
               <Heart size={21} className="text-[#e7728b]" weight="fill" />
               <span className="flex-1"><span className="block text-[14px]">醋意强制联系</span><span className="mt-1 block text-[11px] leading-relaxed text-[#888]">角色实际看见暧昧动态或亲密评论后，醋意达到 80 会优先建立一条原版主动消息 2.0 联系机会。关闭后仍记录、展示醋意，但不强制联系。</span></span>

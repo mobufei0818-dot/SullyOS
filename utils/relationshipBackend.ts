@@ -1,5 +1,7 @@
-import type { CharacterProfile, Message, RelationshipJealousySignal, RelationshipPulse } from '../types';
+import type { APIConfig, CharacterProfile, Message, RelationshipJealousySignal, RelationshipPulse } from '../types';
 import { ActiveMsgStore } from './activeMsgStore';
+import { ActiveMsgClient } from './activeMsgClient';
+import { buildCharChatCredRow, type LlmCredentialRow } from './amsgLlmCredentials';
 import { getRelationshipConfig } from './relationshipProactive';
 import { followUpDelayMs, inferFollowUpKind } from './relationshipProactive';
 import { resolveCharTimeZone } from './timezone';
@@ -70,6 +72,32 @@ const headers = (userId: string, token?: string) => ({
   ...(token?.trim() ? { 'X-Client-Token': token.trim() } : {}),
 });
 
+const repairedMissingCredentialErrors = new Set<string>();
+const missingCredentialError = (message?: string) => Boolean(message && (
+  message.includes('CREDENTIAL_NOT_FOUND')
+  || message.includes('credRefs 引用的凭据不存在')
+  || message.includes('引用的凭据不存在')
+));
+
+/**
+ * 关系 Worker 创建的仍是原版 prompted 任务，任务只携带 `char:<id>/chat` 引用。
+ * 新角色尚未排过普通 AMSG 任务时，这一行不会被其它链路顺带建立，因此必须在同步关系状态前先登记。
+ * `putLlmCredentials` 自带指纹去重，正常重复同步不会重复写 D1；force 只用于云端明确报告该行丢失后的自愈。
+ */
+const ensureRelationshipChatCredentials = async (
+  chars: CharacterProfile[],
+  apiConfig: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'>,
+  options: { force?: boolean } = {},
+): Promise<LlmCredentialRow[]> => {
+  const uniqueChars = [...new Map(chars.map(char => [char.id, char])).values()];
+  const rows = uniqueChars.map(char => buildCharChatCredRow(char, char.activeMsg2Config, apiConfig));
+  const missing = uniqueChars.filter((_, index) => !rows[index]);
+  if (missing.length) throw new Error(`主动消息 2.0 缺少可用的 API URL / Key / Model：${missing.map(char => char.name).join('、')}`);
+  const completeRows = rows.filter((row): row is LlmCredentialRow => Boolean(row));
+  if (completeRows.length) await ActiveMsgClient.putLlmCredentials(completeRows, options);
+  return completeRows;
+};
+
 const asPulse = (data: any): RelationshipPulse | null => {
   if (!data || typeof data !== 'object') return null;
   return {
@@ -94,9 +122,16 @@ const asPulse = (data: any): RelationshipPulse | null => {
 };
 
 /** 仅同步状态，不调用模型；Worker/D1 负责后续离线增长。 */
-export const syncRelationshipBackend = async (char: CharacterProfile, messages: Message[], fallback: RelationshipPulse, knownCharacters: CharacterProfile[] = []) => {
+export const syncRelationshipBackend = async (
+  char: CharacterProfile,
+  messages: Message[],
+  fallback: RelationshipPulse,
+  knownCharacters: CharacterProfile[] = [],
+  apiConfig: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'>,
+) => {
   const global = await ActiveMsgStore.getGlobalConfig();
   if (!global?.workerUrl || !global?.userId) return null;
+  const [chatCredential] = await ensureRelationshipChatCredentials([char], apiConfig);
   const [momentsSettings, schedule] = await Promise.all([
     DB.getMomentsSettings().catch(() => undefined),
     isScheduleFeatureOn(char) ? getDailyScheduleForChar(char).catch(() => null) : Promise.resolve(null),
@@ -127,7 +162,16 @@ export const syncRelationshipBackend = async (char: CharacterProfile, messages: 
   });
   const body = await response.json().catch(() => null);
   if (!response.ok || !body?.success) throw new Error(body?.error?.message || '关系状态同步失败。');
-  return asPulse(body.data);
+  const pulse = asPulse(body.data);
+  const scheduleError = pulse?.diagnostics?.lastScheduleError;
+  if (chatCredential && missingCredentialError(scheduleError)) {
+    const repairKey = `${chatCredential.credId}:${pulse?.diagnostics?.lastScheduleErrorAt || scheduleError}`;
+    if (!repairedMissingCredentialErrors.has(repairKey)) {
+      await ActiveMsgClient.putLlmCredentials([chatCredential], { force: true });
+      repairedMissingCredentialErrors.add(repairKey);
+    }
+  }
+  return pulse;
 };
 
 export interface RelationshipJealousyTarget {
@@ -142,11 +186,13 @@ export interface RelationshipJealousyTarget {
 export const reportRelationshipJealousyEvents = async (
   targets: RelationshipJealousyTarget[],
   forceEnabled: boolean,
+  apiConfig: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'>,
 ) => {
   const nonEmpty = targets.filter(target => target.signals.length > 0);
   if (!nonEmpty.length) return [];
   const global = await ActiveMsgStore.getGlobalConfig();
   if (!global?.workerUrl || !global?.userId) return [];
+  await ensureRelationshipChatCredentials(nonEmpty.map(target => target.char), apiConfig);
   const response = await fetch(`${global.workerUrl.replace(/\/+$/, '')}/relationship/jealousy`, {
     method: 'POST', headers: headers(global.userId, global.serverToken),
     body: JSON.stringify({
@@ -169,9 +215,14 @@ export const reportRelationshipJealousyEvents = async (
 };
 
 /** 设置关闭时依然同步并展示醋意，但 Worker 不再强制建立 critical 联系机会。 */
-export const setRelationshipJealousyForceEnabled = async (chars: CharacterProfile[], forceEnabled: boolean) => {
+export const setRelationshipJealousyForceEnabled = async (
+  chars: CharacterProfile[],
+  forceEnabled: boolean,
+  apiConfig: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'>,
+) => {
   const global = await ActiveMsgStore.getGlobalConfig();
   if (!chars.length || !global?.workerUrl || !global?.userId) return;
+  await ensureRelationshipChatCredentials(chars, apiConfig);
   const response = await fetch(`${global.workerUrl.replace(/\/+$/, '')}/relationship/jealousy`, {
     method: 'POST', headers: headers(global.userId, global.serverToken),
     body: JSON.stringify({

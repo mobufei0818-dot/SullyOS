@@ -372,12 +372,12 @@ const Chat: React.FC = () => {
         if (!char || !relationshipFallbackPulse) return;
         let cancelled = false;
         const timer = window.setTimeout(() => {
-            void syncRelationshipBackend(char, messages, relationshipFallbackPulse, characters)
+            void syncRelationshipBackend(char, messages, relationshipFallbackPulse, characters, apiConfig)
                 .then(pulse => { if (!cancelled && pulse) setRelationshipBackendPulse(pulse); })
                 .catch(error => console.warn('[relationship] 后端状态同步失败', error));
         }, 350);
         return () => { cancelled = true; window.clearTimeout(timer); };
-    }, [char, characters, messages, relationshipFallbackPulse]);
+    }, [apiConfig, char, characters, messages, relationshipFallbackPulse]);
 
     useEffect(() => {
         if (!char || !getRelationshipConfig(char).enabled) return;
