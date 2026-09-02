@@ -32,7 +32,9 @@
 实际部署后路径带 `/moments` 前缀：
 
 - `GET /moments/health`：健康检查；
+- `POST /moments/runtime`：同步加密角色生活线快照、发帖/互动档位和低价模型凭据引用；
 - `POST /moments/sync`：幂等上传本地朋友圈事件、互动任务和收据；
+- `GET /moments/deliveries?userId=...` / `POST /moments/deliveries/ack`：拉取并确认离线生成的事实；
 - `GET /moments/tasks?userId=...&dueBefore=...`：读取到期任务；
 - `POST /moments/tasks/claim`：原子认领一条到期任务；
 - `POST /moments/tasks/complete`：报告任务完成、失败、取消或重新排队；
@@ -43,10 +45,15 @@
 
 ## 数据与职责边界
 
-- 朋友圈使用同一个 `DB`，但只创建 `moments_relationship_events`、`moments_tasks`、
-  `moments_sync_receipts`、`moments_diagnostics` 四张独立表，不混写 AMSG 核心表；
-- Worker 只保存结构化事件/任务摘要、幂等键和诊断，不接触朋友圈副 API Key，也不直接调用聊天模型；
-- 朋友圈打开时由本地执行器拉回并落地互动；Worker Cron 只每分钟回收卡住的 running 任务；
+- 朋友圈使用同一个 `DB`，但业务事实只写 `moments_*` 表，不混写 AMSG 任务表；模型凭据仅复用
+  原版主动消息 2.0 的 `llm_credentials` 加密行，朋友圈表只保存 `moments/default` 引用；
+- AMSG Cron 仍每分钟运行以保证原版消息准时；朋友圈模块排在原版 AMSG 投递之后，并且只有整 15 分钟
+  才查询自己的到期索引，每轮最多判断一名主体；卡住任务的恢复降为每小时一次；
+- 到期主体只调用一次低价模型完成“发不发 + 正文 + 相册/80%照片占位 + 可见范围”。只有确实发帖时，
+  再用一次统一调用规划所有正式角色、明确 NPC、2–5 位随机路人的点赞/评论/相互回复，不逐人调用模型；
+- Worker 会优先读取主动消息 2.0 的最新 `fire_pack` 私聊上下文；没有时回落到朋友圈加密快照。
+  页面关闭后仍可生成和安排互动，重新打开朋友圈只负责拉取事实并写入本地 IndexedDB；
+- 旧的页面内十分钟规划仅保留为“未启用离线模式”的兼容路径；启用离线模式后由 Worker 独占判断，避免双发；
 - 阶段 5 的醋意强制主动消息仍走现有关系层/AMSG 链路，不由本模块伪造消息。
 
 ## 文件说明

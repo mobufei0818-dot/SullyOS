@@ -3248,13 +3248,6 @@ export default {
   },
 
   async scheduled(event: CfScheduledEvent, env: Env): Promise<void> {
-    // 朋友圈模块只做自己的 stale 任务回收；失败不能阻断原版 AMSG Cron。
-    // 它与 AMSG 共用同一个每分钟 Cron，但不读取/修改 AMSG 任务表。
-    try {
-      await momentsWorker.scheduled(event, env as any);
-    } catch (error) {
-      console.warn('[moments] scheduled cleanup failed', error);
-    }
     // 定时任务这条路没人看得见，配置不全时上游只会抛一个堆栈。写明白点，
     // wrangler tail 里一眼能看出是配置问题还是任务本身挂了。
     const report = inspectWorkerEnv(env);
@@ -3279,6 +3272,13 @@ export default {
       await upstream.scheduled(event, env);
     } finally {
       activeScheduledTime = previousScheduledTime;
+    }
+    // 朋友圈放在原版 AMSG 投递之后：即使低价模型慢或超时，也绝不能延迟主动消息。
+    // 两者仍共用同一个每分钟 Cron；朋友圈内部只在整 15 分钟读自己的索引表。
+    try {
+      await momentsWorker.scheduled(event, env as any);
+    } catch (error) {
+      console.warn('[moments] scheduled tick failed', error);
     }
   },
 };

@@ -1,10 +1,44 @@
-import type { MomentsPendingJob, MomentsSyncOutboxItem, MomentsWorkerConfig, MomentsWorkerDiagnostics } from '../types';
+import type { MomentsActorType, MomentsInteractionMode, MomentsPendingJob, MomentsPostingMode, MomentsSyncOutboxItem, MomentsWorkerConfig, MomentsWorkerDiagnostics } from '../types';
 
 export interface MomentsSyncPayload {
   userId: string;
   events: Array<Record<string, unknown>>;
   tasks: Array<Record<string, unknown>>;
   receipts: Array<Record<string, unknown>>;
+}
+
+export interface MomentsCloudActorPack {
+  persona: string;
+  userRelationship: string;
+  privateChat: string;
+  sharedGroupChat: string;
+  recentPosts: Array<{ content: string; createdAt: number }>;
+  galleryOptions: Array<{ id: string; url?: string; savedDate?: string; review?: string; context?: string }>;
+  privacyCandidates: Array<{ actorId: string; name: string; groupName?: string }>;
+}
+
+export interface MomentsCloudActorRuntime {
+  actorId: string;
+  actorType: Extract<MomentsActorType, 'character' | 'npc'>;
+  characterId?: string;
+  parentCharacterId?: string;
+  displayName: string;
+  avatar?: string;
+  bio?: string;
+  postingMode: MomentsPostingMode;
+  interactionMode: MomentsInteractionMode;
+  timezoneOffsetMinutes: number;
+  pack: MomentsCloudActorPack;
+}
+
+export interface MomentsRuntimeSyncPayload {
+  userId: string;
+  enabled: boolean;
+  autoInteractionEnabled: boolean;
+  credentialId: string;
+  replaceAll?: boolean;
+  actors: MomentsCloudActorRuntime[];
+  updatedAt: number;
 }
 
 const normalizeWorkerUrl = (url: string) => url.trim().replace(/\/+$/, '');
@@ -87,6 +121,18 @@ const postJson = async (config: MomentsWorkerConfig, path: string, body: Record<
   }
   return data || {};
 };
+
+/**
+ * 同步离线朋友圈所需的最小角色快照与调度设置。API Key 不走这条路；它复用
+ * 主动消息 2.0 的 llm_credentials，只在这里传 credentialId 引用。
+ */
+export async function syncMomentsRuntime(
+  config: MomentsWorkerConfig,
+  payload: MomentsRuntimeSyncPayload,
+): Promise<{ upserted: number; disabled: number }> {
+  const data = await postJson(config, '/moments/runtime', payload as unknown as Record<string, unknown>);
+  return { upserted: Number(data?.upserted || 0), disabled: Number(data?.disabled || 0) };
+}
 
 export async function claimMomentsTask(config: MomentsWorkerConfig, userId: string, taskId: string): Promise<{ claimed: boolean; task?: MomentsPendingJob }> {
   try {

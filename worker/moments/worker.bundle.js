@@ -334,6 +334,7 @@ function normalizeVapidSubject(email) {
 
 // node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.26_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-4YH3TS4W.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
+var TAG_LENGTH_BYTES = 16;
 function importAesKey(hexKey, usage) {
   return globalThis.crypto.subtle.importKey(
     "raw",
@@ -342,6 +343,18 @@ function importAesKey(hexKey, usage) {
     false,
     [usage]
   );
+}
+async function aesGcmSeal(hexKey, iv, plaintextBytes) {
+  const key = await importAesKey(hexKey, "encrypt");
+  const sealed = new Uint8Array(await globalThis.crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, tagLength: TAG_LENGTH_BYTES * 8 },
+    key,
+    plaintextBytes
+  ));
+  return {
+    ciphertext: sealed.slice(0, sealed.length - TAG_LENGTH_BYTES),
+    authTag: sealed.slice(sealed.length - TAG_LENGTH_BYTES)
+  };
 }
 async function aesGcmOpen(hexKey, iv, ciphertext, authTag) {
   const key = await importAesKey(hexKey, "decrypt");
@@ -357,6 +370,11 @@ async function aesGcmOpen(hexKey, iv, ciphertext, authTag) {
 async function deriveUserEncryptionKey(userId, masterKey) {
   const digest = await globalThis.crypto.subtle.digest("SHA-256", utf8(masterKey + userId));
   return bytesToHex(new Uint8Array(digest)).slice(0, 64);
+}
+async function encryptForStorage(text, encryptionKey) {
+  const iv = randomBytes(16);
+  const { ciphertext, authTag } = await aesGcmSeal(encryptionKey, iv, utf8(text));
+  return `${bytesToHex(iv)}:${bytesToHex(authTag)}:${bytesToHex(ciphertext)}`;
 }
 async function decryptFromStorage(encryptedText, encryptionKey) {
   const [ivHex, authTagHex, encryptedDataHex] = encryptedText.split(":");
@@ -690,6 +708,25 @@ var SERVER_FEATURES = Object.freeze([
   "emit-result"
 ]);
 
+// utils/amsgFirePack.ts
+var GZIP_VALUE_PREFIX = "gz1:";
+var base64ToBytes = (base64) => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+};
+var streamThrough = async (data, transform) => {
+  const stream = new Blob([data]).stream().pipeThrough(transform);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+};
+var unpackStateValue = async (value) => {
+  if (!value.startsWith(GZIP_VALUE_PREFIX)) return value;
+  const gz = base64ToBytes(value.slice(GZIP_VALUE_PREFIX.length));
+  const raw = await streamThrough(gz, new DecompressionStream("gzip"));
+  return new TextDecoder().decode(raw);
+};
+
 // worker/moments/src/index.ts
 var cors = {
   "Access-Control-Allow-Origin": "*",
@@ -702,8 +739,45 @@ var now = () => Date.now();
 var id = () => globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 var asString = (value, fallback = "") => typeof value === "string" ? value.trim() : fallback;
 var asNumber = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+var asBoolean = (value, fallback = false) => typeof value === "boolean" ? value : fallback;
 var object = (value) => value && typeof value === "object" && !Array.isArray(value) ? value : {};
 var safeJson = (value) => JSON.stringify(value ?? {});
+var stableHash = (value) => {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) hash = Math.imul(hash ^ value.charCodeAt(index), 16777619);
+  return hash >>> 0;
+};
+var postingModeEnabled = (mode) => mode === "low" || mode === "medium" || mode === "high";
+var dateKeyAtOffset = (timestamp, offsetMinutes) => {
+  const shifted = new Date(timestamp + offsetMinutes * 6e4);
+  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")}`;
+};
+var localDayStartUtc = (timestamp, offsetMinutes) => {
+  const shifted = new Date(timestamp + offsetMinutes * 6e4);
+  return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()) - offsetMinutes * 6e4;
+};
+var nextMomentsDecisionAt = (actorId, mode, from, offsetMinutes) => {
+  if (!postingModeEnabled(mode)) return 0;
+  const windows = mode === "high" ? [{ start: 8, span: 4 }, { start: 13, span: 5 }, { start: 19, span: 4 }] : [{ start: 9, span: 13 }];
+  for (let dayOffset = 0; dayOffset < 9; dayOffset += 1) {
+    const dayStart = localDayStartUtc(from, offsetMinutes) + dayOffset * 24 * 60 * 6e4;
+    const dayKey = dateKeyAtOffset(dayStart + 12 * 60 * 6e4, offsetMinutes);
+    if (mode === "low" && stableHash(`${actorId}:${dayKey}`) % 7 >= 3) continue;
+    for (let opportunity = 0; opportunity < windows.length; opportunity += 1) {
+      const window = windows[opportunity];
+      const minuteSpan = window.span * 60;
+      const minute = stableHash(`${actorId}:${dayKey}:${opportunity}:decision`) % minuteSpan;
+      const candidate = dayStart + (window.start * 60 + minute) * 6e4;
+      if (candidate > from + 5 * 6e4) return candidate;
+    }
+  }
+  return from + 24 * 60 * 6e4;
+};
+var shouldRunMomentsCron = (scheduledTime) => {
+  if (!Number.isFinite(scheduledTime)) return false;
+  return Math.floor(scheduledTime / 6e4) % 15 === 0;
+};
+var shouldRunHourlyRecovery = (scheduledTime) => Number.isFinite(scheduledTime) && Math.floor(scheduledTime / 6e4) % 60 === 0;
 var schemaReady = false;
 async function ensureSchema2(db) {
   if (schemaReady) return;
@@ -721,6 +795,8 @@ async function ensureSchema2(db) {
       attempts INTEGER NOT NULL DEFAULT 0, error TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     )`,
     `CREATE INDEX IF NOT EXISTS idx_moments_tasks_due ON moments_tasks(user_id, state, due_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_moments_tasks_state_due ON moments_tasks(state, due_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_moments_tasks_state_updated ON moments_tasks(state, updated_at)`,
     `CREATE TABLE IF NOT EXISTS moments_sync_receipts (
       receipt_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, post_id TEXT, char_id TEXT, state TEXT NOT NULL,
       payload_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
@@ -733,7 +809,23 @@ async function ensureSchema2(db) {
       delivery_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, task_id TEXT NOT NULL UNIQUE,
       payload_json TEXT NOT NULL, created_at INTEGER NOT NULL, acknowledged_at INTEGER
     )`,
-    `CREATE INDEX IF NOT EXISTS idx_moments_deliveries_user_time ON moments_deliveries(user_id, acknowledged_at, created_at)`
+    `CREATE INDEX IF NOT EXISTS idx_moments_deliveries_user_time ON moments_deliveries(user_id, acknowledged_at, created_at)`,
+    `CREATE TABLE IF NOT EXISTS moments_actor_runtime (
+      user_id TEXT NOT NULL, actor_id TEXT NOT NULL, actor_type TEXT NOT NULL, char_id TEXT, parent_char_id TEXT,
+      display_name TEXT NOT NULL, avatar TEXT, bio TEXT, posting_mode TEXT NOT NULL, interaction_mode TEXT NOT NULL,
+      auto_interaction_enabled INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 0,
+      timezone_offset_minutes INTEGER NOT NULL DEFAULT 0, credential_id TEXT NOT NULL,
+      pack_encrypted TEXT NOT NULL, next_decision_at INTEGER NOT NULL DEFAULT 0,
+      last_decision_at INTEGER, last_post_at INTEGER, failure_count INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL, PRIMARY KEY(user_id, actor_id)
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_moments_actor_due ON moments_actor_runtime(enabled, next_decision_at)`,
+    `CREATE INDEX IF NOT EXISTS idx_moments_actor_user_interaction ON moments_actor_runtime(user_id, interaction_mode)`,
+    `CREATE TABLE IF NOT EXISTS moments_generated_posts (
+      post_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, author_id TEXT NOT NULL,
+      payload_encrypted TEXT NOT NULL, created_at INTEGER NOT NULL, deleted_at INTEGER
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_moments_generated_author_time ON moments_generated_posts(user_id, author_id, created_at)`
   ];
   for (const statement of statements) await db.prepare(statement).run();
   schemaReady = true;
@@ -742,6 +834,90 @@ function authorized(request, env) {
   const expected = env.MOMENTS_TOKEN?.trim() || env.AMSG_SERVER_TOKEN?.trim();
   if (!expected) return true;
   return request.headers.get("X-Client-Token") === expected || request.headers.get("X-Moments-Token") === expected;
+}
+var requireMasterKey = (env) => {
+  if (!env.AMSG_MASTER_KEY?.trim()) throw new Error("AMSG_MASTER_KEY \u672A\u914D\u7F6E\uFF0C\u65E0\u6CD5\u8BFB\u5199\u670B\u53CB\u5708\u79BB\u7EBF\u5FEB\u7167");
+  return env.AMSG_MASTER_KEY.trim();
+};
+async function syncRuntime(request, env) {
+  const body = object(await request.json().catch(() => ({})));
+  const userId = asString(body.userId);
+  const credentialId = asString(body.credentialId, "moments/default");
+  const enabled = asBoolean(body.enabled);
+  const autoInteractionEnabled = asBoolean(body.autoInteractionEnabled, true);
+  const updatedAt = asNumber(body.updatedAt, now());
+  const actors = Array.isArray(body.actors) ? body.actors.slice(0, 80) : [];
+  if (!userId) return json({ error: "userId is required" }, 400);
+  const userKey = await deriveUserEncryptionKey(userId, requireMasterKey(env));
+  let upserted = 0;
+  const actorIds = [];
+  for (const raw of actors) {
+    const actor = object(raw);
+    const actorId = asString(actor.actorId);
+    const displayName = asString(actor.displayName);
+    if (!actorId || !displayName) continue;
+    actorIds.push(actorId);
+    const postingMode = asString(actor.postingMode, "off");
+    const interactionMode = asString(actor.interactionMode, "normal");
+    const rowEnabled = enabled && postingModeEnabled(postingMode) ? 1 : 0;
+    const offset = Math.max(-14 * 60, Math.min(14 * 60, Math.trunc(asNumber(actor.timezoneOffsetMinutes, 0))));
+    const packEncrypted = await encryptForStorage(safeJson(object(actor.pack)), userKey);
+    const firstDecision = rowEnabled ? nextMomentsDecisionAt(actorId, postingMode, now(), offset) : 0;
+    const result = await env.DB.prepare(`INSERT INTO moments_actor_runtime (
+      user_id,actor_id,actor_type,char_id,parent_char_id,display_name,avatar,bio,posting_mode,interaction_mode,
+      auto_interaction_enabled,enabled,timezone_offset_minutes,credential_id,pack_encrypted,next_decision_at,
+      last_decision_at,last_post_at,failure_count,updated_at
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,0,?)
+    ON CONFLICT(user_id,actor_id) DO UPDATE SET
+      actor_type=excluded.actor_type,char_id=excluded.char_id,parent_char_id=excluded.parent_char_id,
+      display_name=excluded.display_name,avatar=excluded.avatar,bio=excluded.bio,
+      posting_mode=excluded.posting_mode,interaction_mode=excluded.interaction_mode,
+      auto_interaction_enabled=excluded.auto_interaction_enabled,enabled=excluded.enabled,
+      timezone_offset_minutes=excluded.timezone_offset_minutes,credential_id=excluded.credential_id,
+      pack_encrypted=excluded.pack_encrypted,
+      next_decision_at=CASE
+        WHEN excluded.enabled=0 THEN 0
+        WHEN moments_actor_runtime.enabled=0 OR moments_actor_runtime.posting_mode<>excluded.posting_mode OR moments_actor_runtime.next_decision_at<=0 THEN excluded.next_decision_at
+        ELSE moments_actor_runtime.next_decision_at END,
+      updated_at=MAX(moments_actor_runtime.updated_at,excluded.updated_at)`).bind(
+      userId,
+      actorId,
+      asString(actor.actorType, "character"),
+      asString(actor.characterId) || null,
+      asString(actor.parentCharacterId) || null,
+      displayName,
+      asString(actor.avatar) || null,
+      asString(actor.bio) || null,
+      postingMode,
+      interactionMode,
+      autoInteractionEnabled ? 1 : 0,
+      rowEnabled,
+      offset,
+      credentialId,
+      packEncrypted,
+      firstDecision,
+      updatedAt
+    ).run();
+    upserted += result.meta?.changes || 0;
+  }
+  let disabled = 0;
+  if (asBoolean(body.replaceAll, true)) {
+    const statement = actorIds.length ? env.DB.prepare(`UPDATE moments_actor_runtime SET enabled=0,next_decision_at=0,updated_at=? WHERE user_id=? AND actor_id NOT IN (${actorIds.map(() => "?").join(",")})`).bind(updatedAt, userId, ...actorIds) : env.DB.prepare(`UPDATE moments_actor_runtime SET enabled=0,next_decision_at=0,updated_at=? WHERE user_id=?`).bind(updatedAt, userId);
+    const result = await statement.run();
+    disabled = result.meta?.changes || 0;
+  }
+  return json({ ok: true, upserted, disabled });
+}
+async function resolveMomentsCredential(env, userId, credentialId) {
+  const row = await env.DB.prepare(`SELECT encrypted_value AS encryptedValue FROM llm_credentials WHERE user_id=? AND cred_id=? LIMIT 1`).bind(userId, credentialId).first();
+  if (!row?.encryptedValue) throw new Error(`\u670B\u53CB\u5708\u4E91\u7AEF\u51ED\u636E ${credentialId} \u4E0D\u5B58\u5728`);
+  const userKey = await deriveUserEncryptionKey(userId, requireMasterKey(env));
+  const parsed = object(JSON.parse(await decryptFromStorage(row.encryptedValue, userKey)));
+  const apiUrl = asString(parsed.apiUrl);
+  const apiKey = asString(parsed.apiKey);
+  const model = asString(parsed.primaryModel);
+  if (!apiUrl || !apiKey || !model) throw new Error(`\u670B\u53CB\u5708\u4E91\u7AEF\u51ED\u636E ${credentialId} \u4E0D\u5B8C\u6574`);
+  return { apiUrl, apiKey, model, userKey };
 }
 async function writeDiagnostic(db, userId, level, code, message, detail) {
   await db.prepare(`INSERT INTO moments_diagnostics (id,user_id,level,code,message,detail_json,created_at) VALUES (?,?,?,?,?,?,?)`).bind(id(), userId, level, code, message.slice(0, 500), safeJson(detail), now()).run();
@@ -765,6 +941,7 @@ async function sync(request, env) {
     acceptedEventIds.push(eventId);
     if (asString(row.type) === "delete" && asString(payload.postId)) {
       await env.DB.prepare(`UPDATE moments_tasks SET state='cancelled', updated_at=? WHERE user_id=? AND post_id=? AND state IN ('pending','running')`).bind(now(), userId, asString(payload.postId)).run();
+      await env.DB.prepare(`UPDATE moments_generated_posts SET deleted_at=? WHERE user_id=? AND post_id=? AND deleted_at IS NULL`).bind(now(), userId, asString(payload.postId)).run();
     }
   }
   for (const raw of tasks) {
@@ -848,6 +1025,301 @@ async function acknowledgeDeliveries(request, env) {
   await env.DB.batch(ids.map((deliveryId) => env.DB.prepare(`UPDATE moments_deliveries SET acknowledged_at=? WHERE delivery_id=? AND user_id=?`).bind(now(), deliveryId, userId)));
   return json({ ok: true, acknowledged: ids.length });
 }
+var extractCompletionContent = (data) => {
+  const root = object(data);
+  const choices = Array.isArray(root.choices) ? root.choices : [];
+  const message = choices.length ? object(object(choices[0]).message) : {};
+  const content = message.content;
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.map((part) => asString(object(part).text)).filter(Boolean).join("\n");
+  return asString(root.content);
+};
+var parseCompletionJson = (data) => {
+  const content = extractCompletionContent(data).trim();
+  const unfenced = content.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "").trim();
+  try {
+    return object(JSON.parse(unfenced));
+  } catch {
+    const start = unfenced.indexOf("{");
+    const end = unfenced.lastIndexOf("}");
+    if (start >= 0 && end > start) return object(JSON.parse(unfenced.slice(start, end + 1)));
+    throw new Error("\u670B\u53CB\u5708\u6A21\u578B\u6CA1\u6709\u8FD4\u56DE\u6709\u6548 JSON");
+  }
+};
+async function callMomentsModel(credential, prompt, timeoutMs = 9e4) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(credential.apiUrl, {
+      method: "POST",
+      signal: controller.signal,
+      headers: { Authorization: `Bearer ${credential.apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ model: credential.model, temperature: 0.78, stream: false, messages: [{ role: "user", content: prompt }] })
+    });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`\u670B\u53CB\u5708\u6A21\u578B HTTP ${response.status}: ${text.slice(0, 300)}`);
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error("\u670B\u53CB\u5708\u6A21\u578B\u54CD\u5E94\u4E0D\u662F JSON");
+    }
+    return parseCompletionJson(data);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function decryptRuntimePack(env, row, userKey) {
+  const key = userKey || await deriveUserEncryptionKey(row.userId, requireMasterKey(env));
+  return object(JSON.parse(await decryptFromStorage(row.packEncrypted, key)));
+}
+var flattenChatContent = (content) => {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((part) => {
+    if (typeof part === "string") return part;
+    const item = object(part);
+    return asString(item.text) || (asString(item.type).includes("image") ? "[\u56FE\u7247]" : "");
+  }).filter(Boolean).join(" ");
+};
+async function loadLatestAmsgPrivateChat(env, row, userKey) {
+  if (!row.charId) return "";
+  const state = await env.DB.prepare(`SELECT value FROM client_state WHERE user_id=? AND namespace=? AND key='fire_pack' LIMIT 1`).bind(row.userId, `amsg:char:${row.charId}`).first();
+  if (!state?.value) return "";
+  try {
+    const packed = await decryptFromStorage(state.value, userKey);
+    const firePack = object(JSON.parse(await unpackStateValue(packed)));
+    const chat = object(firePack.chat);
+    const messages = Array.isArray(chat.messages) ? chat.messages.slice(-24) : [];
+    const recentChat = messages.map((raw) => {
+      const message = object(raw);
+      const role = asString(message.role);
+      const who = role === "user" ? "\u7528\u6237" : role === "assistant" ? row.displayName : role;
+      return `${who}\uFF1A${flattenChatContent(message.content).replace(/\s+/g, " ").slice(0, 420)}`;
+    }).filter((line) => !line.endsWith("\uFF1A")).join("\n").slice(-7e3);
+    return recentChat || asString(firePack.template).slice(-7e3);
+  } catch {
+    return "";
+  }
+}
+var clampInteractionDueAt = (value, base, seed) => {
+  const fallback = base + (5 + stableHash(seed) % 176) * 6e4;
+  const parsed = asNumber(value, fallback);
+  return Math.max(base + 2 * 6e4, Math.min(parsed, base + 6 * 60 * 6e4));
+};
+async function saveDelivery(env, args) {
+  const createdAt = args.createdAt || now();
+  await env.DB.prepare(`INSERT OR IGNORE INTO moments_deliveries (delivery_id,user_id,task_id,payload_json,created_at,acknowledged_at) VALUES (?,?,?,?,?,NULL)`).bind(`moments-delivery-${args.taskId}`, args.userId, args.taskId, safeJson(args.payload), createdAt).run();
+  await notifyMomentsDelivery(env, args.userId, args.payload);
+}
+var selectFormalInteractionRows = (postId, rows) => {
+  const characters = rows.filter((row) => row.actorType !== "npc");
+  const limit = characters.length <= 3 ? characters.length : characters.length <= 5 ? Math.ceil(characters.length * 0.8) : characters.length <= 10 ? Math.ceil(characters.length * 0.65) : Math.ceil(characters.length * 0.5);
+  const selectedCharacters = [...characters].sort((a, b) => stableHash(`${postId}:${a.actorId}`) - stableHash(`${postId}:${b.actorId}`)).slice(0, limit);
+  const selectedNpcs = rows.filter((row) => row.actorType === "npc").sort((a, b) => stableHash(`${postId}:npc:${a.actorId}`) - stableHash(`${postId}:npc:${b.actorId}`)).slice(0, 3);
+  return [...selectedCharacters, ...selectedNpcs];
+};
+var PASSERBY_NAMES = ["\u6797\u6800", "\u5468\u5C7F", "\u8BB8\u7720", "\u9648\u9ED8", "\u6C88\u68E0", "\u987E\u5DDD", "\u53F6\u9752", "\u9646\u9065", "\u5B8B\u5F25", "\u7A0B\u91CE", "\u590F\u67DA", "\u767D\u6986", "\u6C5F\u6F84", "\u5510\u68A8", "\u6E29\u79BE", "\u4E54\u5B89"];
+var PASSERBY_BIOS = [
+  "\u5076\u5C14\u5237\u5230\u9644\u8FD1\u52A8\u6001\u7684\u666E\u901A\u4E0A\u73ED\u65CF\uFF0C\u8BF4\u8BDD\u7B80\u77ED\u968F\u548C\u3002",
+  "\u559C\u6B22\u62CD\u8857\u666F\u548C\u98DF\u7269\u7684\u8DEF\u4EBA\uFF0C\u8BC4\u8BBA\u76F4\u767D\u4F46\u6CA1\u6709\u6076\u610F\u3002",
+  "\u4F5C\u606F\u4E0D\u592A\u89C4\u5F8B\u7684\u5E74\u8F7B\u4EBA\uFF0C\u53EA\u5BF9\u771F\u6B63\u611F\u5174\u8DA3\u7684\u5185\u5BB9\u5F00\u53E3\u3002",
+  "\u5B89\u9759\u7684\u672C\u5730\u751F\u6D3B\u89C2\u5BDF\u8005\uFF0C\u901A\u5E38\u53EA\u70B9\u8D5E\uFF0C\u5076\u5C14\u7559\u4E00\u53E5\u8BDD\u3002",
+  "\u8DEF\u8FC7\u670B\u53CB\u5708\u7684\u964C\u751F\u4EBA\uFF0C\u6027\u683C\u5916\u5411\uFF0C\u5BB9\u6613\u88AB\u6709\u8DA3\u5185\u5BB9\u5438\u5F15\u3002",
+  "\u5BA1\u7F8E\u6311\u5254\u4F46\u6709\u5206\u5BF8\u7684\u8DEF\u4EBA\uFF0C\u4E0D\u4F1A\u5047\u88C5\u8BA4\u8BC6\u52A8\u6001\u4F5C\u8005\u3002"
+];
+var passerbyActors = (postId) => Array.from({ length: 2 + stableHash(`${postId}:passerby-count`) % 4 }, (_, index) => {
+  const seed = stableHash(`${postId}:passerby:${index}`);
+  return {
+    actorId: `moments:passerby:${postId}:${index}:${seed.toString(36)}`,
+    actorType: "npc",
+    displayName: PASSERBY_NAMES[seed % PASSERBY_NAMES.length],
+    bio: PASSERBY_BIOS[Math.floor(seed / PASSERBY_NAMES.length) % PASSERBY_BIOS.length],
+    interactionMode: "normal",
+    pack: { persona: PASSERBY_BIOS[Math.floor(seed / PASSERBY_NAMES.length) % PASSERBY_BIOS.length], userRelationship: "\u5B8C\u5168\u65E0\u5173\u7684\u968F\u673A\u8DEF\u4EBA\uFF0C\u4E0D\u5F97\u5047\u88C5\u8BA4\u8BC6\u4EFB\u4F55\u4EBA\u3002" }
+  };
+});
+async function planOfflineInteractions(env, author, credential, post) {
+  if (!author.autoInteractionEnabled) return 0;
+  const candidates = await env.DB.prepare(`SELECT user_id AS userId,actor_id AS actorId,actor_type AS actorType,char_id AS charId,parent_char_id AS parentCharId,
+    display_name AS displayName,avatar,bio,posting_mode AS postingMode,interaction_mode AS interactionMode,
+    auto_interaction_enabled AS autoInteractionEnabled,timezone_offset_minutes AS timezoneOffsetMinutes,
+    credential_id AS credentialId,pack_encrypted AS packEncrypted,next_decision_at AS nextDecisionAt,
+    last_post_at AS lastPostAt,failure_count AS failureCount
+    FROM moments_actor_runtime WHERE user_id=? AND actor_id<>? AND interaction_mode<>'off' LIMIT 60`).bind(author.userId, author.actorId).all();
+  const visibility = object(post.visibility);
+  const blocked = new Set(Array.isArray(visibility.blockedActorIds) ? visibility.blockedActorIds.filter((value) => typeof value === "string") : []);
+  const visibleRows = (candidates.results || []).filter((row) => !blocked.has(row.actorId) && !(row.parentCharId && blocked.has(`moments:character:${row.parentCharId}`)));
+  const selected = selectFormalInteractionRows(asString(post.id), visibleRows);
+  const actors = [];
+  for (const row of selected) {
+    const pack = await decryptRuntimePack(env, row, credential.userKey);
+    const latestPrivateChat = await loadLatestAmsgPrivateChat(env, row, credential.userKey);
+    actors.push({
+      actorId: row.actorId,
+      actorType: row.actorType,
+      actorName: row.displayName,
+      interactionMode: row.interactionMode,
+      persona: asString(pack.persona, asString(row.bio)).slice(0, 4500),
+      userRelationship: asString(pack.userRelationship).slice(0, 1800),
+      privateChat: (latestPrivateChat || asString(pack.privateChat)).slice(-7e3),
+      sharedGroupChat: asString(pack.sharedGroupChat).slice(-6e3)
+    });
+  }
+  const authorPack = await decryptRuntimePack(env, author, credential.userKey);
+  const authorPrivateChat = await loadLatestAmsgPrivateChat(env, author, credential.userKey);
+  actors.push({
+    actorId: author.actorId,
+    actorType: author.actorType,
+    actorName: author.displayName,
+    interactionMode: "author_reply",
+    canReplyAsAuthor: true,
+    persona: asString(authorPack.persona, asString(author.bio)).slice(0, 4500),
+    userRelationship: asString(authorPack.userRelationship).slice(0, 1800),
+    privateChat: (authorPrivateChat || asString(authorPack.privateChat)).slice(-7e3),
+    sharedGroupChat: asString(authorPack.sharedGroupChat).slice(-6e3)
+  });
+  const passers = passerbyActors(asString(post.id));
+  actors.push(...passers.map((actor) => ({
+    actorId: actor.actorId,
+    actorType: actor.actorType,
+    actorName: actor.displayName,
+    interactionMode: actor.interactionMode,
+    persona: actor.pack.persona,
+    userRelationship: actor.pack.userRelationship
+  })));
+  if (!actors.length) return 0;
+  const prompt = [
+    "\u4F60\u662F\u670B\u53CB\u5708\u540E\u53F0\u4E92\u52A8\u89C4\u5212\u5668\u3002\u53EA\u8F93\u51FA JSON\uFF0C\u4E0D\u8981 Markdown\uFF0C\u4E0D\u8981\u89E3\u91CA\u3002",
+    "\u4E00\u6B21\u6027\u89C4\u5212\u672C\u5E16\u7684\u70B9\u8D5E\u3001\u8BC4\u8BBA\u4E0E\u5C11\u91CF\u81EA\u7136\u4E92\u76F8\u56DE\u590D\uFF1B\u4E0D\u5FC5\u8BA9\u6240\u6709\u5019\u9009\u4EBA\u4E92\u52A8\uFF0C\u4E5F\u4E0D\u8981\u628A\u4E0D\u540C\u89D2\u8272\u5199\u6210\u540C\u4E00\u79CD\u8BED\u6C14\u3002",
+    "\u89D2\u8272\u63AA\u8F9E\u4E0E\u4EB2\u758F\u5FC5\u987B\u6765\u81EA\u5404\u81EA persona\u3001\u5F53\u524D\u5173\u7CFB\u3001\u8FD1\u671F\u79C1\u804A\uFF1B\u89D2\u8272\u4E92\u76F8\u56DE\u590D\u65F6\u8FD8\u8981\u53C2\u8003\u5171\u540C\u7FA4\u804A\u3002\u6CA1\u6709\u5171\u540C\u4E0A\u4E0B\u6587\u5C31\u53EA\u56DE\u5E94\u773C\u524D\u5185\u5BB9\uFF0C\u4E0D\u5F97\u7F16\u9020\u5171\u540C\u7ECF\u5386\u3002",
+    "\u6BCF\u4E2A actorId \u6700\u591A\u51FA\u73B0\u4E00\u6B21\u3002kind \u53EA\u80FD\u662F reaction \u6216 comment\u3002comment \u53EF\u4EE5\u7528 replyToActorId \u56DE\u590D\u672C\u8F6E\u66F4\u65E9\u51FA\u73B0\u7684\u8BC4\u8BBA\u8005\u3001\u5DF2\u70B9\u8D5E\u8005\u6216\u53D1\u5E16\u8005\u3002",
+    "\u5019\u9009\u4E2D canReplyAsAuthor=true \u7684\u662F\u53D1\u5E16\u8005\u672C\u4EBA\uFF1ATA \u4E0D\u80FD\u7ED9\u81EA\u5DF1\u70B9\u8D5E\uFF0C\u53EA\u80FD\u5728\u5176\u4ED6\u4EBA\u5148\u4E92\u52A8\u4E4B\u540E\u6309\u9700\u56DE\u590D\u5176\u4E2D\u4E00\u4EBA\uFF1B\u6CA1\u6709\u503C\u5F97\u56DE\u590D\u5C31\u4E0D\u8981\u8F93\u51FA TA\u3002",
+    "\u968F\u673A\u8DEF\u4EBA\u5171 2\u20135 \u4EBA\uFF0C\u70B9\u8D5E\u6216\u8BC4\u8BBA\u5B8C\u5168\u968F\u673A\uFF1B\u8DEF\u4EBA\u8BC4\u8BBA\u6700\u591A 3 \u6761\uFF0C\u4E0D\u5F97\u5047\u88C5\u4E0E\u4F5C\u8005\u719F\u8BC6\u3002\u6700\u591A 8 \u6761\u8BC4\u8BBA\u3002dueAt \u5FC5\u987B\u5728\u672A\u6765 2 \u5206\u949F\u5230 6 \u5C0F\u65F6\u3002",
+    'JSON\uFF1A{"interactions":[{"actorId":"\u5019\u9009ID","kind":"reaction|comment","content":"\u8BC4\u8BBA\u65F6\u5FC5\u586B","replyToActorId":"\u53EF\u7701\u7565","dueAt":0}]}',
+    `now=${now()}`,
+    `\u5E16\u5B50=${JSON.stringify({ id: post.id, authorId: post.authorId, authorName: post.authorName, content: post.content, createdAt: post.createdAt })}`,
+    `\u5019\u9009\u4EBA=${JSON.stringify(actors)}`
+  ].join("\n");
+  const plan = await callMomentsModel(credential, prompt);
+  const raw = Array.isArray(plan.interactions) ? plan.interactions : [];
+  const actorById = new Map(actors.map((actor) => [asString(actor.actorId), actor]));
+  const passerIds = new Set(passers.map((actor) => actor.actorId));
+  const used = /* @__PURE__ */ new Set();
+  const availableReplyTargets = /* @__PURE__ */ new Set([author.actorId]);
+  const planned = [];
+  let commentCount = 0;
+  let passerCommentCount = 0;
+  for (const rawItem of raw) {
+    const item = object(rawItem);
+    const actorId = asString(item.actorId);
+    const actor = actorById.get(actorId);
+    if (!actor || used.has(actorId)) continue;
+    let kind = asString(item.kind) === "comment" ? "comment" : "reaction";
+    if (actor.canReplyAsAuthor === true && kind !== "comment") continue;
+    if (asString(actor.interactionMode) === "reaction_only") kind = "reaction";
+    const content = asString(item.content).slice(0, 500);
+    if (kind === "comment" && (!content || commentCount >= 8 || passerIds.has(actorId) && passerCommentCount >= 3)) kind = "reaction";
+    if (kind === "comment") {
+      commentCount += 1;
+      if (passerIds.has(actorId)) passerCommentCount += 1;
+    }
+    const requestedTarget = asString(item.replyToActorId);
+    const replyToActorId = kind === "comment" && availableReplyTargets.has(requestedTarget) ? requestedTarget : void 0;
+    if (actor.canReplyAsAuthor === true && (!replyToActorId || replyToActorId === author.actorId)) continue;
+    planned.push({ actorId, kind, ...kind === "comment" ? { content } : {}, ...replyToActorId ? { replyToActorId } : {}, dueAt: clampInteractionDueAt(item.dueAt, now(), `${post.id}:${actorId}`), actor });
+    used.add(actorId);
+    availableReplyTargets.add(actorId);
+  }
+  for (const passer of passers) {
+    if (used.has(passer.actorId)) continue;
+    const actor = actorById.get(passer.actorId);
+    planned.push({ actorId: passer.actorId, kind: "reaction", dueAt: clampInteractionDueAt(void 0, now(), `${post.id}:${passer.actorId}`), actor });
+  }
+  for (const item of planned) {
+    const sourceId = `${post.id}:${item.actorId}:${item.kind}`;
+    const payload = {
+      actorId: item.actorId,
+      actorType: asString(item.actor.actorType, "character"),
+      actorName: asString(item.actor.actorName, "\u89D2\u8272"),
+      kind: item.kind,
+      ...item.content ? { content: item.content } : {},
+      ...item.replyToActorId ? { replyToActorId: item.replyToActorId } : {},
+      sourceId
+    };
+    await env.DB.prepare(`INSERT OR IGNORE INTO moments_tasks (task_id,user_id,char_id,post_id,task_type,due_at,state,payload_json,thread_version,idempotency_key,attempts,error,created_at,updated_at)
+      VALUES (?,?,?,?,? ,?,'pending',?,1,?,0,NULL,?,?)`).bind(`moments-job-${sourceId}`, author.userId, item.actorId, asString(post.id), "interaction", item.dueAt, safeJson(payload), `moments:${post.id}:v1:${item.actorId}:${item.kind}`, now(), now()).run();
+  }
+  return planned.length;
+}
+async function generateOfflinePost(env, actor) {
+  const credential = await resolveMomentsCredential(env, actor.userId, actor.credentialId);
+  const pack = await decryptRuntimePack(env, actor, credential.userKey);
+  const latestPrivateChat = await loadLatestAmsgPrivateChat(env, actor, credential.userKey);
+  const recentCloud = await env.DB.prepare(`SELECT payload_encrypted AS payloadEncrypted FROM moments_generated_posts WHERE user_id=? AND author_id=? AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 6`).bind(actor.userId, actor.actorId).all();
+  const recentPosts = [];
+  for (const row of recentCloud.results || []) {
+    try {
+      const stored = object(JSON.parse(await decryptFromStorage(row.payloadEncrypted, credential.userKey)));
+      recentPosts.push({ content: asString(stored.content), createdAt: asNumber(stored.createdAt) });
+    } catch {
+    }
+  }
+  const photoPreferred = stableHash(`${actor.actorId}:${dateKeyAtOffset(now(), actor.timezoneOffsetMinutes)}:photo`) % 100 < 80;
+  const galleryOptions = Array.isArray(pack.galleryOptions) ? pack.galleryOptions.slice(0, 18).map(object) : [];
+  const privacyCandidates = Array.isArray(pack.privacyCandidates) ? pack.privacyCandidates.slice(0, 48).map(object) : [];
+  const prompt = [
+    "\u4F60\u662F\u89D2\u8272\u670B\u53CB\u5708\u540E\u53F0\u751F\u6D3B\u7EBF\u89C4\u5212\u5668\u3002\u53EA\u8F93\u51FA JSON\uFF0C\u4E0D\u8981 Markdown\uFF0C\u4E0D\u8981\u89E3\u91CA\u3002",
+    "\u7ED3\u5408\u89D2\u8272\u4EBA\u8BBE\u3001\u4E0E\u7528\u6237\u7684\u5F53\u524D\u5173\u7CFB\u3001\u8FD1\u671F\u79C1\u804A/\u7FA4\u804A\u548C\u6700\u8FD1\u52A8\u6001\uFF0C\u5224\u65AD\u73B0\u5728\u662F\u5426\u771F\u6709\u503C\u5F97\u53D1\u7684\u670B\u53CB\u5708\uFF1B\u6CA1\u6709\u5C31 shouldPost=false\uFF0C\u7EDD\u4E0D\u8981\u51D1\u6570\u3002",
+    `\u9891\u7387\u6863\u4F4D=${actor.postingMode}\uFF1B\u5F53\u524D\u65F6\u95F4\u6233=${now()}\uFF1B\u672C\u6B21\u5E26\u56FE\u503E\u5411=${photoPreferred ? "80%\u89C4\u5219\u547D\u4E2D" : "\u672A\u547D\u4E2D"}\u3002`,
+    "\u82E5 shouldPost=true\uFF0C\u76F4\u63A5\u751F\u6210\u4E0D\u8D85\u8FC7500\u5B57\u7684\u751F\u6D3B\u5316\u6B63\u6587\u3002\u53EF\u4EE5\u4ECE\u81EA\u5DF1\u7684\u5C0F\u624B\u673A\u76F8\u518C\u5019\u9009\u9009\u62E9 galleryImageId\uFF1B\u53EA\u6709\u6CA1\u6709\u5408\u9002\u65E7\u7167\u65F6\u624D\u586B\u5199 photoPrompt\uFF0C\u4E8C\u8005\u53EA\u80FD\u9009\u4E00\u4E2A\u3002",
+    'JSON\uFF1A{"shouldPost":true,"content":"\u6B63\u6587","galleryImageId":"\u53EF\u7701\u7565","photoPrompt":"\u53EF\u7701\u7565","photoIncludesAuthor":false,"visibilityMode":"public|exclude","excludedActorIds":[]}',
+    `\u89D2\u8272=${JSON.stringify({ name: actor.displayName, bio: actor.bio || "", persona: asString(pack.persona).slice(0, 5e3) })}`,
+    `\u4E0E\u7528\u6237\u5173\u7CFB=${asString(pack.userRelationship).slice(0, 2200)}`,
+    `\u8FD1\u671F\u79C1\u804A=${(latestPrivateChat || asString(pack.privateChat)).slice(-7e3)}`,
+    `\u5171\u540C\u7FA4\u804A=${asString(pack.sharedGroupChat).slice(-6500)}`,
+    `\u6700\u8FD1\u52A8\u6001=${JSON.stringify([...recentPosts, ...Array.isArray(pack.recentPosts) ? pack.recentPosts.map(object).map((item) => ({ content: asString(item.content), createdAt: asNumber(item.createdAt) })) : []].slice(0, 8))}`,
+    `\u81EA\u5DF1\u7684\u76F8\u518C\u5019\u9009=${JSON.stringify(galleryOptions.map((item) => ({ id: item.id, savedDate: item.savedDate, review: item.review, context: item.context })))}`,
+    `\u53EF\u6392\u9664\u7684\u597D\u53CB=${JSON.stringify(privacyCandidates.map((item) => ({ actorId: item.actorId, name: item.name, groupName: item.groupName })))}`
+  ].join("\n");
+  const result = await callMomentsModel(credential, prompt);
+  const content = asString(result.content).slice(0, 1e3);
+  if (result.shouldPost !== true || !content) return { posted: false, interactions: 0 };
+  const createdAt = now();
+  const postId = `moment-cloud-${actor.actorId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(-40)}-${createdAt.toString(36)}`;
+  const galleryById = new Map(galleryOptions.map((item) => [asString(item.id), item]));
+  const selectedGallery = galleryById.get(asString(result.galleryImageId));
+  const modelPrompt = asString(result.photoPrompt).slice(0, 1e3);
+  const photoPrompt = photoPreferred && !selectedGallery ? modelPrompt || `\u4E0E\u8FD9\u6761\u670B\u53CB\u5708\u6B63\u6587\u4E00\u81F4\u7684\u81EA\u7136\u751F\u6D3B\u7167\u7247\uFF1A${content}` : "";
+  const mediaId = selectedGallery ? `moments-gallery-${postId}` : photoPrompt ? `moments-generated-${postId}` : "";
+  const candidateIds = new Set(privacyCandidates.map((item) => asString(item.actorId)).filter(Boolean));
+  const excludedActorIds = Array.isArray(result.excludedActorIds) ? [...new Set(result.excludedActorIds.filter((value) => typeof value === "string" && candidateIds.has(value)))].slice(0, 24) : [];
+  const visibilityMode = asString(result.visibilityMode) === "exclude" && excludedActorIds.length ? "exclude" : "public";
+  const post = {
+    id: postId,
+    authorType: actor.actorType === "npc" ? "npc" : "character",
+    authorId: actor.actorId,
+    authorName: actor.displayName,
+    ...actor.avatar ? { authorAvatar: actor.avatar } : {},
+    content,
+    mediaIds: mediaId ? [mediaId] : [],
+    createdAt,
+    source: actor.actorType === "npc" ? "npc" : "character",
+    visibility: { id: `moments-visibility-${postId}`, postId, mode: visibilityMode, allowedActorIds: [], blockedActorIds: visibilityMode === "exclude" ? excludedActorIds : [], groupIds: [], version: 1, capturedAt: createdAt }
+  };
+  const media = selectedGallery && mediaId ? [{ id: mediaId, postId, url: asString(selectedGallery.url, `moments-gallery-pending:${mediaId}`), galleryImageId: asString(selectedGallery.id), createdAt, generated: false, generationStatus: "ready" }] : mediaId ? [{ id: mediaId, postId, url: `moments-photo-pending:${mediaId}`, createdAt, generated: true, prompt: photoPrompt, includeCharacter: result.photoIncludesAuthor === true, generationStatus: "pending" }] : [];
+  await env.DB.prepare(`INSERT OR IGNORE INTO moments_generated_posts (post_id,user_id,author_id,payload_encrypted,created_at,deleted_at) VALUES (?,?,?,?,?,NULL)`).bind(postId, actor.userId, actor.actorId, await encryptForStorage(safeJson(post), credential.userKey), createdAt).run();
+  const taskId = `moments-job-post-${postId}`;
+  const payload = { kind: "post", actorName: actor.displayName, sourceId: postId, postId, actorId: actor.actorId, post, media, taskType: "post", taskId, __workerDelivered: true };
+  await saveDelivery(env, { userId: actor.userId, taskId, payload, createdAt });
+  let interactions = 0;
+  try {
+    interactions = await planOfflineInteractions(env, actor, credential, post);
+  } catch (error) {
+    await writeDiagnostic(env.DB, actor.userId, "warn", "offline_interaction_plan_failed", error?.message || "\u4E92\u52A8\u89C4\u5212\u5931\u8D25", { postId });
+  }
+  return { posted: true, interactions, createdAt };
+}
 async function notifyMomentsDelivery(env, userId, payload) {
   if (!env.AMSG_MASTER_KEY || !env.VAPID_PUBLIC_KEY?.trim() || !env.VAPID_PRIVATE_KEY?.trim()) return;
   try {
@@ -882,7 +1354,8 @@ var src_default = {
       await ensureSchema2(env.DB);
       const url = new URL(request.url);
       const path = url.pathname.replace(/\/+$/, "") || "/";
-      if (request.method === "GET" && path.endsWith("/health")) return json({ ok: true, service: "sullyos-moments", schema: 1, now: now() });
+      if (request.method === "GET" && path.endsWith("/health")) return json({ ok: true, service: "sullyos-moments", schema: 2, now: now() });
+      if (request.method === "POST" && path.endsWith("/runtime")) return await syncRuntime(request, env);
       if (request.method === "POST" && path.endsWith("/sync")) return await sync(request, env);
       if (request.method === "GET" && path.endsWith("/tasks")) return await listTasks(url, env);
       if (request.method === "GET" && path.endsWith("/deliveries")) return await listDeliveries(url, env);
@@ -899,9 +1372,12 @@ var src_default = {
       return json({ error: error?.message || "Worker request failed" }, 500);
     }
   },
-  async scheduled(_event, env) {
+  async scheduled(event, env) {
+    const scheduledTime = asNumber(event?.scheduledTime, now());
+    if (!shouldRunMomentsCron(scheduledTime)) return;
     await ensureSchema2(env.DB);
-    const due = await env.DB.prepare(`SELECT task_id AS id,user_id AS userId,char_id AS actorId,post_id AS postId,task_type AS type,payload_json AS payload FROM moments_tasks WHERE state='pending' AND due_at<=? ORDER BY due_at ASC LIMIT 100`).bind(now()).all();
+    const tickNow = now();
+    const due = await env.DB.prepare(`SELECT task_id AS id,user_id AS userId,char_id AS actorId,post_id AS postId,task_type AS type,payload_json AS payload FROM moments_tasks WHERE state='pending' AND due_at<=? ORDER BY due_at ASC LIMIT 100`).bind(tickNow).all();
     for (const task of due.results || []) {
       let payload = object((() => {
         try {
@@ -912,16 +1388,44 @@ var src_default = {
       })());
       payload = { ...payload, taskId: task.id, taskType: task.type, postId: task.postId, actorId: task.actorId, __workerDelivered: true };
       const deliveryId = `moments-delivery-${task.id}`;
-      const claimed = await env.DB.prepare(`UPDATE moments_tasks SET state='done',updated_at=? WHERE task_id=? AND state='pending'`).bind(now(), task.id).run();
+      const claimed = await env.DB.prepare(`UPDATE moments_tasks SET state='done',updated_at=? WHERE task_id=? AND state='pending'`).bind(tickNow, task.id).run();
       if (!(claimed.meta?.changes || 0)) continue;
-      await env.DB.prepare(`INSERT OR IGNORE INTO moments_deliveries (delivery_id,user_id,task_id,payload_json,created_at,acknowledged_at) VALUES (?,?,?,?,?,NULL)`).bind(deliveryId, task.userId, task.id, safeJson(payload), now()).run();
+      await env.DB.prepare(`INSERT OR IGNORE INTO moments_deliveries (delivery_id,user_id,task_id,payload_json,created_at,acknowledged_at) VALUES (?,?,?,?,?,NULL)`).bind(deliveryId, task.userId, task.id, safeJson(payload), tickNow).run();
       await notifyMomentsDelivery(env, task.userId, payload);
     }
-    const cutoff = now() - 10 * 6e4;
-    const result = await env.DB.prepare(`UPDATE moments_tasks SET state='pending',error='Worker recovered a stale running task',updated_at=? WHERE state='running' AND updated_at<?`).bind(now(), cutoff).run();
-    if (result.meta?.changes) await writeDiagnostic(env.DB, null, "info", "stale_tasks_requeued", `requeued ${result.meta.changes} stale task(s)`);
+    const actor = await env.DB.prepare(`SELECT user_id AS userId,actor_id AS actorId,actor_type AS actorType,char_id AS charId,parent_char_id AS parentCharId,
+      display_name AS displayName,avatar,bio,posting_mode AS postingMode,interaction_mode AS interactionMode,
+      auto_interaction_enabled AS autoInteractionEnabled,timezone_offset_minutes AS timezoneOffsetMinutes,
+      credential_id AS credentialId,pack_encrypted AS packEncrypted,next_decision_at AS nextDecisionAt,
+      last_post_at AS lastPostAt,failure_count AS failureCount
+      FROM moments_actor_runtime WHERE enabled=1 AND next_decision_at>0 AND next_decision_at<=?
+      ORDER BY next_decision_at ASC LIMIT 1`).bind(tickNow).first();
+    if (actor) {
+      const minimumGap = actor.postingMode === "high" ? 4 * 60 * 6e4 : actor.postingMode === "medium" ? 18 * 60 * 6e4 : 48 * 60 * 6e4;
+      const nextDecisionAt = nextMomentsDecisionAt(actor.actorId, actor.postingMode, tickNow, actor.timezoneOffsetMinutes);
+      if (actor.lastPostAt && tickNow - actor.lastPostAt < minimumGap) {
+        await env.DB.prepare(`UPDATE moments_actor_runtime SET next_decision_at=?,last_decision_at=?,failure_count=0,updated_at=? WHERE user_id=? AND actor_id=?`).bind(Math.max(nextDecisionAt, actor.lastPostAt + minimumGap), tickNow, tickNow, actor.userId, actor.actorId).run();
+      } else {
+        try {
+          const generated = await generateOfflinePost(env, actor);
+          await env.DB.prepare(`UPDATE moments_actor_runtime SET next_decision_at=?,last_decision_at=?,last_post_at=CASE WHEN ?=1 THEN ? ELSE last_post_at END,failure_count=0,updated_at=? WHERE user_id=? AND actor_id=?`).bind(nextDecisionAt, tickNow, generated.posted ? 1 : 0, generated.posted ? generated.createdAt : null, tickNow, actor.userId, actor.actorId).run();
+        } catch (error) {
+          const failureCount = Math.min(8, Math.max(0, actor.failureCount || 0) + 1);
+          const retryAt = tickNow + Math.min(6 * 60 * 6e4, 30 * 6e4 * 2 ** (failureCount - 1));
+          await env.DB.prepare(`UPDATE moments_actor_runtime SET next_decision_at=?,last_decision_at=?,failure_count=?,updated_at=? WHERE user_id=? AND actor_id=?`).bind(retryAt, tickNow, failureCount, tickNow, actor.userId, actor.actorId).run();
+          await writeDiagnostic(env.DB, actor.userId, "warn", "offline_post_check_failed", error?.message || "\u79BB\u7EBF\u53D1\u5E16\u5224\u65AD\u5931\u8D25", { actorId: actor.actorId, retryAt, failureCount });
+        }
+      }
+    }
+    if (shouldRunHourlyRecovery(scheduledTime)) {
+      const cutoff = tickNow - 10 * 6e4;
+      const result = await env.DB.prepare(`UPDATE moments_tasks SET state='pending',error='Worker recovered a stale running task',updated_at=? WHERE state='running' AND updated_at<?`).bind(tickNow, cutoff).run();
+      if (result.meta?.changes) await writeDiagnostic(env.DB, null, "info", "stale_tasks_requeued", `requeued ${result.meta.changes} stale task(s)`);
+    }
   }
 };
 export {
-  src_default as default
+  src_default as default,
+  nextMomentsDecisionAt,
+  shouldRunMomentsCron
 };

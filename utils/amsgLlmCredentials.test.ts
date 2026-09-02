@@ -13,6 +13,7 @@ import {
   buildCharChatCredRow,
   buildCharEmotionCredRow,
   buildCharInstantCredRow,
+  buildMomentsLlmCredentialRow,
   charCredId,
   charCredIds,
   chunkCredRows,
@@ -20,6 +21,7 @@ import {
   forgetCredIds,
   knownCredIds,
   normalizeChatApiUrl,
+  MOMENTS_LLM_CREDENTIAL_ID,
   parseCharCredId,
   pickChangedCredRows,
   rememberCredRows,
@@ -77,6 +79,16 @@ describe('credId 起名', () => {
   it('名字在上游的长度上限（128）之内', () => {
     // 角色 id 是 uuid，最长的那个名字也就四十来个字符。
     expect(charCredId('7f2b1c8a-9d4e-4a1b-8c2d-000000000001', 'instant').length).toBeLessThanOrEqual(128);
+  });
+});
+
+describe('朋友圈用户级凭据', () => {
+  it('复用加密凭据表但不为每名角色复制 Key', () => {
+    expect(buildMomentsLlmCredentialRow(API)).toEqual({
+      credId: MOMENTS_LLM_CREDENTIAL_ID,
+      value: { apiUrl: 'https://api.example.dev/v1/chat/completions', apiKey: 'sk-global', primaryModel: 'gpt-global' },
+    });
+    expect(buildMomentsLlmCredentialRow({ ...API, apiKey: '' })).toBeNull();
   });
 });
 

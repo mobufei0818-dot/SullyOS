@@ -8,8 +8,10 @@ import TokenImg from '../components/os/TokenImg';
 import type { CharacterProfile, GalleryImage, MemoryFragment, MomentsComment, MomentsEventLedgerEntry, MomentsEventType, MomentsInteractionMode, MomentsMediaRef, MomentsPendingJob, MomentsPost, MomentsPostingMode, MomentsProfile, MomentsReaction, MomentsSettings, MomentsTempStranger, MomentsTempTranscript, MomentsVisibilityMode, MomentsApiConfig, MomentsWorkerConfig, MomentsWorkerDiagnostics } from '../types';
 import { generateChatImage, isImageGenerationConfigured } from '../utils/imageGeneration';
 import { fetchMomentsModels, isMomentsApiReady, momentsApiFromMain, momentsApiFromPreset, planMomentsCharacterPost, planMomentsInteractions, planMomentsNpcCharacterProfile, planMomentsNpcProfiles, planMomentsStranger, planMomentsStrangerCharacterProfile, replyMomentsStranger, testMomentsApi, type MomentsInteractionActorContext } from '../utils/momentsApi';
-import { acknowledgeMomentsDeliveries, claimMomentsTask, completeMomentsTask, getMomentsWorkerDiagnostics, hasPendingMomentsSyncWork, isD1DailyLimitError, isMomentsWorkerReady, outboxToSyncPayload, pullMomentsDeliveries, pullMomentsTasks, syncMomentsOutbox } from '../utils/momentsSync';
+import { acknowledgeMomentsDeliveries, claimMomentsTask, completeMomentsTask, getMomentsWorkerDiagnostics, hasPendingMomentsSyncWork, isD1DailyLimitError, isMomentsWorkerReady, outboxToSyncPayload, pullMomentsDeliveries, pullMomentsTasks, syncMomentsOutbox, syncMomentsRuntime, type MomentsCloudActorRuntime } from '../utils/momentsSync';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
+import { ActiveMsgClient } from '../utils/activeMsgClient';
+import { buildMomentsLlmCredentialRow, MOMENTS_LLM_CREDENTIAL_ID } from '../utils/amsgLlmCredentials';
 import { mirrorMomentsEventToMemoryPalace, removeMomentsPostFromMemoryPalace, removeMomentsSourcesFromMemoryPalace, repairMomentsMemoryPalaceForCharacter, type MomentsMemoryEventDetail } from '../utils/momentsMemoryPalace';
 import { reportRelationshipJealousyEvents, setRelationshipJealousyForceEnabled } from '../utils/relationshipBackend';
 import { MemoryNodeDB } from '../utils/memoryPalace/db';
@@ -305,6 +307,10 @@ const MomentsApp: React.FC = () => {
   const characterPostCheckRetryAt = useRef(0);
   const legacyNpcCardMigrationInFlight = useRef(false);
   const friendPromotionInFlight = useRef(new Set<string>());
+  const runtimeSyncInFlight = useRef(false);
+  const runtimeSyncQueued = useRef(false);
+  const runtimeSyncTimer = useRef<number | null>(null);
+  const offlineRuntimeWasEnabled = useRef(false);
 
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
@@ -840,6 +846,102 @@ const MomentsApp: React.FC = () => {
     });
   }, [characters, groups, userProfile.name]);
 
+  const syncCloudRuntime = useCallback(async () => {
+    const currentSettings = settingsRef.current;
+    if (!dataReady || !isMomentsWorkerReady(sharedAmsgWorker)) return;
+    if (runtimeSyncInFlight.current) {
+      runtimeSyncQueued.current = true;
+      return;
+    }
+    runtimeSyncInFlight.current = true;
+    try {
+      if (!currentSettings.offlineSyncEnabled) {
+        await syncMomentsRuntime(sharedAmsgWorker, {
+          userId: sharedAmsgWorker.userId?.trim() || `moments-user-${USER_PROFILE_ID}`,
+          enabled: false,
+          autoInteractionEnabled: currentSettings.autoInteractionEnabled,
+          credentialId: MOMENTS_LLM_CREDENTIAL_ID,
+          replaceAll: true,
+          actors: [],
+          updatedAt: Date.now(),
+        });
+        setMomentsApiStatus('离线生活线已关闭，Worker 上的朋友圈主体已停用');
+        return;
+      }
+      const config = currentSettings.momentsApi || momentsApiFromMain(apiConfig);
+      if (!isMomentsApiReady(config)) {
+        setMomentsApiStatus('离线朋友圈未同步：请先配置完整的朋友圈低价模型');
+        return;
+      }
+      const credential = buildMomentsLlmCredentialRow(config);
+      if (!credential) throw new Error('朋友圈低价模型的 URL、Key 或 Model 不完整');
+      // API Key 沿用主动消息 2.0 的加密凭据表；角色快照只携带不透明 credId。
+      await ActiveMsgClient.putLlmCredentials([credential]);
+      const actors = [...friends, ...npcProfiles].filter(actor => actor.actorType === 'character' || actor.actorType === 'npc');
+      const contexts = await buildInteractionActorContexts(actors);
+      const contextByActor = new Map(contexts.map(context => [context.actorId, context]));
+      const privacyCandidates = actors.map(actor => ({
+        actorId: actor.id,
+        name: actor.displayName,
+        groupName: actor.characterId ? characters.find(character => character.id === actor.characterId)?.groupId : undefined,
+      }));
+      const runtimeActors: MomentsCloudActorRuntime[] = actors.map(actor => {
+        const context = contextByActor.get(actor.id);
+        const postingMode = actor.actorType === 'npc'
+          ? currentSettings.npcPostingModes?.[actor.id] || 'low'
+          : currentSettings.characterPostingModes?.[actor.characterId || ''] || 'off';
+        const interactionMode = actor.actorType === 'npc'
+          ? 'normal'
+          : currentSettings.characterInteractionModes?.[actor.characterId || ''] || 'normal';
+        const ownGallery = actor.characterId ? gallery.filter(image => image.charId === actor.characterId).slice(0, 18) : [];
+        return {
+          actorId: actor.id,
+          actorType: actor.actorType as 'character' | 'npc',
+          ...(actor.characterId ? { characterId: actor.characterId } : {}),
+          ...(actor.parentCharacterId ? { parentCharacterId: actor.parentCharacterId } : {}),
+          displayName: actor.displayName,
+          ...(actor.avatar ? { avatar: actor.avatar } : {}),
+          ...(actor.bio ? { bio: actor.bio } : {}),
+          postingMode,
+          interactionMode,
+          timezoneOffsetMinutes: -new Date().getTimezoneOffset(),
+          pack: {
+            persona: context?.persona || [actor.relationLabel, actor.bio].filter(Boolean).join('；'),
+            userRelationship: context?.userRelationship || '以近期对话和当前朋友圈事实判断关系。',
+            privateChat: context?.privateChat || '近期没有私聊原文。',
+            sharedGroupChat: context?.sharedGroupChat || '近期没有可用的共同群聊原文。',
+            recentPosts: posts.filter(post => post.authorId === actor.id).slice(0, 8).map(post => ({ content: post.content, createdAt: post.createdAt })),
+            galleryOptions: ownGallery.map(image => ({
+              id: image.id, url: image.url, savedDate: image.savedDate,
+              review: image.review?.slice(0, 180), context: image.chatContext?.slice(-3).join(' · ').slice(0, 260),
+            })),
+            privacyCandidates: privacyCandidates.filter(candidate => candidate.actorId !== actor.id),
+          },
+        };
+      });
+      const result = await syncMomentsRuntime(sharedAmsgWorker, {
+        userId: sharedAmsgWorker.userId?.trim() || `moments-user-${USER_PROFILE_ID}`,
+        enabled: currentSettings.enabled,
+        autoInteractionEnabled: currentSettings.autoInteractionEnabled,
+        credentialId: MOMENTS_LLM_CREDENTIAL_ID,
+        replaceAll: true,
+        actors: runtimeActors,
+        updatedAt: Date.now(),
+      });
+      setMomentsApiStatus(`离线生活线已同步：${runtimeActors.length} 位主体，Worker 更新 ${result.upserted} 行`);
+    } catch (error: any) {
+      setMomentsApiStatus(`离线生活线同步失败：${error?.message || '网络错误'}`);
+      await saveMomentsSettingsPatch({ syncStatus: 'failed', syncError: error?.message || '离线生活线同步失败' });
+    } finally {
+      runtimeSyncInFlight.current = false;
+      if (runtimeSyncQueued.current) {
+        runtimeSyncQueued.current = false;
+        if (runtimeSyncTimer.current !== null) window.clearTimeout(runtimeSyncTimer.current);
+        runtimeSyncTimer.current = window.setTimeout(() => { void syncCloudRuntime(); }, 500);
+      }
+    }
+  }, [apiConfig, buildInteractionActorContexts, characters, dataReady, friends, gallery, npcProfiles, posts, saveMomentsSettingsPatch, settings.autoInteractionEnabled, settings.characterInteractionModes, settings.characterPostingModes, settings.enabled, settings.momentsApi, settings.npcPostingModes, sharedAmsgWorker]);
+
   const planPostInteractions = useCallback(async (post: MomentsPost, earliestDueAt = 0) => {
     if (!settings.autoInteractionEnabled) return;
     const config = settings.momentsApi || momentsApiFromMain(apiConfig);
@@ -984,6 +1086,8 @@ const MomentsApp: React.FC = () => {
   }, []);
 
   const runCharacterPostChecks = useCallback(async () => {
+    // 开启真正离线模式后，发帖判断由 Worker 独占；页面不再保留第二套 10 分钟轮询。
+    if (settings.offlineSyncEnabled && isMomentsWorkerReady(sharedAmsgWorker)) return;
     // 不能在一次页面渲染里把所有角色/NPC 同时送进副 API。每轮只检查一位主体，
     // 并将轮次错开 10 分钟；这是“生活化地慢慢出现”，不是打开朋友圈就集体刷屏。
     if (characterPostCheckInFlight.current || Date.now() < characterPostCheckRetryAt.current) return;
@@ -1064,8 +1168,7 @@ const MomentsApp: React.FC = () => {
           const media: MomentsMediaRef[] = selectedGalleryImage && mediaId
             ? [{ id: mediaId, postId, url: selectedGalleryImage.url, galleryImageId: selectedGalleryImage.id, createdAt, generated: false, generationStatus: 'ready' }]
             : mediaId ? [{ id: mediaId, postId, url: `moments-photo-pending:${mediaId}`, createdAt, generated: true, prompt: plan.photoPrompt, includeCharacter: plan.photoIncludesAuthor === true, generationStatus: 'pending' }] : [];
-          // 内容在手机仍打开时已经预写好，但不提前“发表”；到点由本机或 Worker 统一投递。
-          // 这样关闭小手机后仍可由 Cron 投递，且 Worker 永远不持有副 API Key。
+          // 未启用真正离线模式时保留旧兼容路径：页面内预写，之后由本机或 Worker 投递。
           const dueAt = Math.max(createdAt + 6 * 60_000, Math.min(plan.dueAt || createdAt + 18 * 60_000, createdAt + 24 * 60 * 60_000));
           const job: MomentsPendingJob = {
             id: `moments-job-post-${postId}`, type: 'post', actorId: actor.id, postId, dueAt, state: 'pending', createdAt,
@@ -1083,7 +1186,7 @@ const MomentsApp: React.FC = () => {
       }
     }
     } finally { characterPostCheckInFlight.current = false; }
-  }, [apiConfig, characters, friends, gallery, npcProfiles, planPostInteractions, posts, settings.characterPostingModes, settings.momentsApi, settings.npcPostingModes]);
+  }, [apiConfig, characters, friends, gallery, npcProfiles, planPostInteractions, posts, settings.characterPostingModes, settings.momentsApi, settings.npcPostingModes, settings.offlineSyncEnabled, sharedAmsgWorker]);
 
   // 到点任务先在本机落地执行；若配置了 Worker，同时把事件/任务同步到云端。
   useEffect(() => {
@@ -1099,6 +1202,20 @@ const MomentsApp: React.FC = () => {
   useEffect(() => {
     if (settings.offlineSyncEnabled && sharedAmsgWorker?.url) void flushMomentsWorker();
   }, [flushMomentsWorker, settings.offlineSyncEnabled, sharedAmsgWorker?.url]);
+
+  useEffect(() => {
+    if (!dataReady || !sharedAmsgWorker?.url) return;
+    const wasEnabled = offlineRuntimeWasEnabled.current;
+    offlineRuntimeWasEnabled.current = settings.offlineSyncEnabled;
+    // 初次打开且本来就是关闭状态时不做无意义写入；只在开关从开→关时同步停用。
+    if (!settings.offlineSyncEnabled && !wasEnabled) return;
+    if (runtimeSyncTimer.current !== null) window.clearTimeout(runtimeSyncTimer.current);
+    runtimeSyncTimer.current = window.setTimeout(() => { void syncCloudRuntime(); }, 700);
+    return () => {
+      if (runtimeSyncTimer.current !== null) window.clearTimeout(runtimeSyncTimer.current);
+      runtimeSyncTimer.current = null;
+    };
+  }, [dataReady, settings.offlineSyncEnabled, sharedAmsgWorker?.url, syncCloudRuntime]);
 
   useEffect(() => {
     void runCharacterPostChecks();
@@ -1818,7 +1935,7 @@ const MomentsApp: React.FC = () => {
           <section className="mt-4 overflow-hidden rounded-2xl bg-white shadow-[0_1px_5px_rgba(0,0,0,0.05)]">
             <button type="button" onClick={() => void saveMomentsSettingsPatch({ offlineSyncEnabled: !settings.offlineSyncEnabled })} className="flex w-full items-center gap-3 px-4 py-4 text-left">
               <ArrowsClockwise size={21} className="text-[#576b95]" />
-              <span className="flex-1"><span className="block text-[14px]">关闭小手机后继续投递</span><span className="mt-1 block text-[11px] leading-relaxed text-[#888]">将已预写的角色动态和互动交给同一 AMSG Worker 到点投递，并尽力推送提醒；不会上传朋友圈副 API Key，也不会在云端临时生成内容。</span></span>
+              <span className="flex-1"><span className="block text-[14px]">关闭小手机后继续生活线</span><span className="mt-1 block text-[11px] leading-relaxed text-[#888]">复用主动消息 2.0 的加密凭据与同一 Worker；关闭页面后仍每 15 分钟错峰检查一位到期角色。真正发帖时云端生成全新正文，并用一次统一规划安排后续点赞、评论和回复。</span></span>
               <span className={`relative h-6 w-11 shrink-0 rounded-full transition-colors ${settings.offlineSyncEnabled ? 'bg-[#07c160]' : 'bg-[#d7d7d7]'}`}><span className={`absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${settings.offlineSyncEnabled ? 'translate-x-[22px]' : 'translate-x-0.5'}`} /></span>
             </button>
           </section>

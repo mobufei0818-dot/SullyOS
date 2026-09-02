@@ -79,6 +79,20 @@ export const charCredId = (charId: string, purpose: LlmCredentialPurpose): strin
 export const charCredIds = (charId: string): string[] =>
   ALL_CREDENTIAL_PURPOSES.map((purpose) => charCredId(charId, purpose));
 
+/**
+ * 朋友圈离线生成是用户级的一份廉价模型，不按角色重复存同一把 Key。
+ * Worker 的 llm_credentials 表只把 credId 当不透明名字，因此无需把它塞进
+ * charCredId 的角色级清理清单；清空云端数据时仍会随 all=true 一并删除。
+ */
+export const MOMENTS_LLM_CREDENTIAL_ID = 'moments/default';
+
+export const buildMomentsLlmCredentialRow = (
+  api: { baseUrl?: string; apiKey?: string; model?: string } | null | undefined,
+): LlmCredentialRow | null => {
+  const value = toCredentialValue(api);
+  return value ? { credId: MOMENTS_LLM_CREDENTIAL_ID, value } : null;
+};
+
 /** 把 credId 拆回「哪个角色、什么用途」；不认识的形状返回 null。 */
 export const parseCharCredId = (
   credId: string,
