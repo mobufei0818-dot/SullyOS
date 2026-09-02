@@ -1405,7 +1405,12 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
                 </p>
               ) : workerVersion?.state === 'current' ? (
                 <p className="text-xs leading-relaxed text-slate-500">
-                  后端已经是最新版（<code className="font-mono">{workerVersion.expected}</code>）。
+                  后端版本正常（
+                  <code className="font-mono">{workerVersion.deployed || workerVersion.expected}</code>
+                  {workerVersion.deployed && workerVersion.deployed !== workerVersion.expected
+                    ? '，不低于当前网页内置版本'
+                    : ''}
+                  ）。
                 </p>
               ) : null}
               <p className="text-xs leading-relaxed text-slate-500">
