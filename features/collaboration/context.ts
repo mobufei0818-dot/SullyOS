@@ -155,36 +155,41 @@ export const buildCollaborationContextSnapshot = async ({
   ].join('');
 };
 
-export interface BuildImmersiveChatContextInput {
+export interface BuildLiveCollaborationChatContextInput {
   char: CharacterProfile;
   user: UserProfile;
   groups: GroupProfile[];
   emojis: Emoji[];
   categories: EmojiCategory[];
   recentChatMessages: Message[];
+  mode?: CollaborationMode;
+  chatContextLimit?: number;
   realtimeConfig?: RealtimeConfig;
 }
 
 /**
- * Build immersive collaboration from the exact same prompt pipeline as
- * ChatApp. The returned array is persisted on the collaboration session, so
- * later turns (and other collaboration windows) cannot silently rewrite it.
+ * Build the ChatApp bridge for one collaboration request. This intentionally
+ * runs on every send: only the selected latest rows (or ChatApp's effective
+ * user-configured range) are read, and a collaboration session never freezes
+ * an increasingly stale chat transcript.
  */
-export const buildImmersiveChatContextSnapshot = async ({
+export const buildLiveCollaborationChatContext = async ({
   char,
   user,
   groups,
   emojis,
   categories,
   recentChatMessages,
+  mode = 'immersive',
+  chatContextLimit = 20,
   realtimeConfig,
-}: BuildImmersiveChatContextInput): Promise<{
+}: BuildLiveCollaborationChatContextInput): Promise<{
   contextSnapshot: string;
   chatContextSnapshot: CollaborationContextMessage[];
 }> => {
-  const history = recentChatMessages.slice(-Math.max(1, char.contextLimit || 500));
-  // The session identity/history is frozen, but Memory Palace is deliberately
-  // omitted here: collaboration adds a fresh recall block on every turn.
+  const history = selectRecentCollaborationChatMessages(recentChatMessages, chatContextLimit);
+  // Memory Palace is deliberately omitted here: collaboration adds a fresh
+  // recall block on every turn through its own isolated entry point.
   const staticChar: CharacterProfile = {
     ...char,
     chatCollaborationEnabled: false,
@@ -212,7 +217,7 @@ export const buildImmersiveChatContextSnapshot = async ({
     stripImages: true,
   });
 
-  const chatContextSnapshot: CollaborationContextMessage[] = payload.fullMessages
+  const fullChatContext: CollaborationContextMessage[] = payload.fullMessages
     .map(message => {
       const role: CollaborationContextMessage['role'] = message.role === 'user' || message.role === 'assistant'
         ? message.role
@@ -223,15 +228,28 @@ export const buildImmersiveChatContextSnapshot = async ({
       return { role, content };
     })
     .filter(message => !!message.content.trim());
+  const chatContextSnapshot = mode === 'immersive'
+    ? fullChatContext
+    : fullChatContext.filter(message => message.role === 'user' || message.role === 'assistant');
 
   return {
     contextSnapshot: [
-      `### 当前模式\n用户选择了“沉浸式协同”：上方内容直接来自 ChatApp 本人的 ContextBuilder 与最近聊天上下文；在完整保留角色、关系和当下对话连续性的同时，把完成当前任务放在本窗口的最前面。任务相关记忆会在每次发送时重新召回；其它协同窗口的对话仍不进入这里。\n\n`,
+      mode === 'immersive'
+        ? `### 当前模式\n用户选择了“沉浸式协同”：上方内容直接来自 ChatApp 本人的 ContextBuilder；最近 ${history.length} 条聊天会在每次生成时重新读取而非冻结。在完整保留角色、关系和当下对话连续性的同时，把完成当前任务放在本窗口的最前面。任务相关记忆会在每次发送时重新召回；其它协同窗口的对话仍不进入这里。\n\n`
+        : `### ChatApp 实时聊天衔接\n最近 ${history.length} 条聊天会在每次生成时重新读取而非冻结。\n\n`,
       COLLABORATION_PROTOCOL,
       collaborationRichOutputPrompt(char, emojis, categories),
     ].join(''),
     chatContextSnapshot,
   };
+};
+
+export const selectRecentCollaborationChatMessages = (
+  messages: Message[],
+  limit: number,
+): Message[] => {
+  if (limit <= 0) return [];
+  return messages.slice(-limit);
 };
 
 const formatAttachmentContext = (message: CollaborationMessage): string => {

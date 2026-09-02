@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { buildCollaborationModelMessages, selectCollaborationMemories, stripFrozenCollaborationMemoryContext } from '../features/collaboration/context';
+import { buildCollaborationModelMessages, selectCollaborationMemories, selectRecentCollaborationChatMessages, stripFrozenCollaborationMemoryContext } from '../features/collaboration/context';
+import type { Message } from '../types';
 import type { MemoryNode } from './memoryPalace/types';
 
 const memory = (id: string, content: string, patch: Partial<MemoryNode> = {}): MemoryNode => ({
@@ -18,6 +19,25 @@ const memory = (id: string, content: string, patch: Partial<MemoryNode> = {}): M
 });
 
 describe('collaboration context isolation', () => {
+  it('selects only the configured latest ChatApp rows without freezing or mutating them', () => {
+    const rows = Array.from({ length: 25 }, (_, index) => ({
+      id: index + 1,
+      charId: 'char-1',
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      type: 'text',
+      content: `chat-${index + 1}`,
+      timestamp: index + 1,
+    })) as Message[];
+
+    expect(selectRecentCollaborationChatMessages(rows, 0)).toEqual([]);
+    expect(selectRecentCollaborationChatMessages(rows, 10).map(row => row.content)).toEqual(
+      Array.from({ length: 10 }, (_, index) => `chat-${index + 16}`),
+    );
+    expect(selectRecentCollaborationChatMessages(rows, 20)[0]?.content).toBe('chat-6');
+    expect(selectRecentCollaborationChatMessages(rows, rows.length)).toEqual(rows);
+    expect(rows).toHaveLength(25);
+  });
+
   it('selects task-relevant memories and excludes archived or group memories', () => {
     const selected = selectCollaborationMemories([
       memory('project', '用户正在制作 AIRP 项目的协同工作模式', { importance: 8 }),
@@ -44,7 +64,7 @@ describe('collaboration context isolation', () => {
     expect(JSON.stringify(modelMessages)).not.toContain('其它窗口');
   });
 
-  it('keeps frozen ChatApp roles before the collaboration overlay and isolated task history', () => {
+  it('keeps live ChatApp roles before the collaboration overlay and isolated task history', () => {
     const modelMessages = buildCollaborationModelMessages('协同任务协议', [
       { id: 'm1', sessionId: 'session-a', role: 'user', content: '现在做报告', createdAt: 3 },
     ], undefined, [

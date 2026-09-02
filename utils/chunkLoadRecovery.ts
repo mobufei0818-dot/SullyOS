@@ -23,6 +23,8 @@ const CHUNK_ERROR_RE = new RegExp(
         'Failed to fetch dynamically imported module', // Chrome
         'error loading dynamically imported module',   // Firefox
         'Failed to load module script',                 // MIME/网络层失败
+        'not a valid JavaScript MIME type',             // Safari: 'text/html' is not a valid JavaScript MIME type
+        'server responded with a MIME type of ["\']?text/html', // Chromium: SPA fallback returned HTML for a module
         'Unable to preload CSS',                        // Vite __vitePreload CSS 依赖失败
         'ChunkLoadError',
         'Loading chunk \\S+ failed',

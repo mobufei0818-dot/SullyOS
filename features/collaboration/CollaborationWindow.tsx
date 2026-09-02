@@ -32,13 +32,14 @@ import { bucketFewCount, trackEvent } from '../../utils/analytics';
 import { processImageToBlob } from '../../utils/file';
 import { shareOrDownloadBlob } from '../../utils/shareExport';
 import { describeImageWithVisionApi } from '../../utils/visionApi';
+import { loadCharacterContextRange } from '../../utils/chatContextRange';
 import {
   collaborationProfileFromApi,
   collaborationProfileMatches,
   fetchCollaborationModels,
   hydrateCollaborationApiSettings,
 } from './api';
-import { buildCollaborationContextSnapshot, buildCollaborationTurnMemoryContext, buildImmersiveChatContextSnapshot } from './context';
+import { buildCollaborationContextSnapshot, buildCollaborationTurnMemoryContext, buildLiveCollaborationChatContext } from './context';
 import { runCollaborationTurn, isCollaborationApiConfigured, summarizeCollaborationForMemory } from './engine';
 import { collaborationBlobToDataUrl, extractSourceFile, isCollaborationImageFile, materializeArtifact, parseArtifactBlocks } from './files';
 import { normalizeCollaborationVisibleText, parseCollaborationMarkdown } from './markdown';
@@ -62,6 +63,8 @@ import type {
   CollaborationAvatarStyle,
   CollaborationAttachment,
   CollaborationCategory,
+  CollaborationChatContextChoice,
+  CollaborationContextMessage,
   CollaborationMessage,
   CollaborationInstallableArtifact,
   CollaborationLibraryFile,
@@ -126,9 +129,16 @@ const MODE_LABELS: Record<CollaborationMode, string> = {
 };
 
 const MODE_DESCRIPTIONS: Record<CollaborationMode, string> = {
-  immersive: '和日常聊天用同一整套上下文，还带上最近聊天；最连贯，也最吃上下文。',
-  focused: '只带核心人设、你们是谁和 5 条相关记忆；更专心办事，也更省上下文。',
+  immersive: '和日常聊天使用同一整套角色上下文；最近聊天按设置逐轮实时读取。',
+  focused: '保留核心人设、5 条相关记忆；也可只带 10～20 条最近聊天。',
 };
+
+const CHAT_CONTEXT_OPTIONS: Array<{ value: CollaborationChatContextChoice; label: string; hint: string }> = [
+  { value: 0, label: '不读取', hint: '只看协同窗口' },
+  { value: 10, label: '最近 10 条', hint: '更省上下文' },
+  { value: 20, label: '最近 20 条', hint: '衔接更完整' },
+  { value: 'configured', label: '用户设定范围', hint: '跟随 ChatApp' },
+];
 
 const ANALYTICS_UI_THEMES: readonly CollaborationUiTheme[] = ['sully', 'gpt', 'claude', 'gemini', 'kimi', 'deepseek'];
 const ANALYTICS_AVATAR_MODES: readonly CollaborationAvatarMode[] = ['theme', 'both', 'character', 'user', 'none'];
@@ -350,15 +360,42 @@ const collaborationMessagePreview = (message?: CollaborationMessage): string | u
   return shortPreview(message.content || message.attachments?.[0]?.name || (message.role === 'system' ? '系统提示' : '上传了文件'));
 };
 
-type CollaborationDialogResult = 'confirm' | 'secondary' | 'cancel';
+const copyCollaborationText = async (text: string): Promise<boolean> => {
+  if (!text.trim()) return false;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Older iOS PWAs may expose clipboard but reject it. Fall through.
+  }
+  try {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', 'true');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const copied = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    return copied;
+  } catch {
+    return false;
+  }
+};
+
+type CollaborationDialogResult = 'confirm' | 'secondary' | 'destructive' | 'cancel';
 type CollaborationDialogTone = 'default' | 'danger' | 'warning';
 
 interface CollaborationDialogRequest {
   title: string;
   description: string;
   detail?: string;
-  confirmLabel: string;
+  confirmLabel?: string;
   secondaryLabel?: string;
+  destructiveLabel?: string;
   cancelLabel?: string;
   tone?: CollaborationDialogTone;
 }
@@ -395,16 +432,58 @@ const CollaborationActionDialog: React.FC<{
           {dialog.detail && <p className={`mt-3 rounded-[14px] px-3.5 py-3 text-[10px] leading-[1.65] ${danger ? 'bg-rose-50/80 text-rose-700' : warning ? 'bg-amber-50/80 text-amber-800' : 'bg-slate-50 text-slate-500'}`}>{dialog.detail}</p>}
         </div>
         <div className="border-t border-slate-100 px-3 pb-3 pt-2.5">
-          <button type="button" onClick={() => onResolve('confirm')} className={`w-full rounded-[16px] px-4 py-3.5 text-[13px] font-semibold text-white transition active:scale-[.985] ${danger ? 'bg-rose-600 active:bg-rose-700' : warning ? 'bg-amber-600 active:bg-amber-700' : 'bg-slate-900 active:bg-slate-800'}`}>
-            {dialog.confirmLabel}
-          </button>
+          {dialog.confirmLabel && (
+            <button type="button" onClick={() => onResolve('confirm')} className={`w-full rounded-[16px] px-4 py-3.5 text-[13px] font-semibold text-white transition active:scale-[.985] ${danger ? 'bg-rose-600 active:bg-rose-700' : warning ? 'bg-amber-600 active:bg-amber-700' : 'bg-slate-900 active:bg-slate-800'}`}>
+              {dialog.confirmLabel}
+            </button>
+          )}
           {dialog.secondaryLabel && (
             <button type="button" onClick={() => onResolve('secondary')} className="mt-1.5 w-full rounded-[16px] px-4 py-3 text-[12px] font-semibold text-slate-600 active:bg-slate-50">
               {dialog.secondaryLabel}
             </button>
           )}
-          <button type="button" onClick={() => onResolve('cancel')} className="mt-0.5 w-full rounded-[16px] px-4 py-3 text-[12px] font-medium text-slate-400 active:bg-slate-50">
+          {dialog.destructiveLabel && (
+            <button type="button" onClick={() => onResolve('destructive')} className="mt-1 w-full rounded-[16px] px-4 py-3 text-[12px] font-semibold text-rose-600 active:bg-rose-50">
+              {dialog.destructiveLabel}
+            </button>
+          )}
+          <button type="button" onClick={() => onResolve('cancel')} className="mt-0.5 w-full rounded-[16px] bg-slate-50 px-4 py-3 text-[12px] font-semibold text-slate-700 active:bg-slate-100">
             {dialog.cancelLabel || '取消'}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+};
+
+const CollaborationMessageEditor: React.FC<{
+  message: CollaborationMessage | null;
+  value: string;
+  saving: boolean;
+  onChange: (value: string) => void;
+  onCancel: () => void;
+  onSave: () => void;
+}> = ({ message, value, saving, onChange, onCancel, onSave }) => {
+  if (!message) return null;
+  const regenerates = message.role === 'user';
+  return (
+    <div className="absolute inset-0 z-[140] flex items-end justify-center sm:items-center" role="dialog" aria-modal="true" aria-labelledby="collaboration-message-editor-title">
+      <button type="button" aria-label="关闭消息编辑" onClick={onCancel} className="absolute inset-0 bg-slate-950/35 backdrop-blur-[2px]" />
+      <section className="relative mx-3 mb-[max(.75rem,env(safe-area-inset-bottom))] w-[calc(100%-1.5rem)] max-w-[520px] rounded-[26px] border border-white/70 bg-white p-5 shadow-[0_28px_90px_rgba(15,23,42,.28)] sm:mb-0">
+        <h2 id="collaboration-message-editor-title" className="text-[17px] font-semibold text-slate-900">编辑{regenerates ? '自己的消息' : '这条回复'}</h2>
+        <p className="mt-1.5 text-[11px] leading-relaxed text-slate-600">
+          {regenerates ? '保存后会从这里重新生成，后面的旧回复与后续分支会移除。' : '只修改显示内容，不会重新调用模型。'}
+        </p>
+        <textarea
+          autoFocus
+          value={value}
+          onChange={event => onChange(event.target.value)}
+          className="mt-4 min-h-40 w-full resize-y rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-800 outline-none focus:border-slate-400"
+        />
+        <div className="mt-4 flex gap-2.5">
+          <button type="button" onClick={onCancel} disabled={saving} className="flex-1 rounded-2xl bg-slate-100 px-4 py-3 text-xs font-semibold text-slate-700 disabled:opacity-45">取消</button>
+          <button type="button" onClick={onSave} disabled={saving || !value.trim()} className="flex-[1.5] rounded-2xl bg-slate-900 px-4 py-3 text-xs font-semibold text-white disabled:opacity-45">
+            {saving ? '保存中…' : regenerates ? '保存并重新生成' : '保存修改'}
           </button>
         </div>
       </section>
@@ -695,6 +774,30 @@ const ApiSettingsPanel: React.FC<{
               </div>
             </div>
             <p className="mt-2 text-[9px] leading-4 text-slate-400">“跟随风格”只决定默认显示谁；头像形状仍由你选择。界面内不会显示第三方品牌 Logo。</p>
+          </section>
+
+          <section>
+            <div className="mb-3">
+              <h3 className="text-xs font-semibold text-slate-700">ChatApp 最近聊天</h3>
+              <p className="mt-0.5 text-[10px] leading-relaxed text-slate-600">每次生成前重新读取当前角色的最新私聊，不会冻结在刚进入协同工作时。只读取你选择的数量，避免无关闲聊长期占用上下文。</p>
+            </div>
+            <div className="grid grid-cols-2 gap-2 rounded-2xl border border-slate-200 bg-white p-2">
+              {CHAT_CONTEXT_OPTIONS.map(option => {
+                const active = (draft.recentChatContextCount ?? 'configured') === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    onClick={() => setDraft(previous => ({ ...previous, recentChatContextCount: option.value }))}
+                    className={`rounded-xl px-2 py-3 text-center transition-colors ${active ? 'bg-slate-900 text-white shadow-sm' : 'text-slate-600 active:bg-slate-50'}`}
+                  >
+                    <span className="block text-[11px] font-semibold">{option.label}</span>
+                    <span className={`mt-1 block text-[9px] ${active ? 'text-white/70' : 'text-slate-500'}`}>{option.hint}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-[10px] leading-relaxed text-slate-600">“用户设定范围”会直接读取 ChatApp 当前实际使用的上下文范围（含自适应范围和手动断点）。沉浸式会沿用 ChatApp 的完整角色上下文；中度协同只附加这些最新对话。修改后会从下一次生成开始生效，包括已有窗口。</p>
           </section>
 
           <section>
@@ -1518,6 +1621,9 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   const [streamingText, setStreamingText] = useState('');
   const [loaded, setLoaded] = useState(false);
   const [actionDialog, setActionDialog] = useState<CollaborationDialogState | null>(null);
+  const [editingMessage, setEditingMessage] = useState<CollaborationMessage | null>(null);
+  const [editDraft, setEditDraft] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
   const [voiceAudioUrls, setVoiceAudioUrls] = useState<Record<string, string>>({});
   const [voiceLoadingIds, setVoiceLoadingIds] = useState<Set<string>>(() => new Set());
   const [playingVoiceId, setPlayingVoiceId] = useState<string | null>(null);
@@ -1564,6 +1670,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     setSettingsOpen(false);
     setMakerOpen(false);
     setPreviewArtifact(null);
+    setEditingMessage(null);
+    setEditDraft('');
     setShowEntryChooser(sessions.length > 0);
     setShowModePicker(sessions.length === 0);
   }, [loaded, open, sessions.length]);
@@ -1747,6 +1855,8 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   }, [character.id]);
 
   useEffect(() => {
+    setEditingMessage(null);
+    setEditDraft('');
     if (!activeSessionId) {
       setMessages([]);
       return;
@@ -2098,28 +2208,57 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     let startedSession = sessionAtStart;
     try {
       let contextSnapshot = sessionAtStart.contextSnapshot || '';
-      let chatContextSnapshot = sessionAtStart.chatContextSnapshot;
-      if (sessionAtStart.mode === 'immersive' && (!contextSnapshot || !chatContextSnapshot?.length)) {
-        const immersiveSnapshot = await buildImmersiveChatContextSnapshot({
+      let liveChatContext: CollaborationContextMessage[] = [];
+      const chatContextChoice = settings.recentChatContextCount ?? 'configured';
+      let liveRecentChatMessages = recentChatMessages;
+      let chatContextLimit: number = chatContextChoice === 'configured' ? 0 : chatContextChoice;
+      if (chatContextChoice === 'configured') {
+        const configuredRange = await loadCharacterContextRange(character);
+        liveRecentChatMessages = configuredRange.messages;
+        chatContextLimit = configuredRange.messages.length;
+      }
+      if (sessionAtStart.mode === 'immersive') {
+        const immersiveContext = await buildLiveCollaborationChatContext({
           char: character,
           user,
           groups,
           emojis,
           categories: emojiCategories,
-          recentChatMessages,
+          recentChatMessages: liveRecentChatMessages,
+          mode: 'immersive',
+          chatContextLimit,
           realtimeConfig,
         });
-        contextSnapshot = immersiveSnapshot.contextSnapshot;
-        chatContextSnapshot = immersiveSnapshot.chatContextSnapshot;
-      } else if (!contextSnapshot) {
-        contextSnapshot = await buildCollaborationContextSnapshot({
-          char: character,
-          user,
-          mode: sessionAtStart.mode,
-          taskText,
-          emojis,
-          categories: emojiCategories,
-        });
+        contextSnapshot = immersiveContext.contextSnapshot;
+        liveChatContext = immersiveContext.chatContextSnapshot;
+      } else {
+        if (chatContextLimit > 0) {
+          const focusedChatContext = await buildLiveCollaborationChatContext({
+            char: character,
+            user,
+            groups,
+            emojis,
+            categories: emojiCategories,
+            recentChatMessages: liveRecentChatMessages,
+            mode: 'focused',
+            chatContextLimit,
+            realtimeConfig,
+          });
+          liveChatContext = [
+            { role: 'system', content: `### ChatApp 实时聊天衔接\n以下是每次生成前重新读取的 ${chatContextChoice === 'configured' ? `ChatApp 用户设定范围（本次 ${chatContextLimit} 条）` : `最近 ${chatContextLimit} 条私聊`}；它们只用于理解当前工作来龙去脉，不属于本协同窗口的对话。` },
+            ...focusedChatContext.chatContextSnapshot,
+          ];
+        }
+        if (!contextSnapshot) {
+          contextSnapshot = await buildCollaborationContextSnapshot({
+            char: character,
+            user,
+            mode: sessionAtStart.mode,
+            taskText,
+            emojis,
+            categories: emojiCategories,
+          });
+        }
       }
       const turnMemoryContext = await buildCollaborationTurnMemoryContext({
         char: character,
@@ -2135,7 +2274,9 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
         ...sessionAtStart,
         title: nextTitle,
         contextSnapshot,
-        chatContextSnapshot,
+        // Pre-upgrade sessions may contain a frozen transcript. Clear it once
+        // touched; the current request uses liveChatContext directly instead.
+        chatContextSnapshot: undefined,
         updatedAt: Date.now(),
         lastMessagePreview: collaborationMessagePreview(latestUserMessage),
       };
@@ -2148,7 +2289,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
         signal: abortController.signal,
         onDelta: setStreamingText,
         makerKind: startedSession.makerKind,
-        chatContextSnapshot: startedSession.chatContextSnapshot,
+        chatContextSnapshot: liveChatContext,
         thinkingEnabled: !!character.showThinkingChain,
         turnContext: turnMemoryContext,
       });
@@ -2277,6 +2418,75 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     await generateCollaborationReply(activeSession, requestMessages, latestUserMessage);
   };
 
+  const copyMessage = async (message: CollaborationMessage) => {
+    const copied = await copyCollaborationText(message.content);
+    trackEvent('复制协同消息', { 结果: copied ? '成功' : '失败', 角色: message.role });
+    notify(copied ? '内容已复制' : '复制失败，请稍后重试', copied ? 'success' : 'error');
+  };
+
+  const beginMessageEdit = (message: CollaborationMessage) => {
+    if (message.role === 'system' || !message.content.trim()) {
+      notify('这条内容不支持编辑', 'info');
+      return;
+    }
+    setEditingMessage(message);
+    setEditDraft(message.content);
+  };
+
+  const saveMessageEdit = async () => {
+    if (!activeSession || !editingMessage || editSaving || isGenerating) return;
+    const content = editDraft.trim();
+    if (!content) return;
+    const messageIndex = messages.findIndex(message => message.id === editingMessage.id);
+    if (messageIndex < 0) {
+      setEditingMessage(null);
+      setEditDraft('');
+      notify('这条消息已经不存在了', 'error');
+      return;
+    }
+    setEditSaving(true);
+    try {
+      const updatedMessage: CollaborationMessage = { ...editingMessage, content };
+      await CollaborationStore.saveMessage(updatedMessage);
+      if (updatedMessage.role === 'user') {
+        const droppedMessages = messages.slice(messageIndex + 1);
+        await CollaborationStore.deleteMessages(droppedMessages.map(message => message.id));
+        const requestMessages = [...messages.slice(0, messageIndex), updatedMessage];
+        setMessages(requestMessages);
+        const updatedSession = {
+          ...activeSession,
+          updatedAt: Date.now(),
+          lastMessagePreview: collaborationMessagePreview(updatedMessage),
+        };
+        await updateSession(updatedSession);
+        setEditingMessage(null);
+        setEditDraft('');
+        if (libraryOpen) void refreshLibrary();
+        trackEvent('编辑协同消息', { 角色: 'user', 后续移除: bucketFewCount(droppedMessages.length) });
+        notify('消息已修改，正在重新生成', 'success');
+        await generateCollaborationReply(updatedSession, requestMessages, updatedMessage);
+        return;
+      }
+
+      const nextMessages = messages.map(message => message.id === updatedMessage.id ? updatedMessage : message);
+      setMessages(nextMessages);
+      const latestMessage = nextMessages[nextMessages.length - 1];
+      await updateSession({
+        ...activeSession,
+        updatedAt: Date.now(),
+        lastMessagePreview: collaborationMessagePreview(latestMessage),
+      });
+      setEditingMessage(null);
+      setEditDraft('');
+      trackEvent('编辑协同消息', { 角色: updatedMessage.role });
+      notify('内容已修改', 'success');
+    } catch (error: any) {
+      notify(error?.message || '消息修改失败', 'error');
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
   const deleteMessage = async (message: CollaborationMessage) => {
     if (!activeSession || isGenerating) {
       if (isGenerating) notify('请先停止这次生成，再删除消息', 'info');
@@ -2317,6 +2527,36 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
     notify(message.role === 'user' ? '这一轮协同已删除' : '这条内容已删除', 'success');
   };
 
+  const openMessageActions = async (message: CollaborationMessage) => {
+    if (isGenerating) {
+      notify('请先停止这次生成，再处理消息', 'info');
+      return;
+    }
+    const canEdit = message.role !== 'system' && !!message.content.trim();
+    const canCopy = !!message.content.trim();
+    const choice = await requestActionDialog({
+      title: message.role === 'user' ? '处理自己的消息' : message.role === 'assistant' ? `处理 ${character.name} 的回复` : '处理这条提示',
+      description: canEdit && message.role === 'user'
+        ? '可以修改后从这一条重新生成，也可以复制或删除。'
+        : '选择要对刚刚长按的这条内容执行的操作。',
+      detail: (message.attachments || []).length > 0 ? '编辑正文不会移除这条消息里已有的附件。' : undefined,
+      confirmLabel: canEdit ? (message.role === 'user' ? '编辑并重新生成' : '编辑内容') : canCopy ? '复制内容' : undefined,
+      secondaryLabel: canEdit && canCopy ? '复制内容' : undefined,
+      destructiveLabel: message.role === 'user' ? '删除这一轮' : '删除这条内容',
+      cancelLabel: '取消',
+    });
+    if (choice === 'confirm') {
+      if (canEdit) beginMessageEdit(message);
+      else if (canCopy) await copyMessage(message);
+      return;
+    }
+    if (choice === 'secondary') {
+      await copyMessage(message);
+      return;
+    }
+    if (choice === 'destructive') await deleteMessage(message);
+  };
+
   const transferToChat = async () => {
     if (!activeSession) return;
     const transferable: CollaborationTransferMessage[] = messages
@@ -2349,6 +2589,12 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
   const requestedAvatarMode = settings.avatarMode || 'theme';
   const avatarMode = requestedAvatarMode === 'theme' ? THEME_AVATAR_MODE[uiTheme] : requestedAvatarMode;
   const avatarStyle = settings.avatarStyle || 'circle';
+  const chatContextChoice = settings.recentChatContextCount ?? 'configured';
+  const chatContextLabel = chatContextChoice === 'configured'
+    ? 'Chat 实时 · 用户设定范围'
+    : chatContextChoice > 0
+      ? `Chat 实时 ${chatContextChoice} 条`
+      : '不读取 Chat';
   const streamingArtifactText = streamingText
     ? parseInstallableArtifactBlocks(parseArtifactBlocks(streamingText).visibleText).visibleText
     : '';
@@ -2385,7 +2631,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
               <span className="collab-session-title truncate text-[13px] font-semibold text-slate-800">{activeSession?.title || (showEntryChooser ? '协同工作' : '新的协同')}</span>
               {activeSession && <span className={`collab-session-dot h-1.5 w-1.5 shrink-0 rounded-full ${activeSession.mode === 'immersive' ? 'bg-indigo-500' : 'bg-slate-400'}`} />}
             </div>
-            <p className="collab-header-meta truncate text-[9px] text-slate-400">{activeSession ? `${character.name} · ${MODE_LABELS[activeSession.mode]}${activeSession.makerKind ? ` · ${COLLABORATION_MAKER_MAP[activeSession.makerKind].shortLabel}` : ''}` : showEntryChooser ? '新建或继续一项协同' : '选择协同模式'}</p>
+            <p className="collab-header-meta truncate text-[9px] text-slate-500">{activeSession ? `${character.name} · ${MODE_LABELS[activeSession.mode]} · ${chatContextLabel}${activeSession.makerKind ? ` · ${COLLABORATION_MAKER_MAP[activeSession.makerKind].shortLabel}` : ''}` : showEntryChooser ? '新建或继续一项协同' : '选择协同模式'}</p>
           </div>
         </div>
         <button type="button" onClick={() => void rerollLatestReply()} disabled={!activeSession || isGenerating || !messages.some(message => message.role === 'user')} className="grid h-10 w-10 place-items-center rounded-full text-slate-600 disabled:opacity-25 active:bg-slate-100/80" aria-label="重新生成上一条回复" title="重新生成上一条回复"><ArrowCounterClockwise size={20} /></button>
@@ -2442,7 +2688,7 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
                 }}
                 onPlayVoice={playCollaborationVoice}
                 onOpenAttachment={openAttachment}
-                onLongPress={deleteMessage}
+                onLongPress={openMessageActions}
               />
             ))}
             {isGenerating && (
@@ -2578,6 +2824,19 @@ const CollaborationWindow: React.FC<CollaborationWindowProps> = ({
           }}
         />
       )}
+
+      <CollaborationMessageEditor
+        message={editingMessage}
+        value={editDraft}
+        saving={editSaving}
+        onChange={setEditDraft}
+        onCancel={() => {
+          if (editSaving) return;
+          setEditingMessage(null);
+          setEditDraft('');
+        }}
+        onSave={() => void saveMessageEdit()}
+      />
 
       <CollaborationActionDialog dialog={actionDialog} onResolve={resolveActionDialog} />
     </div>

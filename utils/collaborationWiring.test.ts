@@ -65,7 +65,7 @@ describe('collaboration sidecar wiring', () => {
       '新建协同窗口', '保存协同设置', '协同上传文件', '协同生成文件', '选择协同制作类型',
       '预览协同作品', '使用协同作品', '发送协同上下文到聊天',
       '归档协同窗口', '打开协同文件库', '删除协同文件', '切换日常聊天协同',
-      '重新生成协同回复', '删除协同消息',
+      '重新生成协同回复', '删除协同消息', '复制协同消息', '编辑协同消息',
     ]) {
       expect(windowSource).toContain(`trackEvent('${event}'`);
     }
@@ -154,14 +154,32 @@ describe('collaboration sidecar wiring', () => {
     expect(windowSource).toContain('parseCollaborationMarkdown(normalizeCollaborationVisibleText(content))');
   });
 
-  it('freezes the normal ChatApp payload and recent chat into immersive sessions', () => {
+  it('rebuilds a bounded ChatApp bridge on every collaboration generation', () => {
     const context = read('features/collaboration/context.ts');
     const chat = read('apps/Chat.tsx');
+    const windowSource = read('features/collaboration/CollaborationWindow.tsx');
     const types = read('features/collaboration/types.ts');
     expect(context).toContain('buildChatRequestPayload({');
     expect(context).toContain('payload.fullMessages');
+    expect(context).toContain('selectRecentCollaborationChatMessages(recentChatMessages, chatContextLimit)');
     expect(chat).toContain('recentChatMessages={messages}');
+    expect(windowSource).toContain("const chatContextChoice = settings.recentChatContextCount ?? 'configured'");
+    expect(windowSource).toContain('await loadCharacterContextRange(character)');
+    expect(windowSource).toContain('configuredRange.messages');
+    expect(windowSource).toContain('chatContextSnapshot: liveChatContext');
+    expect(windowSource).toContain('chatContextSnapshot: undefined');
+    expect(windowSource).toContain('ChatApp 最近聊天');
+    expect(windowSource).toContain('最近 10 条');
+    expect(windowSource).toContain('最近 20 条');
+    expect(windowSource).toContain('用户设定范围');
     expect(types).toContain('chatContextSnapshot?: CollaborationContextMessage[]');
+    expect(types).toContain('recentChatContextCount?: CollaborationChatContextChoice');
+  });
+
+  it('hides the over-broad current-interface maker while keeping old works compatible', () => {
+    const makers = read('features/collaboration/makers.ts');
+    expect(makers).toContain("definition => definition.kind !== 'appearance-preset'");
+    expect(makers).toContain('ALL_COLLABORATION_MAKERS.map');
   });
 
   it('refreshes task-related memory on every collaboration send without mixing windows', () => {
@@ -230,13 +248,18 @@ describe('collaboration sidecar wiring', () => {
     expect(store).toContain('Remove message rows without deleting their canonical assets');
   });
 
-  it('deletes long-pressed collaboration content through the themed dialog', () => {
+  it('offers edit, copy and delete from the long-pressed collaboration menu', () => {
     const windowSource = read('features/collaboration/CollaborationWindow.tsx');
     expect(windowSource).toContain('useCollaborationLongPress');
-    expect(windowSource).toContain('onLongPress={deleteMessage}');
+    expect(windowSource).toContain('onLongPress={openMessageActions}');
+    expect(windowSource).toContain("secondaryLabel: canEdit && canCopy ? '复制内容'");
+    expect(windowSource).toContain("destructiveLabel: message.role === 'user' ? '删除这一轮'");
+    expect(windowSource).toContain('保存并重新生成');
+    expect(windowSource).toContain('await CollaborationStore.saveMessage(updatedMessage)');
     expect(windowSource).toContain("message.role === 'user' ? '删除这一轮协同？'");
     expect(windowSource).toContain("tone: 'danger'");
     expect(windowSource).toContain('while (deleteEnd < messages.length');
+    expect(windowSource).toContain('text-slate-700 active:bg-slate-100');
   });
 
   it('uses the ChatApp thinking prompt and keeps model reasoning separate from the deliverable', () => {

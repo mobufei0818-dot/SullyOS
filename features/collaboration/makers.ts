@@ -134,7 +134,7 @@ ${formatSelectorGroups(selectorGroups)}
 
 ${extra}`;
 
-export const COLLABORATION_MAKERS: CollaborationMakerDefinition[] = [
+const ALL_COLLABORATION_MAKERS: CollaborationMakerDefinition[] = [
   {
     kind: 'bubble-theme', label: '气泡制作', shortLabel: '气泡', target: 'character', accent: '#7c3aed',
     description: '角色与用户两侧气泡、语音条和装饰。',
@@ -211,8 +211,15 @@ export const COLLABORATION_MAKERS: CollaborationMakerDefinition[] = [
   },
 ];
 
+// The all-in-one appearance preset overpromises what one generated artifact can
+// safely control. Keep its definition only so older saved works still preview,
+// validate and install; do not expose it as a new-work maker.
+export const COLLABORATION_MAKERS = ALL_COLLABORATION_MAKERS.filter(
+  definition => definition.kind !== 'appearance-preset',
+);
+
 export const COLLABORATION_MAKER_MAP = Object.fromEntries(
-  COLLABORATION_MAKERS.map(definition => [definition.kind, definition]),
+  ALL_COLLABORATION_MAKERS.map(definition => [definition.kind, definition]),
 ) as Record<CollaborationMakerKind, CollaborationMakerDefinition>;
 
 export const getCollaborationMakerPrompt = (kind?: CollaborationMakerKind): string => (

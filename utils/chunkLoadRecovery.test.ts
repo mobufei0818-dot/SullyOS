@@ -15,6 +15,10 @@ describe('isChunkLoadError', () => {
         expect(isChunkLoadError(new TypeError('error loading dynamically imported module'))).toBe(true);
         // Vite CSS 依赖预载失败
         expect(isChunkLoadError(new Error('Unable to preload CSS for /assets/Chat-D3xq.css'))).toBe(true);
+        // Safari / WebKit：部署更新后旧 chunk URL 被 SPA fallback 回成 index.html。
+        expect(isChunkLoadError(new TypeError("'text/html' is not a valid JavaScript MIME type."))).toBe(true);
+        // Chromium 对同一类 HTML-as-module 响应的报错文案。
+        expect(isChunkLoadError(new TypeError('Expected a JavaScript module script but the server responded with a MIME type of "text/html".'))).toBe(true);
         // 字符串形态也接受
         expect(isChunkLoadError('Importing a module script failed.')).toBe(true);
     });
