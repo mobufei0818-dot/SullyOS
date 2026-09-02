@@ -156,6 +156,10 @@ fire-time 流程根据当时上下文决定是否发送。
 - 仅在原版确认消息真正送达后，才回落思念值并以回落后的数值 +30 重设下一阈值；
 - 承诺后的自然跟进、每日次数、免打扰、最短间隔与排程诊断；
 - `lastTickAt` 与 `next_tick_at` 分离，避免聊天页同步把 Cron 检查不断往后推。
+- 2026-09-02 在 fork 的原版 AMSG 公共路径上修复 D1 额度消耗：保留每分钟任务检查，
+  仅将 `message_outbox` 保留期清理降为每小时一次，并为 `acked_at` / `created_at` 补索引。
+  该项修改位于 `worker/amsg/src/index.ts`，同步原版时不可被直接覆盖回每分钟全表扫描；
+  详细保留项和迁移原则见主动消息维护记录第十四节。
 
 发布边界：GitHub Pages 与 Cloudflare Worker 是两次独立发布。网页已发布不代表 Worker 已更新；
 凡涉及 `worker/amsg/worker.bundle.js` 的修改，必须由用户在 Cloudflare Dashboard 将最新 bundle

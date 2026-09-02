@@ -405,3 +405,19 @@ Worker 一次性升级：用户已在 Cloudflare 的现有 `sullyos-amsg` 代码
    每日上限、最短间隔或强制联系规则。
 6. `worker/amsg/worker.bundle.js` 已随源码重新构建。要让小手机关闭后的离线计算采用本规则，必须用该正式
    AMSG bundle 更新现有 Cloudflare Worker；不能部署仅供预览的 `worker/moments/worker.bundle.js`。
+
+
+二十二、原版 AMSG outbox 清理降频与索引（2026-09-02）
+-------------------------------------------------------
+
+1. 本次改动的是用户 fork 中的原版 AMSG Worker 公共代码路径，位于
+   `worker/amsg/src/index.ts`。原版远程仍然只读；修复通过 fork-only 包装层注入上游 D1 adapter。
+2. 上游原有 outbox 清理随每分钟 Cron 执行，实测使 D1 单日 rows read 约 900 万，超过免费层
+   500 万限额。现保留每分钟任务检查，仅将 `message_outbox` 保留期清理降为每小时一次。
+3. 已确认消息保留 7 天、未确认消息保留 28 天的规则不变；新增
+   `idx_outbox_acked_cleanup` 和 `idx_outbox_created_cleanup` 两个索引。额度恢复后点一次
+   “重新连接并验证”，`initSchema` 会幂等补齐老库索引。
+4. 后续合并原版时必须保留“每分钟任务检查 + 每小时 outbox 清理 + 索引 + 原保留期”的语义，
+   不得因冲突处理直接退回每分钟全表扫描。若上游接口已重写，要迁移性能语义而不是机械保留旧代码。
+   详细冲突核对项见《ACTIVE_MESSAGE_RELATIONSHIP_WORKLOG.txt》第十四节。
+5. 修复提交：`958dc399`；版本标记：`2026-09-02.d1-cleanup-1`；补标提交：`9550f1f0`。
