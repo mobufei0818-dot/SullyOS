@@ -17,6 +17,7 @@ import { reportRelationshipJealousyEvents, setRelationshipJealousyForceEnabled }
 import { MemoryNodeDB } from '../utils/memoryPalace/db';
 import { buildCollaborationContextSnapshot, selectCollaborationMemories } from '../features/collaboration/context';
 import type { MemoryNode } from '../utils/memoryPalace/types';
+import { resolveCharTimeZone } from '../utils/timezone';
 
 const USER_PROFILE_ID = 'moments:user';
 const DEFAULT_SETTINGS: MomentsSettings = {
@@ -887,6 +888,14 @@ const MomentsApp: React.FC = () => {
       }));
       const runtimeActors: MomentsCloudActorRuntime[] = actors.map(actor => {
         const context = contextByActor.get(actor.id);
+        const ownCharacter = actor.characterId ? characters.find(item => item.id === actor.characterId) : undefined;
+        const parentCharacter = actor.parentCharacterId ? characters.find(item => item.id === actor.parentCharacterId) : undefined;
+        // 正式角色用自己的钟；明确 NPC 没有独立时区时继承所属主角色。
+        // 两者都没有设置才跟随用户手机，与主动消息 2.0 的时区口径一致。
+        const timezoneId = resolveCharTimeZone(ownCharacter)
+          || resolveCharTimeZone(parentCharacter)
+          || Intl.DateTimeFormat().resolvedOptions().timeZone
+          || 'UTC';
         const postingMode = actor.actorType === 'npc'
           ? currentSettings.npcPostingModes?.[actor.id] || 'low'
           : currentSettings.characterPostingModes?.[actor.characterId || ''] || 'off';
@@ -904,6 +913,7 @@ const MomentsApp: React.FC = () => {
           ...(actor.bio ? { bio: actor.bio } : {}),
           postingMode,
           interactionMode,
+          timezoneId,
           timezoneOffsetMinutes: -new Date().getTimezoneOffset(),
           pack: {
             persona: context?.persona || [actor.relationLabel, actor.bio].filter(Boolean).join('；'),

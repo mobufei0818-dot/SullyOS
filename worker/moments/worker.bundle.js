@@ -748,26 +748,156 @@ var stableHash = (value) => {
   return hash >>> 0;
 };
 var postingModeEnabled = (mode) => mode === "low" || mode === "medium" || mode === "high";
-var dateKeyAtOffset = (timestamp, offsetMinutes) => {
+var validTimeZone = (timeZone) => {
+  if (!timeZone) return false;
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+var zonedParts = (timestamp, timeZone) => {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    weekday: "short",
+    hourCycle: "h23"
+  }).formatToParts(new Date(timestamp));
+  const values = {};
+  for (const part of parts) values[part.type] = part.value;
+  return {
+    year: Number(values.year),
+    month: Number(values.month),
+    day: Number(values.day),
+    hour: Number(values.hour) % 24,
+    minute: Number(values.minute),
+    second: Number(values.second)
+  };
+};
+var dateKeyAtTimeZone = (timestamp, timeZone) => {
+  if (typeof timeZone === "string" && validTimeZone(timeZone)) {
+    const parts = zonedParts(timestamp, timeZone);
+    return `${parts.year}-${padClock(parts.month)}-${padClock(parts.day)}`;
+  }
+  const offsetMinutes = typeof timeZone === "number" ? timeZone : 0;
   const shifted = new Date(timestamp + offsetMinutes * 6e4);
-  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, "0")}-${String(shifted.getUTCDate()).padStart(2, "0")}`;
+  return `${shifted.getUTCFullYear()}-${padClock(shifted.getUTCMonth() + 1)}-${padClock(shifted.getUTCDate())}`;
 };
 var localDayStartUtc = (timestamp, offsetMinutes) => {
   const shifted = new Date(timestamp + offsetMinutes * 6e4);
   return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()) - offsetMinutes * 6e4;
 };
-var nextMomentsDecisionAt = (actorId, mode, from, offsetMinutes) => {
+var WEEKDAY_NAMES = ["\u661F\u671F\u65E5", "\u661F\u671F\u4E00", "\u661F\u671F\u4E8C", "\u661F\u671F\u4E09", "\u661F\u671F\u56DB", "\u661F\u671F\u4E94", "\u661F\u671F\u516D"];
+var padClock = (value) => String(value).padStart(2, "0");
+var describeMomentsLocalTime = (timestamp, timeZone) => {
+  if (typeof timeZone === "string" && validTimeZone(timeZone)) {
+    const parts = zonedParts(timestamp, timeZone);
+    const localDate2 = `${parts.year}-${padClock(parts.month)}-${padClock(parts.day)}`;
+    const localClock2 = `${padClock(parts.hour)}:${padClock(parts.minute)}:${padClock(parts.second)}`;
+    return {
+      epochMs: timestamp,
+      localDate: localDate2,
+      localClock: localClock2,
+      localDateTime: `${localDate2} ${localClock2}`,
+      weekday: WEEKDAY_NAMES[new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay()],
+      timezone: timeZone,
+      minuteOfDay: parts.hour * 60 + parts.minute
+    };
+  }
+  const offsetMinutes = typeof timeZone === "number" ? timeZone : 0;
+  const safeOffset = Math.max(-14 * 60, Math.min(14 * 60, Math.trunc(offsetMinutes || 0)));
+  const shifted = new Date(timestamp + safeOffset * 6e4);
+  const sign = safeOffset >= 0 ? "+" : "-";
+  const absoluteOffset = Math.abs(safeOffset);
+  const localDate = `${shifted.getUTCFullYear()}-${padClock(shifted.getUTCMonth() + 1)}-${padClock(shifted.getUTCDate())}`;
+  const localClock = `${padClock(shifted.getUTCHours())}:${padClock(shifted.getUTCMinutes())}:${padClock(shifted.getUTCSeconds())}`;
+  return {
+    epochMs: timestamp,
+    localDate,
+    localClock,
+    localDateTime: `${localDate} ${localClock}`,
+    weekday: WEEKDAY_NAMES[shifted.getUTCDay()],
+    timezone: `UTC${sign}${padClock(Math.floor(absoluteOffset / 60))}:${padClock(absoluteOffset % 60)}`,
+    minuteOfDay: shifted.getUTCHours() * 60 + shifted.getUTCMinutes()
+  };
+};
+var parseChineseClockNumber = (raw) => {
+  if (/^\d+$/.test(raw)) return Number(raw);
+  const digits = { "\u96F6": 0, "\u3007": 0, "\u4E00": 1, "\u4E8C": 2, "\u4E24": 2, "\u4E09": 3, "\u56DB": 4, "\u4E94": 5, "\u516D": 6, "\u4E03": 7, "\u516B": 8, "\u4E5D": 9 };
+  if (raw === "\u5341") return 10;
+  if (raw.includes("\u5341")) {
+    const [left, right] = raw.split("\u5341");
+    return (left ? digits[left] ?? 0 : 1) * 10 + (right ? digits[right] ?? 0 : 0);
+  }
+  if (raw.length > 1) return Number(raw.split("").map((char) => digits[char] ?? "").join(""));
+  return digits[raw];
+};
+var FUTURE_PLAN_WORDS = /准备|计划|打算|预计|约好|预约|安排|要去|将会|会在|等到|待会|稍后|一会儿|之后|到时候|下班后|今晚要|今天要/;
+var findImpossibleMomentsTimeClaim = (content, timestamp, timeZone) => {
+  const clock = describeMomentsLocalTime(timestamp, timeZone);
+  const validateClaim = (literal, dayWord, period, hourValue, minuteValue, index) => {
+    if (dayWord === "\u524D\u5929" || dayWord === "\u6628\u5929" || dayWord === "\u660E\u5929" || dayWord === "\u540E\u5929") return null;
+    let hour = hourValue;
+    if (!Number.isFinite(hour) || !Number.isFinite(minuteValue) || hour > 23 || minuteValue > 59) return null;
+    if (period === "\u51CC\u6668" && hour === 12) hour = 0;
+    else if ((period === "\u4E0B\u5348" || period === "\u508D\u665A" || period === "\u665A\u4E0A") && hour < 12) hour += 12;
+    else if (period === "\u4E2D\u5348" && hour > 0 && hour < 6) hour += 12;
+    if (hour * 60 + minuteValue <= clock.minuteOfDay + 5) return null;
+    const sentence = content.slice(Math.max(0, index - 28), Math.min(content.length, index + literal.length + 36));
+    if (FUTURE_PLAN_WORDS.test(sentence)) return null;
+    return `\u6B63\u6587\u5C06\u5F53\u5929\u672A\u6765\u65F6\u523B\u201C${literal.trim()}\u201D\u5F53\u6210\u4E86\u5DF2\u53D1\u751F\u7684\u73B0\u573A\uFF1B\u751F\u6210\u65F6\u5F53\u5730\u65F6\u95F4\u4E3A ${clock.localDateTime}`;
+  };
+  const expression = /(前天|昨天|今天|明天|后天)?\s*(凌晨|早上|上午|中午|下午|傍晚|晚上)?\s*([零〇一二两三四五六七八九十\d]{1,3})\s*(?:点|时)(?:\s*([零〇一二两三四五六七八九十\d]{1,3})\s*分?|\s*(半|一刻|三刻))?/g;
+  for (const match of content.matchAll(expression)) {
+    const [literal, dayWord = "", period = "", hourRaw, minuteRaw = "", fraction = ""] = match;
+    const hour = parseChineseClockNumber(hourRaw);
+    const minute = minuteRaw ? parseChineseClockNumber(minuteRaw) : fraction === "\u534A" ? 30 : fraction === "\u4E00\u523B" ? 15 : fraction === "\u4E09\u523B" ? 45 : 0;
+    const violation = validateClaim(literal, dayWord, period, hour, minute, match.index ?? 0);
+    if (violation) return violation;
+  }
+  const digitalExpression = /(前天|昨天|今天|明天|后天)?\s*(凌晨|早上|上午|中午|下午|傍晚|晚上)?\s*(\d{1,2})\s*[:：]\s*(\d{2})/g;
+  for (const match of content.matchAll(digitalExpression)) {
+    const [literal, dayWord = "", period = "", hourRaw, minuteRaw] = match;
+    const violation = validateClaim(literal, dayWord, period, Number(hourRaw), Number(minuteRaw), match.index ?? 0);
+    if (violation) return violation;
+  }
+  return null;
+};
+var nextMomentsDecisionAt = (actorId, mode, from, timeZone) => {
   if (!postingModeEnabled(mode)) return 0;
   const windows = mode === "high" ? [{ start: 8, span: 4 }, { start: 13, span: 5 }, { start: 19, span: 4 }] : [{ start: 9, span: 13 }];
+  const ianaZone = typeof timeZone === "string" && validTimeZone(timeZone) ? timeZone : "";
+  const offsetMinutes = typeof timeZone === "number" ? timeZone : 0;
+  const baseLocal = ianaZone ? zonedParts(from, ianaZone) : null;
   for (let dayOffset = 0; dayOffset < 9; dayOffset += 1) {
-    const dayStart = localDayStartUtc(from, offsetMinutes) + dayOffset * 24 * 60 * 6e4;
-    const dayKey = dateKeyAtOffset(dayStart + 12 * 60 * 6e4, offsetMinutes);
+    const calendar = baseLocal ? new Date(Date.UTC(baseLocal.year, baseLocal.month - 1, baseLocal.day + dayOffset)) : null;
+    const dayKey = calendar ? `${calendar.getUTCFullYear()}-${padClock(calendar.getUTCMonth() + 1)}-${padClock(calendar.getUTCDate())}` : dateKeyAtTimeZone(localDayStartUtc(from, offsetMinutes) + dayOffset * 24 * 60 * 6e4 + 12 * 60 * 6e4, offsetMinutes);
     if (mode === "low" && stableHash(`${actorId}:${dayKey}`) % 7 >= 3) continue;
     for (let opportunity = 0; opportunity < windows.length; opportunity += 1) {
       const window = windows[opportunity];
       const minuteSpan = window.span * 60;
       const minute = stableHash(`${actorId}:${dayKey}:${opportunity}:decision`) % minuteSpan;
-      const candidate = dayStart + (window.start * 60 + minute) * 6e4;
+      const wallHour = window.start + Math.floor(minute / 60);
+      const wallMinute = minute % 60;
+      let candidate;
+      if (calendar && ianaZone) {
+        const desiredAsUtc = Date.UTC(calendar.getUTCFullYear(), calendar.getUTCMonth(), calendar.getUTCDate(), wallHour, wallMinute, 0);
+        candidate = desiredAsUtc;
+        for (let pass = 0; pass < 2; pass += 1) {
+          const observed = zonedParts(candidate, ianaZone);
+          const observedAsUtc = Date.UTC(observed.year, observed.month - 1, observed.day, observed.hour, observed.minute, observed.second);
+          candidate -= observedAsUtc - desiredAsUtc;
+        }
+      } else {
+        const dayStart = localDayStartUtc(from, offsetMinutes) + dayOffset * 24 * 60 * 6e4;
+        candidate = dayStart + (window.start * 60 + minute) * 6e4;
+      }
       if (candidate > from + 5 * 6e4) return candidate;
     }
   }
@@ -814,7 +944,7 @@ async function ensureSchema2(db) {
       user_id TEXT NOT NULL, actor_id TEXT NOT NULL, actor_type TEXT NOT NULL, char_id TEXT, parent_char_id TEXT,
       display_name TEXT NOT NULL, avatar TEXT, bio TEXT, posting_mode TEXT NOT NULL, interaction_mode TEXT NOT NULL,
       auto_interaction_enabled INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 0,
-      timezone_offset_minutes INTEGER NOT NULL DEFAULT 0, credential_id TEXT NOT NULL,
+      timezone_id TEXT NOT NULL DEFAULT '', timezone_offset_minutes INTEGER NOT NULL DEFAULT 0, credential_id TEXT NOT NULL,
       pack_encrypted TEXT NOT NULL, next_decision_at INTEGER NOT NULL DEFAULT 0,
       last_decision_at INTEGER, last_post_at INTEGER, failure_count INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL, PRIMARY KEY(user_id, actor_id)
@@ -828,6 +958,10 @@ async function ensureSchema2(db) {
     `CREATE INDEX IF NOT EXISTS idx_moments_generated_author_time ON moments_generated_posts(user_id, author_id, created_at)`
   ];
   for (const statement of statements) await db.prepare(statement).run();
+  try {
+    await db.prepare(`ALTER TABLE moments_actor_runtime ADD COLUMN timezone_id TEXT NOT NULL DEFAULT ''`).run();
+  } catch {
+  }
   schemaReady = true;
 }
 function authorized(request, env) {
@@ -860,20 +994,22 @@ async function syncRuntime(request, env) {
     const postingMode = asString(actor.postingMode, "off");
     const interactionMode = asString(actor.interactionMode, "normal");
     const rowEnabled = enabled && postingModeEnabled(postingMode) ? 1 : 0;
+    const timezoneId = asString(actor.timezoneId);
     const offset = Math.max(-14 * 60, Math.min(14 * 60, Math.trunc(asNumber(actor.timezoneOffsetMinutes, 0))));
     const packEncrypted = await encryptForStorage(safeJson(object(actor.pack)), userKey);
-    const firstDecision = rowEnabled ? nextMomentsDecisionAt(actorId, postingMode, now(), offset) : 0;
+    const runtimeTimeZone = validTimeZone(timezoneId) ? timezoneId : offset;
+    const firstDecision = rowEnabled ? nextMomentsDecisionAt(actorId, postingMode, now(), runtimeTimeZone) : 0;
     const result = await env.DB.prepare(`INSERT INTO moments_actor_runtime (
       user_id,actor_id,actor_type,char_id,parent_char_id,display_name,avatar,bio,posting_mode,interaction_mode,
-      auto_interaction_enabled,enabled,timezone_offset_minutes,credential_id,pack_encrypted,next_decision_at,
+      auto_interaction_enabled,enabled,timezone_id,timezone_offset_minutes,credential_id,pack_encrypted,next_decision_at,
       last_decision_at,last_post_at,failure_count,updated_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,0,?)
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,0,?)
     ON CONFLICT(user_id,actor_id) DO UPDATE SET
       actor_type=excluded.actor_type,char_id=excluded.char_id,parent_char_id=excluded.parent_char_id,
       display_name=excluded.display_name,avatar=excluded.avatar,bio=excluded.bio,
       posting_mode=excluded.posting_mode,interaction_mode=excluded.interaction_mode,
       auto_interaction_enabled=excluded.auto_interaction_enabled,enabled=excluded.enabled,
-      timezone_offset_minutes=excluded.timezone_offset_minutes,credential_id=excluded.credential_id,
+      timezone_id=excluded.timezone_id,timezone_offset_minutes=excluded.timezone_offset_minutes,credential_id=excluded.credential_id,
       pack_encrypted=excluded.pack_encrypted,
       next_decision_at=CASE
         WHEN excluded.enabled=0 THEN 0
@@ -892,6 +1028,7 @@ async function syncRuntime(request, env) {
       interactionMode,
       autoInteractionEnabled ? 1 : 0,
       rowEnabled,
+      validTimeZone(timezoneId) ? timezoneId : "",
       offset,
       credentialId,
       packEncrypted,
@@ -1143,7 +1280,7 @@ async function planOfflineInteractions(env, author, credential, post) {
   if (!author.autoInteractionEnabled) return 0;
   const candidates = await env.DB.prepare(`SELECT user_id AS userId,actor_id AS actorId,actor_type AS actorType,char_id AS charId,parent_char_id AS parentCharId,
     display_name AS displayName,avatar,bio,posting_mode AS postingMode,interaction_mode AS interactionMode,
-    auto_interaction_enabled AS autoInteractionEnabled,timezone_offset_minutes AS timezoneOffsetMinutes,
+    auto_interaction_enabled AS autoInteractionEnabled,timezone_id AS timezoneId,timezone_offset_minutes AS timezoneOffsetMinutes,
     credential_id AS credentialId,pack_encrypted AS packEncrypted,next_decision_at AS nextDecisionAt,
     last_post_at AS lastPostAt,failure_count AS failureCount
     FROM moments_actor_runtime WHERE user_id=? AND actor_id<>? AND interaction_mode<>'off' LIMIT 60`).bind(author.userId, author.actorId).all();
@@ -1189,6 +1326,8 @@ async function planOfflineInteractions(env, author, credential, post) {
     userRelationship: actor.pack.userRelationship
   })));
   if (!actors.length) return 0;
+  const interactionNow = now();
+  const interactionClock = describeMomentsLocalTime(interactionNow, author.timezoneId || author.timezoneOffsetMinutes);
   const prompt = [
     "\u4F60\u662F\u670B\u53CB\u5708\u540E\u53F0\u4E92\u52A8\u89C4\u5212\u5668\u3002\u53EA\u8F93\u51FA JSON\uFF0C\u4E0D\u8981 Markdown\uFF0C\u4E0D\u8981\u89E3\u91CA\u3002",
     "\u4E00\u6B21\u6027\u89C4\u5212\u672C\u5E16\u7684\u70B9\u8D5E\u3001\u8BC4\u8BBA\u4E0E\u5C11\u91CF\u81EA\u7136\u4E92\u76F8\u56DE\u590D\uFF1B\u4E0D\u5FC5\u8BA9\u6240\u6709\u5019\u9009\u4EBA\u4E92\u52A8\uFF0C\u4E5F\u4E0D\u8981\u628A\u4E0D\u540C\u89D2\u8272\u5199\u6210\u540C\u4E00\u79CD\u8BED\u6C14\u3002",
@@ -1196,8 +1335,9 @@ async function planOfflineInteractions(env, author, credential, post) {
     "\u6BCF\u4E2A actorId \u6700\u591A\u51FA\u73B0\u4E00\u6B21\u3002kind \u53EA\u80FD\u662F reaction \u6216 comment\u3002comment \u53EF\u4EE5\u7528 replyToActorId \u56DE\u590D\u672C\u8F6E\u66F4\u65E9\u51FA\u73B0\u7684\u8BC4\u8BBA\u8005\u3001\u5DF2\u70B9\u8D5E\u8005\u6216\u53D1\u5E16\u8005\u3002",
     "\u5019\u9009\u4E2D canReplyAsAuthor=true \u7684\u662F\u53D1\u5E16\u8005\u672C\u4EBA\uFF1ATA \u4E0D\u80FD\u7ED9\u81EA\u5DF1\u70B9\u8D5E\uFF0C\u53EA\u80FD\u5728\u5176\u4ED6\u4EBA\u5148\u4E92\u52A8\u4E4B\u540E\u6309\u9700\u56DE\u590D\u5176\u4E2D\u4E00\u4EBA\uFF1B\u6CA1\u6709\u503C\u5F97\u56DE\u590D\u5C31\u4E0D\u8981\u8F93\u51FA TA\u3002",
     "\u968F\u673A\u8DEF\u4EBA\u5171 2\u20135 \u4EBA\uFF0C\u70B9\u8D5E\u6216\u8BC4\u8BBA\u5B8C\u5168\u968F\u673A\uFF1B\u8DEF\u4EBA\u8BC4\u8BBA\u6700\u591A 3 \u6761\uFF0C\u4E0D\u5F97\u5047\u88C5\u4E0E\u4F5C\u8005\u719F\u8BC6\u3002\u6700\u591A 8 \u6761\u8BC4\u8BBA\u3002dueAt \u5FC5\u987B\u5728\u672A\u6765 2 \u5206\u949F\u5230 6 \u5C0F\u65F6\u3002",
+    `\u552F\u4E00\u73B0\u5B9E\u65F6\u95F4\u951A\u70B9=${interactionClock.localDateTime} ${interactionClock.weekday} ${interactionClock.timezone}\u3002\u79C1\u804A\u3001\u7FA4\u804A\u548C\u5E16\u5B50\u91CC\u7684\u65F6\u95F4\u53EA\u662F\u5386\u53F2\u4E0A\u4E0B\u6587\uFF0C\u4E0D\u5F97\u628A\u5F53\u5929\u5C1A\u672A\u5230\u6765\u7684\u65F6\u523B\u5F53\u4F5C\u5DF2\u53D1\u751F\u7684\u4E8B\u3002`,
     'JSON\uFF1A{"interactions":[{"actorId":"\u5019\u9009ID","kind":"reaction|comment","content":"\u8BC4\u8BBA\u65F6\u5FC5\u586B","replyToActorId":"\u53EF\u7701\u7565","dueAt":0}]}',
-    `now=${now()}`,
+    `nowEpochMs=${interactionNow}`,
     `\u5E16\u5B50=${JSON.stringify({ id: post.id, authorId: post.authorId, authorName: post.authorName, content: post.content, createdAt: post.createdAt })}`,
     `\u5019\u9009\u4EBA=${JSON.stringify(actors)}`
   ].join("\n");
@@ -1253,6 +1393,9 @@ async function planOfflineInteractions(env, author, credential, post) {
   return planned.length;
 }
 async function generateOfflinePost(env, actor) {
+  const decisionNow = now();
+  const actorTimeZone = actor.timezoneId || actor.timezoneOffsetMinutes;
+  const localClock = describeMomentsLocalTime(decisionNow, actorTimeZone);
   const credential = await resolveMomentsCredential(env, actor.userId, actor.credentialId);
   const pack = await decryptRuntimePack(env, actor, credential.userKey);
   const latestPrivateChat = await loadLatestAmsgPrivateChat(env, actor, credential.userKey);
@@ -1265,19 +1408,21 @@ async function generateOfflinePost(env, actor) {
     } catch {
     }
   }
-  const photoPreferred = stableHash(`${actor.actorId}:${dateKeyAtOffset(now(), actor.timezoneOffsetMinutes)}:photo`) % 100 < 80;
+  const photoPreferred = stableHash(`${actor.actorId}:${dateKeyAtTimeZone(decisionNow, actorTimeZone)}:photo`) % 100 < 80;
   const galleryOptions = Array.isArray(pack.galleryOptions) ? pack.galleryOptions.slice(0, 18).map(object) : [];
   const privacyCandidates = Array.isArray(pack.privacyCandidates) ? pack.privacyCandidates.slice(0, 48).map(object) : [];
   const prompt = [
     "\u4F60\u662F\u89D2\u8272\u670B\u53CB\u5708\u540E\u53F0\u751F\u6D3B\u7EBF\u89C4\u5212\u5668\u3002\u53EA\u8F93\u51FA JSON\uFF0C\u4E0D\u8981 Markdown\uFF0C\u4E0D\u8981\u89E3\u91CA\u3002",
     "\u7ED3\u5408\u89D2\u8272\u4EBA\u8BBE\u3001\u4E0E\u7528\u6237\u7684\u5F53\u524D\u5173\u7CFB\u3001\u8FD1\u671F\u79C1\u804A/\u7FA4\u804A\u548C\u6700\u8FD1\u52A8\u6001\uFF0C\u5224\u65AD\u73B0\u5728\u662F\u5426\u771F\u6709\u503C\u5F97\u53D1\u7684\u670B\u53CB\u5708\uFF1B\u6CA1\u6709\u5C31 shouldPost=false\uFF0C\u7EDD\u4E0D\u8981\u51D1\u6570\u3002",
-    `\u9891\u7387\u6863\u4F4D=${actor.postingMode}\uFF1B\u5F53\u524D\u65F6\u95F4\u6233=${now()}\uFF1B\u672C\u6B21\u5E26\u56FE\u503E\u5411=${photoPreferred ? "80%\u89C4\u5219\u547D\u4E2D" : "\u672A\u547D\u4E2D"}\u3002`,
+    `\u552F\u4E00\u73B0\u5B9E\u65F6\u95F4\u951A\u70B9=${localClock.localDateTime} ${localClock.weekday} ${localClock.timezone}\uFF08epochMs=${decisionNow}\uFF09\u3002`,
+    "\u65F6\u95F4\u662F\u786C\u7EA6\u675F\uFF1A\u79C1\u804A\u3001\u7FA4\u804A\u3001\u8BB0\u5FC6\u4E0E\u65E7\u52A8\u6001\u90FD\u662F\u5386\u53F2\u6750\u6599\uFF0C\u4E0D\u80FD\u8986\u76D6\u4E0A\u9762\u7684\u73B0\u5B9E\u65F6\u95F4\u3002\u4E0D\u5F97\u628A\u5F53\u5929\u672A\u6765\u65F6\u523B\u5199\u6210\u5DF2\u7ECF\u53D1\u751F\uFF1B\u4E0D\u5F97\u64C5\u81EA\u628A\u201C\u65E9\u4E0A/\u521A\u624D\u201D\u7684\u4E8B\u6539\u6210\u4E0B\u5348\u6216\u665A\u4E0A\u3002\u4E0D\u786E\u5B9A\u5177\u4F53\u65F6\u523B\u5C31\u4E0D\u5199\u949F\u70B9\u3002",
+    `\u9891\u7387\u6863\u4F4D=${actor.postingMode}\uFF1B\u672C\u6B21\u5E26\u56FE\u503E\u5411=${photoPreferred ? "80%\u89C4\u5219\u547D\u4E2D" : "\u672A\u547D\u4E2D"}\u3002`,
     "\u82E5 shouldPost=true\uFF0C\u76F4\u63A5\u751F\u6210\u4E0D\u8D85\u8FC7500\u5B57\u7684\u751F\u6D3B\u5316\u6B63\u6587\u3002\u53EF\u4EE5\u4ECE\u81EA\u5DF1\u7684\u5C0F\u624B\u673A\u76F8\u518C\u5019\u9009\u9009\u62E9 galleryImageId\uFF1B\u53EA\u6709\u6CA1\u6709\u5408\u9002\u65E7\u7167\u65F6\u624D\u586B\u5199 photoPrompt\uFF0C\u4E8C\u8005\u53EA\u80FD\u9009\u4E00\u4E2A\u3002",
     'JSON\uFF1A{"shouldPost":true,"content":"\u6B63\u6587","galleryImageId":"\u53EF\u7701\u7565","photoPrompt":"\u53EF\u7701\u7565","photoIncludesAuthor":false,"visibilityMode":"public|exclude","excludedActorIds":[]}',
     `\u89D2\u8272=${JSON.stringify({ name: actor.displayName, bio: actor.bio || "", persona: asString(pack.persona).slice(0, 5e3) })}`,
     `\u4E0E\u7528\u6237\u5173\u7CFB=${asString(pack.userRelationship).slice(0, 2200)}`,
-    `\u8FD1\u671F\u79C1\u804A=${(latestPrivateChat || asString(pack.privateChat)).slice(-7e3)}`,
-    `\u5171\u540C\u7FA4\u804A=${asString(pack.sharedGroupChat).slice(-6500)}`,
+    `\u5386\u53F2\u6750\u6599\uFF5C\u8FD1\u671F\u79C1\u804A=${(latestPrivateChat || asString(pack.privateChat)).slice(-7e3)}`,
+    `\u5386\u53F2\u6750\u6599\uFF5C\u5171\u540C\u7FA4\u804A=${asString(pack.sharedGroupChat).slice(-6500)}`,
     `\u6700\u8FD1\u52A8\u6001=${JSON.stringify([...recentPosts, ...Array.isArray(pack.recentPosts) ? pack.recentPosts.map(object).map((item) => ({ content: asString(item.content), createdAt: asNumber(item.createdAt) })) : []].slice(0, 8))}`,
     `\u81EA\u5DF1\u7684\u76F8\u518C\u5019\u9009=${JSON.stringify(galleryOptions.map((item) => ({ id: item.id, savedDate: item.savedDate, review: item.review, context: item.context })))}`,
     `\u53EF\u6392\u9664\u7684\u597D\u53CB=${JSON.stringify(privacyCandidates.map((item) => ({ actorId: item.actorId, name: item.name, groupName: item.groupName })))}`
@@ -1285,6 +1430,11 @@ async function generateOfflinePost(env, actor) {
   const result = await callMomentsModel(credential, prompt);
   const content = asString(result.content).slice(0, 1e3);
   if (result.shouldPost !== true || !content) return { posted: false, interactions: 0 };
+  const impossibleTime = findImpossibleMomentsTimeClaim(content, decisionNow, actorTimeZone);
+  if (impossibleTime) {
+    await writeDiagnostic(env.DB, actor.userId, "warn", "offline_post_time_rejected", impossibleTime, { actorId: actor.actorId, content });
+    return { posted: false, interactions: 0 };
+  }
   const createdAt = now();
   const postId = `moment-cloud-${actor.actorId.replace(/[^a-zA-Z0-9_-]/g, "-").slice(-40)}-${createdAt.toString(36)}`;
   const galleryById = new Map(galleryOptions.map((item) => [asString(item.id), item]));
@@ -1395,14 +1545,14 @@ var src_default = {
     }
     const actor = await env.DB.prepare(`SELECT user_id AS userId,actor_id AS actorId,actor_type AS actorType,char_id AS charId,parent_char_id AS parentCharId,
       display_name AS displayName,avatar,bio,posting_mode AS postingMode,interaction_mode AS interactionMode,
-      auto_interaction_enabled AS autoInteractionEnabled,timezone_offset_minutes AS timezoneOffsetMinutes,
+      auto_interaction_enabled AS autoInteractionEnabled,timezone_id AS timezoneId,timezone_offset_minutes AS timezoneOffsetMinutes,
       credential_id AS credentialId,pack_encrypted AS packEncrypted,next_decision_at AS nextDecisionAt,
       last_post_at AS lastPostAt,failure_count AS failureCount
       FROM moments_actor_runtime WHERE enabled=1 AND next_decision_at>0 AND next_decision_at<=?
       ORDER BY next_decision_at ASC LIMIT 1`).bind(tickNow).first();
     if (actor) {
       const minimumGap = actor.postingMode === "high" ? 4 * 60 * 6e4 : actor.postingMode === "medium" ? 18 * 60 * 6e4 : 48 * 60 * 6e4;
-      const nextDecisionAt = nextMomentsDecisionAt(actor.actorId, actor.postingMode, tickNow, actor.timezoneOffsetMinutes);
+      const nextDecisionAt = nextMomentsDecisionAt(actor.actorId, actor.postingMode, tickNow, actor.timezoneId || actor.timezoneOffsetMinutes);
       if (actor.lastPostAt && tickNow - actor.lastPostAt < minimumGap) {
         await env.DB.prepare(`UPDATE moments_actor_runtime SET next_decision_at=?,last_decision_at=?,failure_count=0,updated_at=? WHERE user_id=? AND actor_id=?`).bind(Math.max(nextDecisionAt, actor.lastPostAt + minimumGap), tickNow, tickNow, actor.userId, actor.actorId).run();
       } else {
@@ -1426,6 +1576,8 @@ var src_default = {
 };
 export {
   src_default as default,
+  describeMomentsLocalTime,
+  findImpossibleMomentsTimeClaim,
   nextMomentsDecisionAt,
   shouldRunMomentsCron
 };

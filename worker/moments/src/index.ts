@@ -54,30 +54,160 @@ const stableHash = (value: string) => {
 };
 
 const postingModeEnabled = (mode: string) => mode === 'low' || mode === 'medium' || mode === 'high';
-const dateKeyAtOffset = (timestamp: number, offsetMinutes: number) => {
+type MomentsTimeZone = string | number;
+
+const validTimeZone = (timeZone: string) => {
+  if (!timeZone) return false;
+  try { new Intl.DateTimeFormat('en-US', { timeZone }).format(0); return true; }
+  catch { return false; }
+};
+
+const zonedParts = (timestamp: number, timeZone: string) => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', weekday: 'short', hourCycle: 'h23',
+  }).formatToParts(new Date(timestamp));
+  const values: Record<string, string> = {};
+  for (const part of parts) values[part.type] = part.value;
+  return {
+    year: Number(values.year), month: Number(values.month), day: Number(values.day),
+    hour: Number(values.hour) % 24, minute: Number(values.minute), second: Number(values.second),
+  };
+};
+
+const dateKeyAtTimeZone = (timestamp: number, timeZone: MomentsTimeZone) => {
+  if (typeof timeZone === 'string' && validTimeZone(timeZone)) {
+    const parts = zonedParts(timestamp, timeZone);
+    return `${parts.year}-${padClock(parts.month)}-${padClock(parts.day)}`;
+  }
+  const offsetMinutes = typeof timeZone === 'number' ? timeZone : 0;
   const shifted = new Date(timestamp + offsetMinutes * 60_000);
-  return `${shifted.getUTCFullYear()}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`;
+  return `${shifted.getUTCFullYear()}-${padClock(shifted.getUTCMonth() + 1)}-${padClock(shifted.getUTCDate())}`;
 };
 const localDayStartUtc = (timestamp: number, offsetMinutes: number) => {
   const shifted = new Date(timestamp + offsetMinutes * 60_000);
   return Date.UTC(shifted.getUTCFullYear(), shifted.getUTCMonth(), shifted.getUTCDate()) - offsetMinutes * 60_000;
 };
 
+const WEEKDAY_NAMES = ['星期日', '星期一', '星期二', '星期三', '星期四', '星期五', '星期六'];
+const padClock = (value: number) => String(value).padStart(2, '0');
+
+/** 把前端同步的设备时区转成模型可直接理解的唯一墙钟时间锚点。 */
+export const describeMomentsLocalTime = (timestamp: number, timeZone: MomentsTimeZone) => {
+  if (typeof timeZone === 'string' && validTimeZone(timeZone)) {
+    const parts = zonedParts(timestamp, timeZone);
+    const localDate = `${parts.year}-${padClock(parts.month)}-${padClock(parts.day)}`;
+    const localClock = `${padClock(parts.hour)}:${padClock(parts.minute)}:${padClock(parts.second)}`;
+    return {
+      epochMs: timestamp, localDate, localClock, localDateTime: `${localDate} ${localClock}`,
+      weekday: WEEKDAY_NAMES[new Date(Date.UTC(parts.year, parts.month - 1, parts.day)).getUTCDay()],
+      timezone: timeZone, minuteOfDay: parts.hour * 60 + parts.minute,
+    };
+  }
+  const offsetMinutes = typeof timeZone === 'number' ? timeZone : 0;
+  const safeOffset = Math.max(-14 * 60, Math.min(14 * 60, Math.trunc(offsetMinutes || 0)));
+  const shifted = new Date(timestamp + safeOffset * 60_000);
+  const sign = safeOffset >= 0 ? '+' : '-';
+  const absoluteOffset = Math.abs(safeOffset);
+  const localDate = `${shifted.getUTCFullYear()}-${padClock(shifted.getUTCMonth() + 1)}-${padClock(shifted.getUTCDate())}`;
+  const localClock = `${padClock(shifted.getUTCHours())}:${padClock(shifted.getUTCMinutes())}:${padClock(shifted.getUTCSeconds())}`;
+  return {
+    epochMs: timestamp,
+    localDate,
+    localClock,
+    localDateTime: `${localDate} ${localClock}`,
+    weekday: WEEKDAY_NAMES[shifted.getUTCDay()],
+    timezone: `UTC${sign}${padClock(Math.floor(absoluteOffset / 60))}:${padClock(absoluteOffset % 60)}`,
+    minuteOfDay: shifted.getUTCHours() * 60 + shifted.getUTCMinutes(),
+  };
+};
+
+const parseChineseClockNumber = (raw: string) => {
+  if (/^\d+$/.test(raw)) return Number(raw);
+  const digits: Record<string, number> = { '零': 0, '〇': 0, '一': 1, '二': 2, '两': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9 };
+  if (raw === '十') return 10;
+  if (raw.includes('十')) {
+    const [left, right] = raw.split('十');
+    return (left ? digits[left] ?? 0 : 1) * 10 + (right ? digits[right] ?? 0 : 0);
+  }
+  if (raw.length > 1) return Number(raw.split('').map(char => digits[char] ?? '').join(''));
+  return digits[raw];
+};
+
+const FUTURE_PLAN_WORDS = /准备|计划|打算|预计|约好|预约|安排|要去|将会|会在|等到|待会|稍后|一会儿|之后|到时候|下班后|今晚要|今天要/;
+
+/**
+ * 拦截把当天未来时刻当成已经发生的生活现场。明确的未来计划仍然允许。
+ * 这是模型输出后的低成本硬校验，正常输出不会多调一次 API。
+ */
+export const findImpossibleMomentsTimeClaim = (content: string, timestamp: number, timeZone: MomentsTimeZone): string | null => {
+  const clock = describeMomentsLocalTime(timestamp, timeZone);
+  const validateClaim = (literal: string, dayWord: string, period: string, hourValue: number, minuteValue: number, index: number) => {
+    if (dayWord === '前天' || dayWord === '昨天' || dayWord === '明天' || dayWord === '后天') return null;
+    let hour = hourValue;
+    if (!Number.isFinite(hour) || !Number.isFinite(minuteValue) || hour > 23 || minuteValue > 59) return null;
+    if (period === '凌晨' && hour === 12) hour = 0;
+    else if ((period === '下午' || period === '傍晚' || period === '晚上') && hour < 12) hour += 12;
+    else if (period === '中午' && hour > 0 && hour < 6) hour += 12;
+    if (hour * 60 + minuteValue <= clock.minuteOfDay + 5) return null;
+    const sentence = content.slice(Math.max(0, index - 28), Math.min(content.length, index + literal.length + 36));
+    if (FUTURE_PLAN_WORDS.test(sentence)) return null;
+    return `正文将当天未来时刻“${literal.trim()}”当成了已发生的现场；生成时当地时间为 ${clock.localDateTime}`;
+  };
+  const expression = /(前天|昨天|今天|明天|后天)?\s*(凌晨|早上|上午|中午|下午|傍晚|晚上)?\s*([零〇一二两三四五六七八九十\d]{1,3})\s*(?:点|时)(?:\s*([零〇一二两三四五六七八九十\d]{1,3})\s*分?|\s*(半|一刻|三刻))?/g;
+  for (const match of content.matchAll(expression)) {
+    const [literal, dayWord = '', period = '', hourRaw, minuteRaw = '', fraction = ''] = match;
+    const hour = parseChineseClockNumber(hourRaw);
+    const minute = minuteRaw ? parseChineseClockNumber(minuteRaw) : fraction === '半' ? 30 : fraction === '一刻' ? 15 : fraction === '三刻' ? 45 : 0;
+    const violation = validateClaim(literal, dayWord, period, hour, minute, match.index ?? 0);
+    if (violation) return violation;
+  }
+  const digitalExpression = /(前天|昨天|今天|明天|后天)?\s*(凌晨|早上|上午|中午|下午|傍晚|晚上)?\s*(\d{1,2})\s*[:：]\s*(\d{2})/g;
+  for (const match of content.matchAll(digitalExpression)) {
+    const [literal, dayWord = '', period = '', hourRaw, minuteRaw] = match;
+    const violation = validateClaim(literal, dayWord, period, Number(hourRaw), Number(minuteRaw), match.index ?? 0);
+    if (violation) return violation;
+  }
+  return null;
+};
+
 /** 只预约真正的生活窗口；低频非候选日不会产生 API 判断。 */
-export const nextMomentsDecisionAt = (actorId: string, mode: string, from: number, offsetMinutes: number) => {
+export const nextMomentsDecisionAt = (actorId: string, mode: string, from: number, timeZone: MomentsTimeZone) => {
   if (!postingModeEnabled(mode)) return 0;
   const windows = mode === 'high'
     ? [{ start: 8, span: 4 }, { start: 13, span: 5 }, { start: 19, span: 4 }]
     : [{ start: 9, span: 13 }];
+  const ianaZone = typeof timeZone === 'string' && validTimeZone(timeZone) ? timeZone : '';
+  const offsetMinutes = typeof timeZone === 'number' ? timeZone : 0;
+  const baseLocal = ianaZone ? zonedParts(from, ianaZone) : null;
   for (let dayOffset = 0; dayOffset < 9; dayOffset += 1) {
-    const dayStart = localDayStartUtc(from, offsetMinutes) + dayOffset * 24 * 60 * 60_000;
-    const dayKey = dateKeyAtOffset(dayStart + 12 * 60 * 60_000, offsetMinutes);
+    const calendar = baseLocal
+      ? new Date(Date.UTC(baseLocal.year, baseLocal.month - 1, baseLocal.day + dayOffset))
+      : null;
+    const dayKey = calendar
+      ? `${calendar.getUTCFullYear()}-${padClock(calendar.getUTCMonth() + 1)}-${padClock(calendar.getUTCDate())}`
+      : dateKeyAtTimeZone(localDayStartUtc(from, offsetMinutes) + dayOffset * 24 * 60 * 60_000 + 12 * 60 * 60_000, offsetMinutes);
     if (mode === 'low' && stableHash(`${actorId}:${dayKey}`) % 7 >= 3) continue;
     for (let opportunity = 0; opportunity < windows.length; opportunity += 1) {
       const window = windows[opportunity];
       const minuteSpan = window.span * 60;
       const minute = stableHash(`${actorId}:${dayKey}:${opportunity}:decision`) % minuteSpan;
-      const candidate = dayStart + (window.start * 60 + minute) * 60_000;
+      const wallHour = window.start + Math.floor(minute / 60);
+      const wallMinute = minute % 60;
+      let candidate: number;
+      if (calendar && ianaZone) {
+        const desiredAsUtc = Date.UTC(calendar.getUTCFullYear(), calendar.getUTCMonth(), calendar.getUTCDate(), wallHour, wallMinute, 0);
+        candidate = desiredAsUtc;
+        // Intl 反解角色墙钟时间；跑两轮以跨过夏令时边界。
+        for (let pass = 0; pass < 2; pass += 1) {
+          const observed = zonedParts(candidate, ianaZone);
+          const observedAsUtc = Date.UTC(observed.year, observed.month - 1, observed.day, observed.hour, observed.minute, observed.second);
+          candidate -= observedAsUtc - desiredAsUtc;
+        }
+      } else {
+        const dayStart = localDayStartUtc(from, offsetMinutes) + dayOffset * 24 * 60 * 60_000;
+        candidate = dayStart + (window.start * 60 + minute) * 60_000;
+      }
       if (candidate > from + 5 * 60_000) return candidate;
     }
   }
@@ -131,7 +261,7 @@ async function ensureSchema(db: D1Database) {
       user_id TEXT NOT NULL, actor_id TEXT NOT NULL, actor_type TEXT NOT NULL, char_id TEXT, parent_char_id TEXT,
       display_name TEXT NOT NULL, avatar TEXT, bio TEXT, posting_mode TEXT NOT NULL, interaction_mode TEXT NOT NULL,
       auto_interaction_enabled INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 0,
-      timezone_offset_minutes INTEGER NOT NULL DEFAULT 0, credential_id TEXT NOT NULL,
+      timezone_id TEXT NOT NULL DEFAULT '', timezone_offset_minutes INTEGER NOT NULL DEFAULT 0, credential_id TEXT NOT NULL,
       pack_encrypted TEXT NOT NULL, next_decision_at INTEGER NOT NULL DEFAULT 0,
       last_decision_at INTEGER, last_post_at INTEGER, failure_count INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL, PRIMARY KEY(user_id, actor_id)
@@ -145,6 +275,10 @@ async function ensureSchema(db: D1Database) {
     `CREATE INDEX IF NOT EXISTS idx_moments_generated_author_time ON moments_generated_posts(user_id, author_id, created_at)`,
   ];
   for (const statement of statements) await db.prepare(statement).run();
+  // 旧用户已有表时 CREATE IF NOT EXISTS 不会加列；这条只在首次升级成功，
+  // 之后 duplicate column 可安全忽略。保留 offset 仅作旧前端兼容回退。
+  try { await db.prepare(`ALTER TABLE moments_actor_runtime ADD COLUMN timezone_id TEXT NOT NULL DEFAULT ''`).run(); }
+  catch { /* column already exists */ }
   schemaReady = true;
 }
 
@@ -182,20 +316,22 @@ async function syncRuntime(request: Request, env: Env) {
     const postingMode = asString(actor.postingMode, 'off');
     const interactionMode = asString(actor.interactionMode, 'normal');
     const rowEnabled = enabled && postingModeEnabled(postingMode) ? 1 : 0;
+    const timezoneId = asString(actor.timezoneId);
     const offset = Math.max(-14 * 60, Math.min(14 * 60, Math.trunc(asNumber(actor.timezoneOffsetMinutes, 0))));
     const packEncrypted = await encryptForStorage(safeJson(object(actor.pack)), userKey);
-    const firstDecision = rowEnabled ? nextMomentsDecisionAt(actorId, postingMode, now(), offset) : 0;
+    const runtimeTimeZone: MomentsTimeZone = validTimeZone(timezoneId) ? timezoneId : offset;
+    const firstDecision = rowEnabled ? nextMomentsDecisionAt(actorId, postingMode, now(), runtimeTimeZone) : 0;
     const result = await env.DB.prepare(`INSERT INTO moments_actor_runtime (
       user_id,actor_id,actor_type,char_id,parent_char_id,display_name,avatar,bio,posting_mode,interaction_mode,
-      auto_interaction_enabled,enabled,timezone_offset_minutes,credential_id,pack_encrypted,next_decision_at,
+      auto_interaction_enabled,enabled,timezone_id,timezone_offset_minutes,credential_id,pack_encrypted,next_decision_at,
       last_decision_at,last_post_at,failure_count,updated_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,0,?)
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,0,?)
     ON CONFLICT(user_id,actor_id) DO UPDATE SET
       actor_type=excluded.actor_type,char_id=excluded.char_id,parent_char_id=excluded.parent_char_id,
       display_name=excluded.display_name,avatar=excluded.avatar,bio=excluded.bio,
       posting_mode=excluded.posting_mode,interaction_mode=excluded.interaction_mode,
       auto_interaction_enabled=excluded.auto_interaction_enabled,enabled=excluded.enabled,
-      timezone_offset_minutes=excluded.timezone_offset_minutes,credential_id=excluded.credential_id,
+      timezone_id=excluded.timezone_id,timezone_offset_minutes=excluded.timezone_offset_minutes,credential_id=excluded.credential_id,
       pack_encrypted=excluded.pack_encrypted,
       next_decision_at=CASE
         WHEN excluded.enabled=0 THEN 0
@@ -206,7 +342,7 @@ async function syncRuntime(request: Request, env: Env) {
         userId, actorId, asString(actor.actorType, 'character'), asString(actor.characterId) || null,
         asString(actor.parentCharacterId) || null, displayName, asString(actor.avatar) || null,
         asString(actor.bio) || null, postingMode, interactionMode, autoInteractionEnabled ? 1 : 0,
-        rowEnabled, offset, credentialId, packEncrypted, firstDecision, updatedAt,
+        rowEnabled, validTimeZone(timezoneId) ? timezoneId : '', offset, credentialId, packEncrypted, firstDecision, updatedAt,
       ).run();
     upserted += result.meta?.changes || 0;
   }
@@ -347,6 +483,7 @@ interface RuntimeActorRow {
   postingMode: string;
   interactionMode: string;
   autoInteractionEnabled: number;
+  timezoneId: string;
   timezoneOffsetMinutes: number;
   credentialId: string;
   packEncrypted: string;
@@ -484,7 +621,7 @@ async function planOfflineInteractions(
   if (!author.autoInteractionEnabled) return 0;
   const candidates = await env.DB.prepare(`SELECT user_id AS userId,actor_id AS actorId,actor_type AS actorType,char_id AS charId,parent_char_id AS parentCharId,
     display_name AS displayName,avatar,bio,posting_mode AS postingMode,interaction_mode AS interactionMode,
-    auto_interaction_enabled AS autoInteractionEnabled,timezone_offset_minutes AS timezoneOffsetMinutes,
+    auto_interaction_enabled AS autoInteractionEnabled,timezone_id AS timezoneId,timezone_offset_minutes AS timezoneOffsetMinutes,
     credential_id AS credentialId,pack_encrypted AS packEncrypted,next_decision_at AS nextDecisionAt,
     last_post_at AS lastPostAt,failure_count AS failureCount
     FROM moments_actor_runtime WHERE user_id=? AND actor_id<>? AND interaction_mode<>'off' LIMIT 60`)
@@ -520,6 +657,8 @@ async function planOfflineInteractions(
     interactionMode: actor.interactionMode, persona: actor.pack.persona, userRelationship: actor.pack.userRelationship,
   })));
   if (!actors.length) return 0;
+  const interactionNow = now();
+  const interactionClock = describeMomentsLocalTime(interactionNow, author.timezoneId || author.timezoneOffsetMinutes);
   const prompt = [
     '你是朋友圈后台互动规划器。只输出 JSON，不要 Markdown，不要解释。',
     '一次性规划本帖的点赞、评论与少量自然互相回复；不必让所有候选人互动，也不要把不同角色写成同一种语气。',
@@ -527,8 +666,9 @@ async function planOfflineInteractions(
     '每个 actorId 最多出现一次。kind 只能是 reaction 或 comment。comment 可以用 replyToActorId 回复本轮更早出现的评论者、已点赞者或发帖者。',
     '候选中 canReplyAsAuthor=true 的是发帖者本人：TA 不能给自己点赞，只能在其他人先互动之后按需回复其中一人；没有值得回复就不要输出 TA。',
     '随机路人共 2–5 人，点赞或评论完全随机；路人评论最多 3 条，不得假装与作者熟识。最多 8 条评论。dueAt 必须在未来 2 分钟到 6 小时。',
+    `唯一现实时间锚点=${interactionClock.localDateTime} ${interactionClock.weekday} ${interactionClock.timezone}。私聊、群聊和帖子里的时间只是历史上下文，不得把当天尚未到来的时刻当作已发生的事。`,
     'JSON：{"interactions":[{"actorId":"候选ID","kind":"reaction|comment","content":"评论时必填","replyToActorId":"可省略","dueAt":0}]}',
-    `now=${now()}`,
+    `nowEpochMs=${interactionNow}`,
     `帖子=${JSON.stringify({ id: post.id, authorId: post.authorId, authorName: post.authorName, content: post.content, createdAt: post.createdAt })}`,
     `候选人=${JSON.stringify(actors)}`,
   ].join('\n');
@@ -574,6 +714,9 @@ async function planOfflineInteractions(
 }
 
 async function generateOfflinePost(env: Env, actor: RuntimeActorRow) {
+  const decisionNow = now();
+  const actorTimeZone: MomentsTimeZone = actor.timezoneId || actor.timezoneOffsetMinutes;
+  const localClock = describeMomentsLocalTime(decisionNow, actorTimeZone);
   const credential = await resolveMomentsCredential(env, actor.userId, actor.credentialId);
   const pack = await decryptRuntimePack(env, actor, credential.userKey);
   const latestPrivateChat = await loadLatestAmsgPrivateChat(env, actor, credential.userKey);
@@ -586,19 +729,21 @@ async function generateOfflinePost(env: Env, actor: RuntimeActorRow) {
       recentPosts.push({ content: asString(stored.content), createdAt: asNumber(stored.createdAt) });
     } catch { /* 单条旧数据损坏不阻断本轮 */ }
   }
-  const photoPreferred = stableHash(`${actor.actorId}:${dateKeyAtOffset(now(), actor.timezoneOffsetMinutes)}:photo`) % 100 < 80;
+  const photoPreferred = stableHash(`${actor.actorId}:${dateKeyAtTimeZone(decisionNow, actorTimeZone)}:photo`) % 100 < 80;
   const galleryOptions = Array.isArray(pack.galleryOptions) ? pack.galleryOptions.slice(0, 18).map(object) : [];
   const privacyCandidates = Array.isArray(pack.privacyCandidates) ? pack.privacyCandidates.slice(0, 48).map(object) : [];
   const prompt = [
     '你是角色朋友圈后台生活线规划器。只输出 JSON，不要 Markdown，不要解释。',
     '结合角色人设、与用户的当前关系、近期私聊/群聊和最近动态，判断现在是否真有值得发的朋友圈；没有就 shouldPost=false，绝不要凑数。',
-    `频率档位=${actor.postingMode}；当前时间戳=${now()}；本次带图倾向=${photoPreferred ? '80%规则命中' : '未命中'}。`,
+    `唯一现实时间锚点=${localClock.localDateTime} ${localClock.weekday} ${localClock.timezone}（epochMs=${decisionNow}）。`,
+    '时间是硬约束：私聊、群聊、记忆与旧动态都是历史材料，不能覆盖上面的现实时间。不得把当天未来时刻写成已经发生；不得擅自把“早上/刚才”的事改成下午或晚上。不确定具体时刻就不写钟点。',
+    `频率档位=${actor.postingMode}；本次带图倾向=${photoPreferred ? '80%规则命中' : '未命中'}。`,
     '若 shouldPost=true，直接生成不超过500字的生活化正文。可以从自己的小手机相册候选选择 galleryImageId；只有没有合适旧照时才填写 photoPrompt，二者只能选一个。',
     'JSON：{"shouldPost":true,"content":"正文","galleryImageId":"可省略","photoPrompt":"可省略","photoIncludesAuthor":false,"visibilityMode":"public|exclude","excludedActorIds":[]}',
     `角色=${JSON.stringify({ name: actor.displayName, bio: actor.bio || '', persona: asString(pack.persona).slice(0, 5000) })}`,
     `与用户关系=${asString(pack.userRelationship).slice(0, 2200)}`,
-    `近期私聊=${(latestPrivateChat || asString(pack.privateChat)).slice(-7000)}`,
-    `共同群聊=${asString(pack.sharedGroupChat).slice(-6500)}`,
+    `历史材料｜近期私聊=${(latestPrivateChat || asString(pack.privateChat)).slice(-7000)}`,
+    `历史材料｜共同群聊=${asString(pack.sharedGroupChat).slice(-6500)}`,
     `最近动态=${JSON.stringify([...recentPosts, ...(Array.isArray(pack.recentPosts) ? pack.recentPosts.map(object).map(item => ({ content: asString(item.content), createdAt: asNumber(item.createdAt) })) : [])].slice(0, 8))}`,
     `自己的相册候选=${JSON.stringify(galleryOptions.map(item => ({ id: item.id, savedDate: item.savedDate, review: item.review, context: item.context })))}`,
     `可排除的好友=${JSON.stringify(privacyCandidates.map(item => ({ actorId: item.actorId, name: item.name, groupName: item.groupName })))}`,
@@ -606,6 +751,11 @@ async function generateOfflinePost(env: Env, actor: RuntimeActorRow) {
   const result = await callMomentsModel(credential, prompt);
   const content = asString(result.content).slice(0, 1000);
   if (result.shouldPost !== true || !content) return { posted: false, interactions: 0 };
+  const impossibleTime = findImpossibleMomentsTimeClaim(content, decisionNow, actorTimeZone);
+  if (impossibleTime) {
+    await writeDiagnostic(env.DB, actor.userId, 'warn', 'offline_post_time_rejected', impossibleTime, { actorId: actor.actorId, content });
+    return { posted: false, interactions: 0 };
+  }
   const createdAt = now(); const postId = `moment-cloud-${actor.actorId.replace(/[^a-zA-Z0-9_-]/g, '-').slice(-40)}-${createdAt.toString(36)}`;
   const galleryById = new Map(galleryOptions.map(item => [asString(item.id), item]));
   const selectedGallery = galleryById.get(asString(result.galleryImageId));
@@ -703,7 +853,7 @@ export default {
     // 每轮最多判断一名到期主体：角色多时自然排队，避免同一分钟模型与 D1 突发。
     const actor = await env.DB.prepare(`SELECT user_id AS userId,actor_id AS actorId,actor_type AS actorType,char_id AS charId,parent_char_id AS parentCharId,
       display_name AS displayName,avatar,bio,posting_mode AS postingMode,interaction_mode AS interactionMode,
-      auto_interaction_enabled AS autoInteractionEnabled,timezone_offset_minutes AS timezoneOffsetMinutes,
+      auto_interaction_enabled AS autoInteractionEnabled,timezone_id AS timezoneId,timezone_offset_minutes AS timezoneOffsetMinutes,
       credential_id AS credentialId,pack_encrypted AS packEncrypted,next_decision_at AS nextDecisionAt,
       last_post_at AS lastPostAt,failure_count AS failureCount
       FROM moments_actor_runtime WHERE enabled=1 AND next_decision_at>0 AND next_decision_at<=?
@@ -711,7 +861,7 @@ export default {
     if (actor) {
       const minimumGap = actor.postingMode === 'high' ? 4 * 60 * 60_000
         : actor.postingMode === 'medium' ? 18 * 60 * 60_000 : 48 * 60 * 60_000;
-      const nextDecisionAt = nextMomentsDecisionAt(actor.actorId, actor.postingMode, tickNow, actor.timezoneOffsetMinutes);
+      const nextDecisionAt = nextMomentsDecisionAt(actor.actorId, actor.postingMode, tickNow, actor.timezoneId || actor.timezoneOffsetMinutes);
       if (actor.lastPostAt && tickNow - actor.lastPostAt < minimumGap) {
         await env.DB.prepare(`UPDATE moments_actor_runtime SET next_decision_at=?,last_decision_at=?,failure_count=0,updated_at=? WHERE user_id=? AND actor_id=?`)
           .bind(Math.max(nextDecisionAt, actor.lastPostAt + minimumGap), tickNow, tickNow, actor.userId, actor.actorId).run();

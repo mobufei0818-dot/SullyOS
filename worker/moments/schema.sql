@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS moments_actor_runtime (
   user_id TEXT NOT NULL, actor_id TEXT NOT NULL, actor_type TEXT NOT NULL, char_id TEXT, parent_char_id TEXT,
   display_name TEXT NOT NULL, avatar TEXT, bio TEXT, posting_mode TEXT NOT NULL, interaction_mode TEXT NOT NULL,
   auto_interaction_enabled INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 0,
-  timezone_offset_minutes INTEGER NOT NULL DEFAULT 0, credential_id TEXT NOT NULL,
+  timezone_id TEXT NOT NULL DEFAULT '', timezone_offset_minutes INTEGER NOT NULL DEFAULT 0, credential_id TEXT NOT NULL,
   pack_encrypted TEXT NOT NULL, next_decision_at INTEGER NOT NULL DEFAULT 0,
   last_decision_at INTEGER, last_post_at INTEGER, failure_count INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL, PRIMARY KEY(user_id, actor_id)

@@ -27,6 +27,9 @@ export interface MomentsCloudActorRuntime {
   bio?: string;
   postingMode: MomentsPostingMode;
   interactionMode: MomentsInteractionMode;
+  /** 角色自己的 IANA 时区；用于夏令时和异国生活线。 */
+  timezoneId: string;
+  /** 旧 Worker 兼容回退；新逻辑优先使用 timezoneId。 */
   timezoneOffsetMinutes: number;
   pack: MomentsCloudActorPack;
 }
