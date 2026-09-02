@@ -2998,6 +2998,25 @@ export const ActiveMsgClient = {
   },
 
   /**
+   * 读取 Worker 已实际登记的凭据 ID。只返回名字和更新时间，不回传 URL / Key / Model。
+   * 关系层首次接入新角色时用它核验 PUT 是否真正落进了当前用户的 D1，不能再只相信
+   * 本地指纹或一次成功响应。
+   */
+  async listLlmCredentials(): Promise<Array<{ credId: string; updatedAt?: number }>> {
+    const config = await ensureWorkerReady();
+    const client = await initializeClient(config);
+    const response = await client.listLlmCredentials();
+    if (!response?.success) {
+      throw new Error(response?.error?.message || '读取 LLM 凭据清单失败。');
+    }
+    const rows = Array.isArray(response.data?.credentials) ? response.data.credentials : [];
+    return rows.flatMap((row: any) => {
+      const credId = typeof row?.credId === 'string' ? row.credId : '';
+      return credId ? [{ credId, updatedAt: Number(row.updatedAt) || undefined }] : [];
+    });
+  },
+
+  /**
    * 删掉云端登记的凭据行。`credIds` 删指定几行（删角色时清它名下的），
    * `all` 全删（「清空云端数据」）。本地指纹底账同步划掉，不然下次「没变过」会拦住重传。
    */

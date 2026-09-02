@@ -13,7 +13,7 @@ import {
   type RelationshipSleepWindow,
 } from '../../../utils/relationshipSleep';
 import { planRelationshipTaskLockReconciliation } from '../../../utils/relationshipPending';
-import { resolveRelationshipNextTickAt } from '../../../utils/relationshipTick';
+import { resolveRelationshipNextTickAt, shouldDeferRelationshipTick } from '../../../utils/relationshipTick';
 
 type Style = 'reserved' | 'natural' | 'clingy';
 type D1Statement = { bind: (...values: unknown[]) => D1Statement; first: <T = Record<string, unknown>>() => Promise<T | null>; run: () => Promise<unknown>; all: <T = Record<string, unknown>>() => Promise<{ results?: T[] }> };
@@ -536,7 +536,9 @@ export const runRelationshipTick = async (env: RelationshipEngineEnv, schedule: 
     }
     // `lastCalculatedAt` 会在前端每次同步时推进，不能拿它节流 Cron；否则打开聊天页
     // 反而会让检查永远达不到 10 分钟。Cron 专用的 lastTickAt 只在本循环成功检查后更新。
-    if (!criticalDueBeforeAdvance && state.lastTickAt && now - state.lastTickAt < 10 * 60_000) continue;
+    // 普通关系判断仍是十分钟一次；但缺凭据属于可由网页补传后立即恢复的故障，下一分钟
+    // 必须重试。旧逻辑虽把 next_tick_at 留在到期状态，却又在这里被 lastTickAt 挡满十分钟。
+    if (!criticalDueBeforeAdvance && shouldDeferRelationshipTick(state.lastTickAt, now, state.lastScheduleError)) continue;
     advance(state, now);
     try {
       await reconcilePendingTaskLocks(env, state);

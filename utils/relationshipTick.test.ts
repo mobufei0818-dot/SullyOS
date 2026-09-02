@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveRelationshipNextTickAt } from './relationshipTick';
+import { resolveRelationshipNextTickAt, shouldDeferRelationshipTick } from './relationshipTick';
 
 describe('resolveRelationshipNextTickAt', () => {
   it('does not let page sync push a future tick later', () => {
@@ -16,5 +16,19 @@ describe('resolveRelationshipNextTickAt', () => {
 
   it('allows a completed Cron tick to advance the cursor', () => {
     expect(resolveRelationshipNextTickAt(1_000, 20_000, true)).toBe(20_000);
+  });
+});
+
+describe('shouldDeferRelationshipTick', () => {
+  it('keeps the normal ten-minute throttle for ordinary relationship checks', () => {
+    expect(shouldDeferRelationshipTick(1_000, 61_000, undefined)).toBe(true);
+  });
+
+  it('lets a missing credential retry on the next Cron instead of waiting ten minutes', () => {
+    expect(shouldDeferRelationshipTick(
+      1_000,
+      61_000,
+      'credRefs 引用的凭据不存在：char:char-new/chat',
+    )).toBe(false);
   });
 });

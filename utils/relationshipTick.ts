@@ -11,3 +11,22 @@ export const resolveRelationshipNextTickAt = (
   if (!Number.isFinite(previousTickAt) || Number(previousTickAt) <= 0) return requestedTickAt;
   return Math.min(Number(previousTickAt), requestedTickAt);
 };
+
+/** 凭据补传后应在下一分钟重试，不能再被正常的十分钟关系节流挡住。 */
+export const isRelationshipCredentialError = (message?: string): boolean => Boolean(message && (
+  message.includes('CREDENTIAL_NOT_FOUND')
+  || message.includes('CREDENTIAL_MISSING')
+  || message.includes('credRefs 引用的凭据不存在')
+  || message.includes('引用的凭据不存在')
+));
+
+export const shouldDeferRelationshipTick = (
+  lastTickAt: number | undefined,
+  now: number,
+  lastScheduleError?: string,
+  intervalMs = 10 * 60_000,
+): boolean => Boolean(
+  lastTickAt
+  && now - lastTickAt < intervalMs
+  && !isRelationshipCredentialError(lastScheduleError)
+);

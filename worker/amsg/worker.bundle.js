@@ -6990,7 +6990,7 @@ function stripReasoningTags2(content) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-09-02.relationship-tick-clock-1";
+var AMSG_BUNDLE_VERSION = "2026-09-02.r1.relationship-credential-retry";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -9283,6 +9283,10 @@ var resolveRelationshipNextTickAt = (previousTickAt, requestedTickAt, tickComple
   if (!Number.isFinite(previousTickAt) || Number(previousTickAt) <= 0) return requestedTickAt;
   return Math.min(Number(previousTickAt), requestedTickAt);
 };
+var isRelationshipCredentialError = (message) => Boolean(message && (message.includes("CREDENTIAL_NOT_FOUND") || message.includes("CREDENTIAL_MISSING") || message.includes("credRefs \u5F15\u7528\u7684\u51ED\u636E\u4E0D\u5B58\u5728") || message.includes("\u5F15\u7528\u7684\u51ED\u636E\u4E0D\u5B58\u5728")));
+var shouldDeferRelationshipTick = (lastTickAt, now2, lastScheduleError, intervalMs = 10 * 6e4) => Boolean(
+  lastTickAt && now2 - lastTickAt < intervalMs && !isRelationshipCredentialError(lastScheduleError)
+);
 
 // worker/amsg/src/relationshipEngine.ts
 var configuredEnv = null;
@@ -9650,7 +9654,7 @@ var runRelationshipTick = async (env, schedule) => {
       await save(env, state, { tickCompleted: true });
       continue;
     }
-    if (!criticalDueBeforeAdvance && state.lastTickAt && now2 - state.lastTickAt < 10 * 6e4) continue;
+    if (!criticalDueBeforeAdvance && shouldDeferRelationshipTick(state.lastTickAt, now2, state.lastScheduleError)) continue;
     advance(state, now2);
     try {
       await reconcilePendingTaskLocks(env, state);

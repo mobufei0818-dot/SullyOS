@@ -1,7 +1,7 @@
 import type { APIConfig, CharacterProfile, Message, RelationshipJealousySignal, RelationshipPulse } from '../types';
 import { ActiveMsgStore } from './activeMsgStore';
 import { ActiveMsgClient } from './activeMsgClient';
-import { buildCharChatCredRow, type LlmCredentialRow } from './amsgLlmCredentials';
+import { buildCharChatCredRow, fingerprintCredentialValue, type LlmCredentialRow } from './amsgLlmCredentials';
 import { getRelationshipConfig } from './relationshipProactive';
 import { followUpDelayMs, inferFollowUpKind } from './relationshipProactive';
 import { resolveCharTimeZone } from './timezone';
@@ -73,6 +73,7 @@ const headers = (userId: string, token?: string) => ({
 });
 
 const repairedMissingCredentialErrors = new Set<string>();
+const verifiedRelationshipCredentials = new Set<string>();
 const missingCredentialError = (message?: string) => Boolean(message && (
   message.includes('CREDENTIAL_NOT_FOUND')
   || message.includes('credRefs 引用的凭据不存在')
@@ -87,6 +88,7 @@ const missingCredentialError = (message?: string) => Boolean(message && (
 const ensureRelationshipChatCredentials = async (
   chars: CharacterProfile[],
   apiConfig: Pick<APIConfig, 'baseUrl' | 'apiKey' | 'model'>,
+  scope: { workerUrl: string; userId: string },
   options: { force?: boolean } = {},
 ): Promise<LlmCredentialRow[]> => {
   const uniqueChars = [...new Map(chars.map(char => [char.id, char])).values()];
@@ -94,7 +96,27 @@ const ensureRelationshipChatCredentials = async (
   const missing = uniqueChars.filter((_, index) => !rows[index]);
   if (missing.length) throw new Error(`主动消息 2.0 缺少可用的 API URL / Key / Model：${missing.map(char => char.name).join('、')}`);
   const completeRows = rows.filter((row): row is LlmCredentialRow => Boolean(row));
-  if (completeRows.length) await ActiveMsgClient.putLlmCredentials(completeRows, options);
+  const verificationKeys = completeRows.map(row =>
+    `${scope.workerUrl.replace(/\/+$/, '')}|${scope.userId}|${row.credId}|${fingerprintCredentialValue(row.value)}`);
+  const uncheckedRows = completeRows.filter((_, index) => options.force || !verifiedRelationshipCredentials.has(verificationKeys[index]));
+  if (!uncheckedRows.length) return completeRows;
+
+  await ActiveMsgClient.putLlmCredentials(uncheckedRows, options);
+  let remoteIds = new Set((await ActiveMsgClient.listLlmCredentials()).map(row => row.credId));
+  let absentRows = uncheckedRows.filter(row => !remoteIds.has(row.credId));
+  if (absentRows.length) {
+    // 本地指纹可能还记着旧 D1 的成功记录；云端清单才是当前事实源。
+    await ActiveMsgClient.putLlmCredentials(absentRows, { force: true });
+    remoteIds = new Set((await ActiveMsgClient.listLlmCredentials()).map(row => row.credId));
+    absentRows = absentRows.filter(row => !remoteIds.has(row.credId));
+  }
+  if (absentRows.length) {
+    throw new Error(`Worker 未保存角色聊天凭据：${absentRows.map(row => row.credId).join('、')}`);
+  }
+  uncheckedRows.forEach(row => {
+    const index = completeRows.findIndex(candidate => candidate.credId === row.credId);
+    if (index >= 0) verifiedRelationshipCredentials.add(verificationKeys[index]);
+  });
   return completeRows;
 };
 
@@ -131,7 +153,8 @@ export const syncRelationshipBackend = async (
 ) => {
   const global = await ActiveMsgStore.getGlobalConfig();
   if (!global?.workerUrl || !global?.userId) return null;
-  const [chatCredential] = await ensureRelationshipChatCredentials([char], apiConfig);
+  const credentialScope = { workerUrl: global.workerUrl, userId: global.userId };
+  const [chatCredential] = await ensureRelationshipChatCredentials([char], apiConfig, credentialScope);
   const [momentsSettings, schedule] = await Promise.all([
     DB.getMomentsSettings().catch(() => undefined),
     isScheduleFeatureOn(char) ? getDailyScheduleForChar(char).catch(() => null) : Promise.resolve(null),
@@ -167,7 +190,7 @@ export const syncRelationshipBackend = async (
   if (chatCredential && missingCredentialError(scheduleError)) {
     const repairKey = `${chatCredential.credId}:${pulse?.diagnostics?.lastScheduleErrorAt || scheduleError}`;
     if (!repairedMissingCredentialErrors.has(repairKey)) {
-      await ActiveMsgClient.putLlmCredentials([chatCredential], { force: true });
+      await ensureRelationshipChatCredentials([char], apiConfig, credentialScope, { force: true });
       repairedMissingCredentialErrors.add(repairKey);
     }
   }
@@ -192,7 +215,7 @@ export const reportRelationshipJealousyEvents = async (
   if (!nonEmpty.length) return [];
   const global = await ActiveMsgStore.getGlobalConfig();
   if (!global?.workerUrl || !global?.userId) return [];
-  await ensureRelationshipChatCredentials(nonEmpty.map(target => target.char), apiConfig);
+  await ensureRelationshipChatCredentials(nonEmpty.map(target => target.char), apiConfig, global);
   const response = await fetch(`${global.workerUrl.replace(/\/+$/, '')}/relationship/jealousy`, {
     method: 'POST', headers: headers(global.userId, global.serverToken),
     body: JSON.stringify({
@@ -222,7 +245,7 @@ export const setRelationshipJealousyForceEnabled = async (
 ) => {
   const global = await ActiveMsgStore.getGlobalConfig();
   if (!chars.length || !global?.workerUrl || !global?.userId) return;
-  await ensureRelationshipChatCredentials(chars, apiConfig);
+  await ensureRelationshipChatCredentials(chars, apiConfig, global);
   const response = await fetch(`${global.workerUrl.replace(/\/+$/, '')}/relationship/jealousy`, {
     method: 'POST', headers: headers(global.userId, global.serverToken),
     body: JSON.stringify({

@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { putLlmCredentials } = vi.hoisted(() => ({ putLlmCredentials: vi.fn() }));
+const { putLlmCredentials, listLlmCredentials } = vi.hoisted(() => ({
+  putLlmCredentials: vi.fn(),
+  listLlmCredentials: vi.fn(),
+}));
 
 vi.mock('./activeMsgStore', () => ({
   ActiveMsgStore: {
@@ -12,7 +15,7 @@ vi.mock('./activeMsgStore', () => ({
   },
 }));
 
-vi.mock('./activeMsgClient', () => ({ ActiveMsgClient: { putLlmCredentials } }));
+vi.mock('./activeMsgClient', () => ({ ActiveMsgClient: { putLlmCredentials, listLlmCredentials } }));
 vi.mock('./db', () => ({ DB: { getMomentsSettings: vi.fn().mockResolvedValue(null) } }));
 vi.mock('./scheduleFeature', () => ({ isScheduleFeatureOn: vi.fn().mockReturnValue(false) }));
 
@@ -24,6 +27,7 @@ const character = {
   memories: [],
   activeMsg2Config: { enabled: true, tasks: [] },
 } as any;
+const characterWithId = (id: string) => ({ ...character, id });
 const apiConfig = { baseUrl: 'https://api.example.com/v1', apiKey: 'sk-test', model: 'test-model' } as any;
 const pulse = {
   version: 1,
@@ -39,6 +43,7 @@ const pulse = {
 describe('relationship backend credential initialization', () => {
   beforeEach(() => {
     putLlmCredentials.mockReset().mockResolvedValue(1);
+    listLlmCredentials.mockReset().mockResolvedValue([{ credId: 'char:char-new/chat', updatedAt: Date.now() }]);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ success: true, data: pulse }),
@@ -57,10 +62,27 @@ describe('relationship backend credential initialization', () => {
       },
     }], {});
     expect(putLlmCredentials.mock.invocationCallOrder[0])
+      .toBeLessThan(listLlmCredentials.mock.invocationCallOrder[0]);
+    expect(listLlmCredentials.mock.invocationCallOrder[0])
       .toBeLessThan((fetch as any).mock.invocationCallOrder[0]);
   });
 
+  it('does not trust a stale local fingerprint when the Worker list is missing the row', async () => {
+    const staleCharacter = characterWithId('char-stale-ledger');
+    listLlmCredentials
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ credId: 'char:char-stale-ledger/chat', updatedAt: Date.now() }]);
+
+    await syncRelationshipBackend(staleCharacter, [], pulse, [staleCharacter], apiConfig);
+
+    expect(putLlmCredentials).toHaveBeenCalledTimes(2);
+    expect(putLlmCredentials.mock.calls[1][1]).toEqual({ force: true });
+    expect(listLlmCredentials).toHaveBeenCalledTimes(2);
+  });
+
   it('force-repairs the credential once when Worker reports a missing credRef', async () => {
+    const repairCharacter = characterWithId('char-repair');
+    listLlmCredentials.mockResolvedValue([{ credId: 'char:char-repair/chat', updatedAt: Date.now() }]);
     (fetch as any).mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -68,16 +90,17 @@ describe('relationship backend credential initialization', () => {
         data: {
           ...pulse,
           diagnostics: {
-            lastScheduleError: 'credRefs 引用的凭据不存在：char:char-new/chat',
+            lastScheduleError: 'credRefs 引用的凭据不存在：char:char-repair/chat',
             lastScheduleErrorAt: 1788324960000,
           },
         },
       }),
     });
 
-    await syncRelationshipBackend(character, [], pulse, [character], apiConfig);
+    await syncRelationshipBackend(repairCharacter, [], pulse, [repairCharacter], apiConfig);
 
     expect(putLlmCredentials).toHaveBeenCalledTimes(2);
     expect(putLlmCredentials.mock.calls[1][1]).toEqual({ force: true });
+    expect(listLlmCredentials).toHaveBeenCalledTimes(2);
   });
 });
