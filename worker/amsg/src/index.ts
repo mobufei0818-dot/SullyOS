@@ -108,6 +108,7 @@ import { configureRelationshipEngine, handleRelationshipRequest, runRelationship
 // 朋友圈只挂载在 fork 的 AMSG 外壳上。上游主动消息处理器和 scheduled 流程保持原样；
 // /moments/* 使用同一个 DB 与 AMSG_SERVER_TOKEN，避免再部署第二个 Worker。
 import momentsWorker from '../../moments/src/index';
+import { handleCronTriggerRead, handleCronTriggerWrite, isCronTriggerAuthFailure } from './cronTrigger';
 import {
   buildMcpDirectHeaders,
   buildMcpFireBlock,
@@ -2500,10 +2501,12 @@ export const resolveVapidEmail = (raw: string | undefined): string =>
  * 检查仍然每分钟跑，主动消息准时性不受影响。
  */
 export const OUTBOX_CLEANUP_INDEX_SQL = [
-  `CREATE INDEX IF NOT EXISTS idx_outbox_acked_cleanup
+  // next.27 起上游 initSchema 使用这两个正式名字。沿用同名可避免新库再创建一组
+  // 列完全相同的重复索引；旧库已有的 *_cleanup 索引暂不主动删除。
+  `CREATE INDEX IF NOT EXISTS idx_outbox_acked
      ON message_outbox (acked_at)
      WHERE acked_at IS NOT NULL`,
-  `CREATE INDEX IF NOT EXISTS idx_outbox_created_cleanup
+  `CREATE INDEX IF NOT EXISTS idx_outbox_created
      ON message_outbox (created_at)`,
 ] as const;
 
@@ -2519,7 +2522,11 @@ let activeScheduledTime: number | null = null;
 const createIndexedHourlyCleanupDb = (env: Env) => {
   const db = createD1Adapter(env.DB as any);
   const initSchema = db.initSchema.bind(db);
-  const cleanupOutbox = db.cleanupOutbox.bind(db);
+  // next.27 的适配器类型把清理能力标成可选；运行时存在才包装，避免以后上游
+  // 将它移出适配器时这里直接在 Worker 启动阶段报错。
+  const cleanupOutbox = typeof db.cleanupOutbox === 'function'
+    ? db.cleanupOutbox.bind(db)
+    : null;
   const cleanupThisTick = activeScheduledTime !== null
     && shouldRunHourlyOutboxCleanup(activeScheduledTime);
 
@@ -2529,9 +2536,11 @@ const createIndexedHourlyCleanupDb = (env: Env) => {
     for (const sql of OUTBOX_CLEANUP_INDEX_SQL) await (env.DB as any).prepare(sql).run();
     return result;
   };
-  db.cleanupOutbox = cleanupThisTick
-    ? cleanupOutbox
-    : async () => 0;
+  if (cleanupOutbox) {
+    db.cleanupOutbox = cleanupThisTick
+      ? cleanupOutbox
+      : async () => 0;
+  }
   return db;
 };
 
@@ -3122,6 +3131,7 @@ const readServerVersion = async (request: Request, env: Env) => {
  *   GET  /debug         上面那些再加库和 cron 的状况，给隔着屏幕帮人排障用
  *   POST /instant-chat  即时对话：一个请求受理一轮聊天（见 ./instantChat）
  *   POST /self-update   自己去取最新代码覆盖自己（见 ./selfUpdate，要共享密钥 + CF_API_TOKEN）
+ *   GET/POST /cron-trigger  查看 / 暂停 / 恢复自己的 cron trigger（见 ./cronTrigger，认证同上）
  *   其它请求            配置不全时直接 503 + 说明缺什么，不进上游
  */
 // 两个 handler 都只收 (request/event, env)：CF 还会给第三个参数 ctx，但这里用不上——
@@ -3210,6 +3220,47 @@ export default {
         success: result.ok,
         data: result.ok ? result : undefined,
         error: result.ok ? undefined : { code: result.code, message: result.message },
+      });
+    }
+
+    if (pathname.endsWith('/cron-trigger')) {
+      if (method === 'OPTIONS') return new Response(null, { status: 204, headers: CORS_HEADERS });
+      // 跟 /self-update 一样排在配置门之前，也一样自己校验共享密钥、不吃这道门的豁免。
+      // 认证没过回 401；「读不到 / 改不了」是 Worker 自己的配置问题，读时当状态报（200）、
+      // 改时当失败报（400）。
+      if (method === 'GET') {
+        const state = await handleCronTriggerRead(env, request);
+        if (!state.supported && isCronTriggerAuthFailure(state.code)) {
+          return jsonWithCors(401, {
+            success: false,
+            error: { code: state.code, message: state.message },
+          });
+        }
+        return jsonWithCors(200, { success: true, data: state });
+      }
+      if (method !== 'POST') {
+        return jsonWithCors(405, {
+          success: false,
+          error: { code: 'METHOD_NOT_ALLOWED', message: '/cron-trigger 只接受 GET 和 POST' },
+        });
+      }
+      let enabled: unknown;
+      try {
+        enabled = ((await request.json()) as { enabled?: unknown } | null)?.enabled;
+      } catch {
+        enabled = undefined;
+      }
+      if (typeof enabled !== 'boolean') {
+        return jsonWithCors(400, {
+          success: false,
+          error: { code: 'BAD_REQUEST', message: '请求体要是 { "enabled": true | false }' },
+        });
+      }
+      const result = await handleCronTriggerWrite(env, request, enabled);
+      if (result.ok) return jsonWithCors(200, { success: true, data: result });
+      return jsonWithCors(isCronTriggerAuthFailure(result.code) ? 401 : 400, {
+        success: false,
+        error: { code: result.code, message: result.message },
       });
     }
 

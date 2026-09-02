@@ -44,6 +44,11 @@ import {
   supportsLlmCredentials,
   type LlmCredentialRow,
 } from './amsgLlmCredentials';
+import {
+  chunkClientStateEntries,
+  pickSidechannelShellKeys,
+  supportsClientStateDelete,
+} from './amsgClientStateDelete';
 import { observeRemoteStateUpdatedAt, stampStateUpdatedAt } from './amsgStateClock';
 import { flattenContentPartsToText } from './promptMessageCleanup';
 import { resolveBlobRefsDeep } from './blobRef';
@@ -338,6 +343,21 @@ export interface AmsgSelfUpdateResult {
   code?: string;
 }
 
+/**
+ * 后台任务的定时触发（Worker 的 cron trigger）现在开着没有（`GET /cron-trigger`，
+ * 见 worker/amsg/src/cronTrigger.ts）。
+ * supported 为 false 是端点在、但 Worker 自己查不了（多半是没配 CF_API_TOKEN），code 说明卡在哪。
+ */
+export interface AmsgCronTriggerState {
+  supported: boolean;
+  /** 开着 = true。supported 为 false 时没有这一项。 */
+  enabled?: boolean;
+  /** worker 报的代号（`CF_TOKEN_MISSING` / `SCRIPT_NAME_UNKNOWN` 之类），supported 为 false 时才有。 */
+  code?: string;
+  /** 给人看的一句，supported 为 false 时才有。 */
+  message?: string;
+}
+
 /** init-tenant 没成功时按 HTTP 状态归类：三种状态要用户去改的地方完全不同。 */
 const resolveInitFailKind = (status: number): AmsgFailKind => {
   if (status === 401 || status === 403) return '鉴权失败';   // 共享密钥两边对不上
@@ -473,9 +493,9 @@ const initializeClient = (config: ActiveMsg2GlobalConfig) => {
   // 「装好之后再没进过设置页、Worker 还停在旧版」的人。
   // 不 await：它只影响**之后**几轮的路由判断，拿它挡住握手等于给每条消息加一次 RTT。
   void ActiveMsgClient.probeInstantChatSupport().catch(() => {});
-  // 同理顺手探一次「凭据能不能存成表里的一行」（credRefs 的唯一版本门槛，见
-  // isLlmCredentialsReady）。探不到就按老路走，不影响任何一条消息发出去。
-  void ActiveMsgClient.probeLlmCredentialsSupport().catch(() => {});
+  // 同理顺手探一次按特性位存的几个结论（凭据存表 credRefs、云端状态删行，见
+  // probeWorkerFeatures）。探不到就按老路走，不影响任何一条消息发出去。
+  void ActiveMsgClient.probeWorkerFeatures().catch(() => {});
   return promise;
 };
 
@@ -526,6 +546,21 @@ const resolveTaskCredentialUpdates = (
 export const isLlmCredentialsReady = async (): Promise<boolean> => {
   try {
     return (await ActiveMsgStore.getGlobalConfig()).llmCredentialsSupported === true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * 这台 worker 现在认不认 `PUT /client-state` 里 `value: null` 的删行语义
+ * （能力位 'client-state-delete'，握手时探一次存进全局配置，见 probeWorkerFeatures）。
+ *
+ * undefined（还没探过）按 false 处理：写空串在哪台 worker 上都能跑，而 null 发到
+ * 老 worker 上是逐条被拒。取回旁路内容后的清理、删角色、存量空壳清理三处都读这一份。
+ */
+export const isClientStateDeleteReady = async (): Promise<boolean> => {
+  try {
+    return (await ActiveMsgStore.getGlobalConfig()).clientStateDeleteSupported === true;
   } catch {
     return false;
   }
@@ -1098,7 +1133,8 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
  */
 export const putClientStateOrThrow = async (
   client: ReiClient,
-  entries: Array<{ namespace: string; key: string; value: string; updatedAt: number }>,
+  // value 为 null 表示删掉这一行（只在 isClientStateDeleteReady 为 true 时才能发）。
+  entries: Array<{ namespace: string; key: string; value: string | null; updatedAt: number }>,
   phase: string,
 ): Promise<void> => {
   let lastError: unknown;
@@ -1162,22 +1198,26 @@ const alignStateClockWithRemote = async (
 };
 
 /**
- * 把一个 namespace 下还有内容的条目全部清空，返回被清掉的键名。
+ * 把一个 namespace 下的条目全部清掉，返回被清掉的键名。
  *
- * 先读一遍再逐条写空，而不是照着已知键名盲写，有两个原因：
+ * 先读一遍再逐条清，而不是照着已知键名盲写，有两个原因：
  *   1. 旁路存储的键名带 clientTaskId（`xhs_session:<id>`），任务记录被
  *      pruneStaleTasks 清掉之后就再也拼不出来，只能靠读回来才知道有哪些；
  *   2. 盲写会把本来不存在的条目 upsert 出来 —— putClientState 是 upsert，
  *      "清理" 反倒变成新建。
  *
- * 和 clearClientStateValue 一样是写空串而不是删行（HTTP 的 PUT /client-state 没有
- * 删除语义，value: null 会被当无效条目跳过），留下的是几字节的空壳，内容本身没了。
+ * 清法跟 clearClientStateValue 同一套，按 worker 的能力位分两条路：
+ *   - worker 认删行（isClientStateDeleteReady）：读回来的每一行都发 `value: null`
+ *     真删，已经是空壳的行也在内——它们正是过去写空留下的，现在能一起删干净；
+ *   - 老 worker：只对还有内容的行写空串，留下几字节的空壳；已经是空壳的跳过，
+ *     再写一遍不会更干净，只是白占一次请求体。
+ * 条目多过上游单批上限时切批发。
  */
 export const clearNamespaceValuesOrThrow = async (
   client: ReiClient,
   namespace: string,
 ): Promise<string[]> => {
-  // 全局 namespace 不许走这条路：里面的 tool_config 只在配置变更时才重传，被清成空壳
+  // 全局 namespace 不许走这条路：里面的 tool_config 只在配置变更时才重传，被清掉
   // 之后没有任何一条路会把它补回来，而 worker 到点读不到它就整条任务硬失败。
   // 这个函数目前只服务「删角色」（每角色一个 namespace），加道护栏免得将来被顺手复用。
   if (namespace === AMSG_GLOBAL_NAMESPACE) {
@@ -1188,17 +1228,88 @@ export const clearNamespaceValuesOrThrow = async (
     throw new Error(response?.error?.message || '读取云端状态失败。');
   }
   const entries = (response.data?.entries ?? []) as Array<{ key?: string; value?: string }>;
-  // 已经是空壳的条目跳过：再写一遍不会更干净，只是白占一次请求体。
-  const keys = entries.filter((e) => e?.key && e?.value).map((e) => e.key as string);
+  const deleteSupported = await isClientStateDeleteReady();
+  const keys = entries
+    .filter((e) => e?.key && (deleteSupported || e?.value))
+    .map((e) => e.key as string);
   if (keys.length === 0) return [];
 
   const updatedAt = stampStateUpdatedAt();
-  await putClientStateOrThrow(
-    client,
-    keys.map((key) => ({ namespace, key, value: '', updatedAt })),
-    '清空云端状态',
-  );
+  const value = deleteSupported ? null : '';
+  for (const batch of chunkClientStateEntries(keys)) {
+    await putClientStateOrThrow(
+      client,
+      batch.map((key) => ({ namespace, key, value, updatedAt })),
+      '清空云端状态',
+    );
+  }
   return keys;
+};
+
+/**
+ * 旁路存储的存量空壳清理：把这几个角色命名空间里历史积累的空壳行扫一遍删掉，
+ * 每个角色只扫一次。
+ *
+ * 在 worker 认删行之前，取回旁路内容后是写空串；即时对话每轮的键都是新的
+ * （`reasoning:<uuid>` 这类），于是每个角色的命名空间里躺着一堆只涨不跌的空壳，
+ * 而 worker 每次生成都要把整个命名空间读一遍。现在取回即删、不再新增，这里负责清旧账：
+ *   - 只在探到 'client-state-delete' 时做，老 worker 收到 null 是逐条被拒；
+ *   - 每个角色读一次命名空间，挑出旁路键且值为空串的行（见 pickSidechannelShellKeys），
+ *     按上游单批上限切开发 null。别的键一律不碰；
+ *   - 扫完（不管有没有空壳）把角色 id 记进全局配置的已扫列表，之后的同步不再为它多读一次；
+ *   - 哪一步失败只 warn、这个角色不记进列表，下一次同步再试。
+ *
+ * 挂在 syncCharFirePacks 的末尾：那条路每次聊完都会为每个角色跑到，正好顺路。放在
+ * 正常同步之后，这里的成败不影响同步本身。
+ */
+const sweepSidechannelShells = async (client: ReiClient, charIds: string[]): Promise<void> => {
+  let config: ActiveMsg2GlobalConfig;
+  try {
+    config = await ActiveMsgStore.getGlobalConfig();
+  } catch {
+    return;
+  }
+  if (config.clientStateDeleteSupported !== true) return;
+  const swept = new Set(config.sidechannelShellsSweptCharIds ?? []);
+  const pending = [...new Set(charIds)].filter((charId) => !swept.has(charId));
+  if (pending.length === 0) return;
+
+  const newlySwept: string[] = [];
+  for (const charId of pending) {
+    const namespace = amsgStateNamespace(charId);
+    try {
+      const response = await client.getClientState(namespace) as {
+        success?: boolean;
+        data?: { entries?: Array<{ key?: unknown; value?: unknown }> };
+        error?: { message?: string };
+      } | undefined;
+      if (!response?.success) {
+        throw new Error(response?.error?.message || '读取云端状态失败。');
+      }
+      const shellKeys = pickSidechannelShellKeys(response.data?.entries);
+      if (shellKeys.length > 0) {
+        const updatedAt = stampStateUpdatedAt();
+        for (const batch of chunkClientStateEntries(shellKeys)) {
+          await putClientStateOrThrow(
+            client,
+            batch.map((key) => ({ namespace, key, value: null, updatedAt })),
+            '清理旁路存储空壳',
+          );
+        }
+      }
+      newlySwept.push(charId);
+    } catch (error) {
+      console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 角色 ${charId} 的旁路存储空壳没清完（下次同步再试）`, error);
+    }
+  }
+  if (newlySwept.length === 0) return;
+
+  try {
+    await ActiveMsgStore.saveGlobalConfig({ sidechannelShellsSweptCharIds: [...swept, ...newlySwept] });
+  } catch (error) {
+    // 列表没存下来只是下次会再扫一遍（再读一次、发现没空壳），已经删掉的行不会回来。
+    console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 已扫过的角色列表没存下来（下次同步会再扫一遍）`, error);
+  }
 };
 
 /**
@@ -1933,9 +2044,9 @@ export const ActiveMsgClient = {
     forgetBackgroundJobProbe();
     await initializeClient(config);
     await ActiveMsgStore.saveGlobalConfig({ ...config, initializedAt: Date.now() });
-    // 「重新连接并验证」是用户显式的一次对表，凭据引用那个能力位也当场探准，别等下次握手。
+    // 「重新连接并验证」是用户显式的一次对表，按特性位存的能力位也当场探准，别等下次握手。
     // 排在保存之后：上面那句写的是握手前的配置快照，探测结论放它前面会被原样盖回去。
-    await this.probeLlmCredentialsSupport();
+    await this.probeWorkerFeatures();
     await this.reconcilePushSubscription();
     const nativeToken = readNativePushToken();
     if (nativeToken) await this.registerNativePushToken(nativeToken);
@@ -2877,6 +2988,8 @@ export const ActiveMsgClient = {
       );
       await alignStateClockWithRemote(client, [...new Set(skipped.map((s) => s.namespace))]);
     }
+    // 同步已经落定，顺路把这几个角色的存量空壳清一遍（每角色一次，失败只 warn）。
+    await sweepSidechannelShells(client, items.map((item) => item.char.id));
   },
 
   async syncToolConfig(realtimeConfig: RealtimeConfig | undefined): Promise<void> {
@@ -2965,28 +3078,37 @@ export const ActiveMsgClient = {
   },
 
   /**
-   * 这台 worker 支不支持「凭据存表、任务带引用」（credRefs）。
+   * 一次 GET /capabilities，把按特性位存的几个结论一起刷新进全局配置：
+   *   llmCredentialsSupported     'llm-credentials'      凭据存表、任务带引用（见 isLlmCredentialsReady）
+   *   clientStateDeleteSupported  'client-state-delete'  PUT /client-state 认 value: null 删行（见 isClientStateDeleteReady）
    *
-   * 认的是 GET /capabilities 里的 features 有没有 'llm-credentials'。结论存进全局配置，
-   * 之后排程 / 即时对话 / 保存配置都只读那份存量（见 isLlmCredentialsReady）——路上不做
-   * 逐次预检，那等于给每条消息加一次 RTT。
+   * 之后排程 / 即时对话 / 清云端状态各条路都只读那份存量——路上不做逐次预检，
+   * 那等于给每条消息加一次 RTT。握手时（initializeClient）和「重新连接并验证」各探一次。
    *
    * 探不到（老 worker 没这个端点、网络不通）一律 false：老路在哪台 worker 上都能跑。
    */
-  async probeLlmCredentialsSupport(): Promise<boolean> {
-    let supported = false;
+  async probeWorkerFeatures(): Promise<{ llmCredentialsSupported: boolean; clientStateDeleteSupported: boolean }> {
+    let features: string[] | null = null;
     try {
-      const capabilities = await this.getCapabilities();
-      supported = supportsLlmCredentials(capabilities?.features);
+      features = (await this.getCapabilities())?.features ?? null;
     } catch {
-      supported = false;
+      features = null;
     }
+    const flags = {
+      llmCredentialsSupported: supportsLlmCredentials(features),
+      clientStateDeleteSupported: supportsClientStateDelete(features),
+    };
     try {
-      await ActiveMsgStore.saveGlobalConfig({ llmCredentialsSupported: supported });
+      await ActiveMsgStore.saveGlobalConfig(flags);
     } catch (error) {
-      console.warn('[AmsgLlmCred] 能力探测结果没存下来（下次按上一次的存量判断）', error);
+      console.warn(`${ACTIVE_MSG_RUNTIME_HEADER} 能力探测结果没存下来（下次按上一次的存量判断）`, error);
     }
-    return supported;
+    return flags;
+  },
+
+  /** 这台 worker 支不支持 credRefs（只关心凭据那一位的入口；探测本身见 probeWorkerFeatures）。 */
+  async probeLlmCredentialsSupport(): Promise<boolean> {
+    return (await this.probeWorkerFeatures()).llmCredentialsSupported;
   },
 
   /**
@@ -3106,6 +3228,75 @@ export const ActiveMsgClient = {
       ok: false,
       supported: true,
       message: body?.error?.message || `更新没成功（HTTP ${status}）。`,
+      code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
+    };
+  },
+
+  /**
+   * 问一下这台 Worker 的定时触发（cron trigger）现在开着没有。
+   *
+   * 回 null 表示问不到：旧版 Worker 没有这个端点（404）、没填地址、或者这一次没连上。
+   * 三种都按「不支持」处理——设置页不显示那个按钮，也不报错。
+   */
+  async getCronTriggerState(): Promise<AmsgCronTriggerState | null> {
+    try {
+      const config = await ensureWorkerReady();
+      const { status, body } = await fetchWithAuthRaw('cron-trigger', config, { method: 'GET' }, '后台任务状态');
+      // 旧 worker 没有这个端点：可能回 404，也可能被上游当成未知路由回一段自己的 JSON。
+      if (status === 404 || body?.error?.code === 'NOT_FOUND') return null;
+      if (status === 200 && body?.success === true) {
+        const data = body.data ?? {};
+        if (data.supported === true && typeof data.enabled === 'boolean') {
+          return { supported: true, enabled: data.enabled };
+        }
+        return {
+          supported: false,
+          code: typeof data.code === 'string' ? data.code : undefined,
+          message: typeof data.message === 'string' ? data.message : undefined,
+        };
+      }
+      return {
+        supported: false,
+        code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
+        message: body?.error?.message || `HTTP ${status}`,
+      };
+    } catch {
+      return null;
+    }
+  },
+
+  /**
+   * 暂停（false）或恢复（true）后台任务：让 Worker 摘掉或加回自己的 cron trigger。
+   *
+   * 暂停期间到点的任务在 D1 里排着，一条都不丢；恢复后的第一跳一起补发。
+   * 成功和失败都带一句能直接显示的话；code 是 worker 报的代号，缺 CF_API_TOKEN 时
+   * 面板据此露出补钥匙那一块。网络层面的失败照常抛（跟 selfUpdateWorker 一样），调用方兜。
+   */
+  async setCronTriggerEnabled(enabled: boolean): Promise<{ ok: boolean; message: string; code?: string }> {
+    const config = await ensureWorkerReady();
+    const { status, body } = await fetchWithAuthRaw(
+      'cron-trigger',
+      config,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled }) },
+      enabled ? '恢复后台任务' : '暂停后台任务',
+    );
+    if (status === 404 || body?.error?.code === 'NOT_FOUND') {
+      return {
+        ok: false,
+        message: '这台 Worker 还是旧版本，没有暂停后台任务的能力。先点「更新 Worker」，之后就能在这儿点了。',
+      };
+    }
+    if (status === 200 && body?.success === true) {
+      return {
+        ok: true,
+        message: enabled
+          ? '后台任务已恢复，攒下的消息会在下一分钟一起补发。'
+          : '后台任务已暂停，到点的消息先攒着，恢复后一起补发。',
+      };
+    }
+    return {
+      ok: false,
+      message: body?.error?.message || `${enabled ? '恢复' : '暂停'}没成功（HTTP ${status}）。`,
       code: typeof body?.error?.code === 'string' ? body.error.code : undefined,
     };
   },
@@ -3315,17 +3506,19 @@ export const ActiveMsgClient = {
   },
 
   /**
-   * 取回落库后把云端那份的内容清掉，腾回 D1 空间。
-   *
-   * 这里是**写空串**而不是删除整行：`value: null` 的删除语义只有 hook 侧的
-   * `ctx.writeState` 有，HTTP 的 `PUT /client-state` 会把这条当无效条目跳过、
-   * 内容原封不动（harness S6b 钉住了这个差异）。留一个几字节的空壳无所谓——键是
-   * 每任务固定的，下次触发直接覆盖，存量本来就有上限。
+   * 取回落库后把云端那一行清掉，腾回 D1 空间。按 worker 的能力位分两条路：
+   *   - worker 认删行（isClientStateDeleteReady）：发 `value: null`，整行连大值的切片
+   *     一起删掉。即时对话每轮的旁路键都是新的（`reasoning:<uuid>` 这类），只有真删
+   *     才不会让角色的命名空间只涨不跌——worker 每次生成都要把它整个读一遍；
+   *   - 老 worker（没探到、或探到不认）：写空串，留一个几字节的空壳，内容本身没了。
+   *     null 发到老 worker 上会被当无效条目拒掉、内容原封不动，所以不认就不发。
+   * 历史积累的空壳由 syncCharFirePacks 末尾的存量清理扫掉。
    */
   async clearClientStateValue(namespace: string, key: string): Promise<void> {
     const config = await ensureWorkerReady();
     const client = await initializeClient(config);
-    await client.putClientState([{ namespace, key, value: '', updatedAt: stampStateUpdatedAt() }]);
+    const value = (await isClientStateDeleteReady()) ? null : '';
+    await client.putClientState([{ namespace, key, value, updatedAt: stampStateUpdatedAt() }]);
   },
 
   /**

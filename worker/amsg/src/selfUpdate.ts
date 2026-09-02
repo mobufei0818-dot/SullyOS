@@ -61,17 +61,22 @@ export interface SelfUpdateResult {
 
 const fail = (code: string, message: string): SelfUpdateResult => ({ ok: false, code, message });
 
-/** 调 Cloudflare API，把 {success, errors, result} 那层信封拆掉。 */
-async function cf(
+/**
+ * 调 Cloudflare API，把 {success, errors, result} 那层信封拆掉。
+ *
+ * body 传 FormData 就是上传脚本那种 multipart；传字符串是 JSON 体，这时要自己带上
+ * `Content-Type: application/json`（见 ./cronTrigger 改定时触发那一发）。
+ */
+export async function cf(
   token: string,
   path: string,
-  init: { method?: string; body?: FormData } = {},
+  init: { method?: string; body?: FormData | string; headers?: Record<string, string> } = {},
 ): Promise<{ ok: true; result: any } | { ok: false; detail: string }> {
   let res: Response;
   try {
     res = await fetch(`${CF_API}${path}`, {
       method: init.method ?? 'GET',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, ...init.headers },
       body: init.body,
     });
   } catch (err) {
@@ -146,7 +151,7 @@ export function resolveScriptName(env: SelfUpdateEnv, requestUrl: string): strin
  * 没关系。所以同时有工作号和个人号的人在这儿会拿到好几条，光看列表分不出该更新哪个。
  * 办法是挨个问一句「你这儿有没有这个 Worker」——能读出配置的那个就是。
  */
-async function locateScript(
+export async function locateScript(
   env: SelfUpdateEnv,
   token: string,
   scriptName: string,

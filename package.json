@@ -33,7 +33,7 @@
     "@phosphor-icons/react": "^2.1.10",
     "@pixi/sound": "^6.0.1",
     "@pixiv/three-vrm": "3.5.3",
-    "@rei-standard/amsg-client": "2.9.0-next.12",
+    "@rei-standard/amsg-client": "2.9.0-next.14",
     "@rei-standard/amsg-instant": "0.11.0-next.6",
     "@rei-standard/amsg-shared": "0.4.0-next.8",
     "@rei-standard/amsg-sw": "2.4.0-next.6",
@@ -53,7 +53,7 @@
   },
   "devDependencies": {
     "@capacitor/cli": "^6.0.0",
-    "@rei-standard/amsg-server": "2.6.0-next.26",
+    "@rei-standard/amsg-server": "2.6.0-next.27",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^18.2.43",
     "@types/react-dom": "^18.2.17",

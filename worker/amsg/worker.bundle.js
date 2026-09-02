@@ -3,7 +3,7 @@
 // worker/amsg/src/index.ts
 import { DurableObject } from "cloudflare:workers";
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.26_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.27_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-GN44PST5.mjs
 var UPDATABLE_COLUMNS = /* @__PURE__ */ new Set([
   "user_id",
   "uuid",
@@ -1136,7 +1136,7 @@ function stringifyDecisionForError(value) {
   }
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.26_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-4YH3TS4W.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.27_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-FPVXATA4.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var MAX_LISTED_SKIPPED_OCCURRENCES = 32;
 var MAX_ADJUST_STEPS = 32;
@@ -2133,7 +2133,7 @@ async function writeClientStateEntries({ db, userId, userKey, entries, now: now2
   const cleanups = [];
   const rootRowIndexes = [];
   const rootRowEntries = [];
-  let deleted = 0;
+  const deletions = [];
   for (const entry of entries) {
     const rawGuardAt = Number.isInteger(entry.version) && entry.version > 0 ? entry.version : entry.updatedAt;
     const guardAt = Math.min(rawGuardAt, at);
@@ -2143,12 +2143,12 @@ async function writeClientStateEntries({ db, userId, userKey, entries, now: now2
       updatedAt: guardAt
     });
     if (entry.value === null) {
+      deletions.push({ cleanupIndex: cleanups.length, entry });
       cleanups.push({
         namespace: entry.namespace,
         key: entry.key,
         updatedAt: guardAt
       });
-      deleted++;
       continue;
     }
     rootRowIndexes.push(physicalRows.length);
@@ -2185,6 +2185,7 @@ async function writeClientStateEntries({ db, userId, userKey, entries, now: now2
   const result = await db.upsertClientState(userId, physicalRows, cleanups, at);
   let upserted = 0;
   let skipped = 0;
+  let deleted = 0;
   const skippedEntries = [];
   if (Array.isArray(result.outcomes) && result.outcomes.length === physicalRows.length) {
     for (let i = 0; i < rootRowIndexes.length; i++) {
@@ -2199,6 +2200,15 @@ async function writeClientStateEntries({ db, userId, userKey, entries, now: now2
   } else {
     upserted = result.upserted;
     skipped = result.skipped;
+  }
+  const cleanupOutcomes = Array.isArray(result.cleanupOutcomes) && result.cleanupOutcomes.length === cleanups.length ? result.cleanupOutcomes : null;
+  for (const { cleanupIndex, entry } of deletions) {
+    if (cleanupOutcomes && cleanupOutcomes[cleanupIndex] === false) {
+      skipped++;
+      skippedEntries.push({ namespace: entry.namespace, key: entry.key });
+    } else {
+      deleted++;
+    }
   }
   return { upserted, skipped, deleted, skippedEntries };
 }
@@ -5147,6 +5157,19 @@ var CLIENT_STATE_TABLE_SQL = `
     PRIMARY KEY (user_id, namespace, key)
   )
 `;
+var CLIENT_STATE_INDEXES = [
+  {
+    name: "idx_client_state_cleanup",
+    // 服务 cleanupClientState 的
+    //   DELETE FROM client_state WHERE namespace = ? AND updated_at < ?
+    // 主键 (user_id, namespace, key) 最左列是 user_id，按 namespace 起头的条件
+    // 吃不到它。
+    sql: `CREATE INDEX IF NOT EXISTS idx_client_state_cleanup
+          ON client_state (namespace, updated_at)`,
+    description: "TTL cleanup index (cleanupClientState by namespace + updated_at)",
+    critical: false
+  }
+];
 var PUSH_SUBSCRIPTION_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS push_subscriptions (
     user_id TEXT PRIMARY KEY,
@@ -5180,11 +5203,57 @@ var MESSAGE_OUTBOX_TABLE_SQL = `
     UNIQUE (user_id, message_id)
   )
 `;
-var MESSAGE_OUTBOX_INDEX_SQL = `
-  CREATE INDEX IF NOT EXISTS idx_outbox_unacked
-    ON message_outbox (user_id, id)
-    WHERE acked_at IS NULL
-`;
+var MESSAGE_OUTBOX_INDEXES = [
+  {
+    name: "idx_outbox_unacked",
+    // 服务 listUnackedOutbox 的
+    //   SELECT … WHERE user_id = ? AND acked_at IS NULL AND id > ? ORDER BY id
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_unacked
+          ON message_outbox (user_id, id)
+          WHERE acked_at IS NULL`,
+    description: "Unacked outbox paging index (GET /outbox)",
+    critical: false
+  },
+  {
+    name: "idx_outbox_created",
+    // 服务 cleanupOutbox 的
+    //   DELETE FROM message_outbox WHERE created_at < ?
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_created
+          ON message_outbox (created_at)`,
+    description: "Outbox retention cleanup index (cleanupOutbox by created_at)",
+    critical: false
+  },
+  {
+    name: "idx_outbox_acked",
+    // 服务 cleanupOutbox 的
+    //   DELETE FROM message_outbox WHERE acked_at IS NOT NULL AND acked_at < ?
+    // 部分索引只收已 ack 的行：未 ack 的那部分本来就不是这条语句的目标，
+    // idx_outbox_unacked 的 WHERE 条件与它正好互补。
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_acked
+          ON message_outbox (acked_at)
+          WHERE acked_at IS NOT NULL`,
+    description: "Acked outbox cleanup index (cleanupOutbox by acked_at)",
+    critical: false
+  },
+  {
+    name: "idx_outbox_task_undelivered",
+    // 服务 discardUndeliveredOutboxForTask 的
+    //   DELETE FROM message_outbox
+    //   WHERE user_id = ? AND task_uuid = ? AND delivered_at IS NULL AND acked_at IS NULL
+    // 没有它这条只能靶着 user_id 走 (user_id, message_id) 或 idx_outbox_unacked，
+    // 单用户部署下 user_id 对每一行都成立，等于把整个未 ack 积压扫一遍。
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_task_undelivered
+          ON message_outbox (user_id, task_uuid)
+          WHERE delivered_at IS NULL AND acked_at IS NULL`,
+    description: "Undelivered-by-task discard index (cancel / supersede)",
+    critical: false
+  }
+];
+var SQLITE_ALL_INDEXES = [
+  ...SQLITE_INDEXES,
+  ...CLIENT_STATE_INDEXES,
+  ...MESSAGE_OUTBOX_INDEXES
+];
 function parseTableName(sql) {
   const match = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/i.exec(sql);
   return match ? match[1] : "";
@@ -5219,7 +5288,7 @@ var SQLITE_REQUIRED_SCHEMA = Object.freeze({
     describeTable(LLM_CREDENTIALS_TABLE_SQL),
     describeTable(MESSAGE_OUTBOX_TABLE_SQL)
   ])),
-  indexes: Object.freeze(SQLITE_INDEXES.filter((index) => index.critical).map((index) => index.name))
+  indexes: Object.freeze(SQLITE_ALL_INDEXES.filter((index) => index.critical).map((index) => index.name))
 });
 function prefixRangeEnd(prefix) {
   const points = Array.from(prefix);
@@ -5322,7 +5391,6 @@ var D1Adapter = class {
     await this._db.prepare(PUSH_SUBSCRIPTION_TABLE_SQL).run();
     await this._db.prepare(LLM_CREDENTIALS_TABLE_SQL).run();
     await this._db.prepare(MESSAGE_OUTBOX_TABLE_SQL).run();
-    await this._db.prepare(MESSAGE_OUTBOX_INDEX_SQL).run();
     for (const migration of SQLITE_MIGRATIONS) {
       try {
         await this._db.prepare(migration.sql).run();
@@ -5331,7 +5399,7 @@ var D1Adapter = class {
       }
     }
     const indexResults = [];
-    for (const index of SQLITE_INDEXES) {
+    for (const index of SQLITE_ALL_INDEXES) {
       try {
         await this._db.prepare(index.sql).run();
         indexResults.push({ name: index.name, status: "success", description: index.description, critical: !!index.critical });
@@ -5700,8 +5768,11 @@ var D1Adapter = class {
    * @param {number} [now] - 服务端当前时刻（epoch 毫秒），判定「这行来自未来」用的
    *   就是它。调用方（lib/client-state-store.js）传下来，测试可以钉住一个假时钟；
    *   自定义调用方不传时退回本机时钟。
-   * @returns {Promise<{ upserted: number, skipped: number, outcomes: boolean[] }>}
+   * @returns {Promise<{ upserted: number, skipped: number, outcomes: boolean[], cleanupOutcomes?: Array<boolean|null> }>}
    *   `outcomes[i]` 对应 entries[i] 是否真的写入（changes > 0）。
+   *   `cleanupOutcomes[i]` 对应 cleanups[i]（传了 cleanups 才有）：精确 key 形态
+   *   回 `true` = 这个 key 的行已经不在（删掉了，或本来就没有）、`false` = 行还在
+   *   （库里那行更新，删除被条件写拦下）；前缀形态不探测，回 `null`。
    */
   async upsertClientState(userId, entries, cleanups = [], now2 = Date.now()) {
     const UPSERT_SQL = `INSERT INTO client_state (user_id, namespace, key, value, updated_at)
@@ -5717,29 +5788,53 @@ var D1Adapter = class {
     const CLEANUP_KEY_SQL = `DELETE FROM client_state
        WHERE user_id = ? AND namespace = ? AND key = ?
          AND (updated_at <= ? OR updated_at > ?)`;
-    const buildStatements = () => [
-      ...cleanups.map((c) => typeof c.key === "string" ? this._db.prepare(CLEANUP_KEY_SQL).bind(userId, c.namespace, c.key, c.updatedAt, now2) : this._db.prepare(CLEANUP_PREFIX_SQL).bind(userId, c.namespace, c.keyPrefix, prefixRangeEnd(c.keyPrefix), c.updatedAt, now2)),
-      ...entries.map(
-        (entry) => this._db.prepare(UPSERT_SQL).bind(userId, entry.namespace, entry.key, entry.value, entry.updatedAt, now2)
-      )
-    ];
+    const PROBE_KEY_SQL = `SELECT COUNT(*) AS n FROM client_state
+       WHERE user_id = ? AND namespace = ? AND key = ?`;
+    const statements = [];
+    const probeIndexes = [];
+    for (const c of cleanups) {
+      if (typeof c.key === "string") {
+        statements.push(this._db.prepare(CLEANUP_KEY_SQL).bind(userId, c.namespace, c.key, c.updatedAt, now2));
+        probeIndexes.push(statements.length);
+        statements.push(this._db.prepare(PROBE_KEY_SQL).bind(userId, c.namespace, c.key));
+      } else {
+        statements.push(
+          this._db.prepare(CLEANUP_PREFIX_SQL).bind(userId, c.namespace, c.keyPrefix, prefixRangeEnd(c.keyPrefix), c.updatedAt, now2)
+        );
+        probeIndexes.push(null);
+      }
+    }
+    const upsertStart = statements.length;
+    for (const entry of entries) {
+      statements.push(
+        this._db.prepare(UPSERT_SQL).bind(userId, entry.namespace, entry.key, entry.value, entry.updatedAt, now2)
+      );
+    }
     let results;
     if (typeof this._db.batch === "function") {
-      results = await this._db.batch(buildStatements());
+      results = await this._db.batch(statements);
     } else {
       results = [];
-      for (const stmt of buildStatements()) {
+      for (const stmt of statements) {
         results.push(await stmt.run());
       }
     }
-    const outcomes = results.slice(cleanups.length).map((res) => res.meta.changes > 0);
+    const outcomes = results.slice(upsertStart).map((res) => res.meta.changes > 0);
     let upserted = 0;
     let skipped = 0;
     for (const wrote of outcomes) {
       if (wrote) upserted++;
       else skipped++;
     }
-    return { upserted, skipped, outcomes };
+    const result = { upserted, skipped, outcomes };
+    if (cleanups.length > 0) {
+      result.cleanupOutcomes = probeIndexes.map((probeAt) => {
+        if (probeAt === null) return null;
+        const row = results[probeAt] && Array.isArray(results[probeAt].results) ? results[probeAt].results[0] : null;
+        return Number(row?.n ?? 0) === 0;
+      });
+    }
+    return result;
   }
   /**
    * All entries of one namespace (values still encrypted).
@@ -6218,12 +6313,14 @@ function validateEntry(entry, index, maxValueBytes) {
   if (INTERNAL_STATE_CHAR_RE.test(entry.key)) {
     return rejectEntry(entry, index, "INVALID_STATE_KEY", `entries[${index}].key \u4E0D\u80FD\u5305\u542B\u63A7\u5236\u5B57\u7B26\uFF08\\u0000-\\u001f \u4E3A\u5E93\u5185\u90E8\u4FDD\u7559\uFF09`);
   }
-  if (typeof entry.value !== "string") {
-    return rejectEntry(entry, index, "INVALID_STATE_VALUE", `entries[${index}].value \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\uFF08\u5BBF\u4E3B\u81EA\u884C\u5E8F\u5217\u5316\uFF09`);
+  if (entry.value !== null && typeof entry.value !== "string") {
+    return rejectEntry(entry, index, "INVALID_STATE_VALUE", `entries[${index}].value \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\uFF08\u5BBF\u4E3B\u81EA\u884C\u5E8F\u5217\u5316\uFF09\uFF0C\u6216 null \u8868\u793A\u5220\u9664`);
   }
-  const bytes = stateValueBytes(entry.value);
-  if (bytes > maxValueBytes) {
-    return rejectEntry(entry, index, "STATE_VALUE_TOO_LARGE", `entries[${index}].value \u8D85\u8FC7\u5355\u6761\u603B\u4E0A\u9650`, { bytes, maxBytes: maxValueBytes });
+  if (typeof entry.value === "string") {
+    const bytes = stateValueBytes(entry.value);
+    if (bytes > maxValueBytes) {
+      return rejectEntry(entry, index, "STATE_VALUE_TOO_LARGE", `entries[${index}].value \u8D85\u8FC7\u5355\u6761\u603B\u4E0A\u9650`, { bytes, maxBytes: maxValueBytes });
+    }
   }
   if (!Number.isInteger(entry.updatedAt) || entry.updatedAt <= 0) {
     return rejectEntry(entry, index, "INVALID_STATE_UPDATED_AT", `entries[${index}].updatedAt \u5FC5\u987B\u662F\u6B63\u6574\u6570\uFF08epoch \u6BEB\u79D2\uFF09`);
@@ -6284,8 +6381,9 @@ function createClientStateHandler(ctx) {
     if (typeof db.upsertClientState !== "function") {
       return err3(501, "CLIENT_STATE_NOT_SUPPORTED", "\u5F53\u524D\u6570\u636E\u5E93\u9002\u914D\u5668\u4E0D\u652F\u6301 client_state");
     }
-    const { upserted, skipped, skippedEntries } = await writeClientStateEntries({ db, userId, userKey, entries: accepted });
+    const { upserted, skipped, deleted, skippedEntries } = await writeClientStateEntries({ db, userId, userKey, entries: accepted });
     const data = { upserted, skipped };
+    if (deleted > 0) data.deleted = deleted;
     if (skippedEntries.length > 0) data.skippedEntries = skippedEntries;
     if (rejected.length > 0) data.rejected = rejected;
     return { status: 200, body: { success: true, data } };
@@ -6330,7 +6428,7 @@ function createClientStateHandler(ctx) {
   }
   return { PUT, GET, DELETE };
 }
-var SERVER_VERSION = true ? "2.6.0-next.26" : "0.0.0-dev";
+var SERVER_VERSION = true ? "2.6.0-next.27" : "0.0.0-dev";
 var SERVER_FEATURES = Object.freeze([
   "client-state",
   "client-state-chunking",
@@ -6414,7 +6512,10 @@ var SERVER_FEATURES = Object.freeze([
   // client_state 按命名空间过期清理（config 的 clientStateTtl，cron 每跳顺手做）。
   "client-state-ttl",
   // hook ctx 带 emitResult(payload)：往客户端补一条自定义结果（落收件箱 + 推送）。
-  "emit-result"
+  "emit-result",
+  // PUT /client-state 的 entry 认 value: null（删掉这个 key，连切片行一起；同一套
+  // last-write-wins，被拦下的进 skippedEntries；删掉的条数在 data.deleted）。
+  "client-state-delete"
 ]);
 function createCapabilitiesHandler(ctx) {
   async function GET(url, headers) {
@@ -6990,7 +7091,7 @@ function stripReasoningTags2(content) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-09-02.r1.relationship-credential-retry";
+var AMSG_BUNDLE_VERSION = "2026-09-02.r2.upstream-cron-pause";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";
@@ -8831,17 +8932,17 @@ var isEncryptedEnvelope2 = (value) => {
 var handleInstantChat = async (args) => {
   const { request, env, upstream: upstream2, json: json2 } = args;
   const stateBackoffMs = args.stateBackoffMs ?? STATE_FORWARD_BACKOFF_MS;
-  const fail2 = (status, code, message, extra) => json2(status, { success: false, error: { code, message, ...extra ?? {} } });
+  const fail3 = (status, code, message, extra) => json2(status, { success: false, error: { code, message, ...extra ?? {} } });
   const token = (env.AMSG_SERVER_TOKEN ?? "").trim();
   const clientToken = request.headers.get("X-Client-Token") ?? "";
   if (token) {
     if (!clientToken || !await constantTimeEqual2(clientToken, token)) {
-      return fail2(401, "INVALID_CLIENT_TOKEN", "\u5171\u4EAB\u5BC6\u94A5\u65E0\u6548\u6216\u7F3A\u5931");
+      return fail3(401, "INVALID_CLIENT_TOKEN", "\u5171\u4EAB\u5BC6\u94A5\u65E0\u6548\u6216\u7F3A\u5931");
     }
   }
   const userId = request.headers.get("X-User-Id") ?? "";
-  if (!userId) return fail2(400, "USER_ID_REQUIRED", "\u7F3A\u5C11\u7528\u6237\u6807\u8BC6\u7B26");
-  if (!UUID_V4_RE.test(userId)) return fail2(400, "INVALID_USER_ID_FORMAT", "X-User-Id \u5FC5\u987B\u662F UUID v4 \u683C\u5F0F");
+  if (!userId) return fail3(400, "USER_ID_REQUIRED", "\u7F3A\u5C11\u7528\u6237\u6807\u8BC6\u7B26");
+  if (!UUID_V4_RE.test(userId)) return fail3(400, "INVALID_USER_ID_FORMAT", "X-User-Id \u5FC5\u987B\u662F UUID v4 \u683C\u5F0F");
   let body;
   try {
     const text = await readMaybeGzippedBody(request);
@@ -8849,13 +8950,13 @@ var handleInstantChat = async (args) => {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("not an object");
     body = parsed;
   } catch {
-    return fail2(400, "INVALID_JSON", "\u8BF7\u6C42\u4F53\u4E0D\u662F\u5408\u6CD5\u7684 JSON \u5BF9\u8C61");
+    return fail3(400, "INVALID_JSON", "\u8BF7\u6C42\u4F53\u4E0D\u662F\u5408\u6CD5\u7684 JSON \u5BF9\u8C61");
   }
   if (!isEncryptedEnvelope2(body.statePayload)) {
-    return fail2(400, "INVALID_STATE_PAYLOAD", "statePayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
+    return fail3(400, "INVALID_STATE_PAYLOAD", "statePayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
   }
   if (!isEncryptedEnvelope2(body.taskPayload)) {
-    return fail2(400, "INVALID_TASK_PAYLOAD", "taskPayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
+    return fail3(400, "INVALID_TASK_PAYLOAD", "taskPayload \u5FC5\u987B\u662F\u52A0\u5BC6\u4FE1\u5C01\uFF08iv / authTag / encryptedData\uFF09");
   }
   const requestUrl = new URL(request.url);
   const mountPath = requestUrl.pathname.replace(/\/+$/, "").replace(/\/instant-chat$/, "");
@@ -8946,7 +9047,7 @@ var handleInstantChat = async (args) => {
   }
   const uuid = taskBody?.data?.uuid;
   if (typeof uuid !== "string" || !uuid) {
-    return fail2(502, "INSTANT_CHAT_TASK_UUID_MISSING", "\u4E0A\u6E38\u6CA1\u6709\u56DE\u4EFB\u52A1 uuid\uFF0C\u65E0\u6CD5\u8DDF\u8E2A\u8FD9\u4E00\u8F6E", {
+    return fail3(502, "INSTANT_CHAT_TASK_UUID_MISSING", "\u4E0A\u6E38\u6CA1\u6709\u56DE\u4EFB\u52A1 uuid\uFF0C\u65E0\u6CD5\u8DDF\u8E2A\u8FD9\u4E00\u8F6E", {
       step: "schedule-message"
     });
   }
@@ -8984,7 +9085,7 @@ async function cf(token, path, init = {}) {
   try {
     res = await fetch(`${CF_API}${path}`, {
       method: init.method ?? "GET",
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: `Bearer ${token}`, ...init.headers },
       body: init.body
     });
   } catch (err5) {
@@ -10574,6 +10675,87 @@ var src_default = {
     }
   }
 };
+
+// worker/amsg/src/cronTrigger.ts
+var AMSG_CRON_EXPRESSION = "* * * * *";
+var isCronTriggerAuthFailure = (code) => code === "SERVER_TOKEN_REQUIRED" || code === "UNAUTHORIZED";
+var fail2 = (code, message) => ({ code, message });
+async function prepare(env, request) {
+  const serverToken = env.AMSG_SERVER_TOKEN?.trim();
+  if (!serverToken) {
+    return {
+      ok: false,
+      failure: fail2(
+        "SERVER_TOKEN_REQUIRED",
+        "\u8FD9\u4E2A Worker \u6CA1\u8BBE\u5171\u4EAB\u5BC6\u94A5\uFF08AMSG_SERVER_TOKEN\uFF09\uFF0C\u51FA\u4E8E\u5B89\u5168\u8003\u8651\u4E0D\u5F00\u653E\u6682\u505C\u540E\u53F0\u4EFB\u52A1\u3002\u5148\u8865\u4E0A\u518D\u8BD5\u3002"
+      )
+    };
+  }
+  const clientToken = request.headers.get("X-Client-Token");
+  if (!clientToken || !await constantTimeEqual2(clientToken, serverToken)) {
+    return { ok: false, failure: fail2("UNAUTHORIZED", "\u5171\u4EAB\u5BC6\u94A5\u5BF9\u4E0D\u4E0A\u3002") };
+  }
+  const token = env.CF_API_TOKEN?.trim();
+  if (!token) {
+    return {
+      ok: false,
+      failure: fail2(
+        "CF_TOKEN_MISSING",
+        "\u6CA1\u914D CF_API_TOKEN\uFF0C\u6CA1\u6CD5\u6539\u5B9A\u65F6\u89E6\u53D1\u3002\u53BB Cloudflare \u5EFA\u4E00\u679A\u53EA\u52FE Workers Scripts \u2192 Edit \u7684 API Token\uFF0C\u52A0\u8FDB\u8FD9\u4E2A Worker \u7684\u53D8\u91CF\u91CC\u3002"
+      )
+    };
+  }
+  const scriptName = resolveScriptName(env, request.url);
+  if (!scriptName) {
+    return {
+      ok: false,
+      failure: fail2(
+        "SCRIPT_NAME_UNKNOWN",
+        "\u8BA4\u4E0D\u51FA\u8FD9\u4E2A Worker \u53EB\u4EC0\u4E48\uFF08\u591A\u534A\u662F\u5957\u4E86\u4EE3\u7406\u57DF\u540D\uFF09\u3002\u7ED9\u5B83\u52A0\u4E00\u6761 CF_SCRIPT_NAME \u53D8\u91CF\uFF0C\u503C\u586B Worker \u7684\u540D\u5B57\u3002"
+      )
+    };
+  }
+  const located = await locateScript(env, token, scriptName);
+  if (!located.ok) return { ok: false, failure: fail2("SCRIPT_NOT_LOCATED", located.message) };
+  return {
+    ok: true,
+    token,
+    schedulesPath: `/accounts/${located.accountId}/workers/scripts/${encodeURIComponent(scriptName)}/schedules`
+  };
+}
+var readSchedules = (result) => {
+  const schedules = result?.schedules;
+  return Array.isArray(schedules) ? schedules : [];
+};
+async function handleCronTriggerRead(env, request) {
+  const prepared = await prepare(env, request);
+  if (!prepared.ok) return { supported: false, ...prepared.failure };
+  const current = await cf(prepared.token, prepared.schedulesPath);
+  if (!current.ok) {
+    return { supported: false, ...fail2("CF_ERROR", `\u8BFB\u4E0D\u5230\u5B9A\u65F6\u89E6\u53D1\u7684\u72B6\u6001\uFF08${current.detail}\uFF09\u3002`) };
+  }
+  return { supported: true, enabled: readSchedules(current.result).length > 0 };
+}
+async function handleCronTriggerWrite(env, request, enabled) {
+  const prepared = await prepare(env, request);
+  if (!prepared.ok) return { ok: false, ...prepared.failure };
+  const schedules = enabled ? [{ cron: AMSG_CRON_EXPRESSION }] : [];
+  const written = await cf(prepared.token, prepared.schedulesPath, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(schedules)
+  });
+  if (!written.ok) {
+    return {
+      ok: false,
+      ...fail2(
+        "CF_ERROR",
+        `${enabled ? "\u6062\u590D" : "\u6682\u505C"}\u6CA1\u6210\u529F\uFF08${written.detail}\uFF09\u3002\u5B9A\u65F6\u89E6\u53D1\u4FDD\u6301\u539F\u6837\u3002`
+      )
+    };
+  }
+  return { ok: true, enabled };
+}
 
 // utils/mcpFireCore.ts
 var DEFAULT_MAX_TOOL_NAME_LEN = 64;
@@ -14721,7 +14903,7 @@ var amsgHooks = {
       throw fireStateError("task metadata \u7F3A charId", { taskId: ctx.task.id });
     }
     const instant = isInstantChatTask(ctx.task.metadata ?? {});
-    const fail2 = (reason, extra) => {
+    const fail3 = (reason, extra) => {
       if (instant && typeof ctx.task.uuid === "string" && ctx.task.uuid) {
         if (typeof ctx.writeState === "function") {
           void writeChatFail(ctx.writeState, charId, {
@@ -14743,7 +14925,7 @@ var amsgHooks = {
       try {
         return await unpackStateValue(value);
       } catch (error) {
-        throw fail2(`${label} \u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09`, { error: String(error) });
+        throw fail3(`${label} \u89E3\u538B\u5931\u8D25\uFF08\u6570\u636E\u635F\u574F\uFF09`, { error: String(error) });
       }
     };
     const taskMeta = ctx.task.metadata ?? {};
@@ -14753,13 +14935,13 @@ var amsgHooks = {
     if (taskKind) {
       const handler = FIRE_KIND_HANDLERS[taskKind];
       if (!handler) {
-        throw fail2(`\u4E0D\u8BA4\u8BC6\u7684\u4EFB\u52A1\u79CD\u7C7B amsgKind=${taskKind}\uFF08worker \u4EE3\u7801\u6BD4\u524D\u7AEF\u65E7\uFF0C\u53BB\u8BBE\u7F6E\u9875\u91CD\u65B0\u90E8\u7F72\u4E00\u6B21\uFF09`);
+        throw fail3(`\u4E0D\u8BA4\u8BC6\u7684\u4EFB\u52A1\u79CD\u7C7B amsgKind=${taskKind}\uFF08worker \u4EE3\u7801\u6BD4\u524D\u7AEF\u65E7\uFF0C\u53BB\u8BBE\u7F6E\u9875\u91CD\u65B0\u90E8\u7F72\u4E00\u6B21\uFF09`);
       }
       let plan;
       try {
         plan = await handler.beforeFire({ ctx, charId, taskMeta });
       } catch (error) {
-        throw fail2(error instanceof Error ? error.message : String(error), { kind: taskKind });
+        throw fail3(error instanceof Error ? error.message : String(error), { kind: taskKind });
       }
       if ("skip" in plan) {
         console.log("[amsg:kind-skip]", { taskId: ctx.task.id, kind: taskKind, reason: plan.reason });
@@ -14790,12 +14972,12 @@ var amsgHooks = {
       return { skip: true };
     }
     const packRow = charRows.find((r) => r.key === AMSG_FIRE_PACK_KEY);
-    if (!packRow) throw fail2("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 fire_pack");
+    if (!packRow) throw fail3("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 fire_pack");
     const packJson = await unpackOrFail("fire_pack", packRow.value);
     const pack = parseFirePack(packJson);
-    if (!pack) throw fail2(`fire_pack \u89E3\u6790\u5931\u8D25\uFF1A${describeFirePackVersion(packJson)}`);
+    if (!pack) throw fail3(`fire_pack \u89E3\u6790\u5931\u8D25\uFF1A${describeFirePackVersion(packJson)}`);
     if (instant && !pack.chat) {
-      throw fail2("\u5373\u65F6\u5BF9\u8BDD\u4EFB\u52A1\u7684 fire_pack \u91CC\u6CA1\u6709 chat \u6BB5\uFF08\u4E91\u7AEF\u72B6\u6001\u6CA1\u8DDF\u4E0A\uFF09");
+      throw fail3("\u5373\u65F6\u5BF9\u8BDD\u4EFB\u52A1\u7684 fire_pack \u91CC\u6CA1\u6709 chat \u6BB5\uFF08\u4E91\u7AEF\u72B6\u6001\u6CA1\u8DDF\u4E0A\uFF09");
     }
     if (!instant && pack.template === AMSG2_INSTANT_STUB_TEMPLATE) {
       console.warn("[amsg:fire-pack-stub] fire_pack \u8FD8\u662F\u5373\u65F6\u5BF9\u8BDD\u7684\u5360\u4F4D\u6A21\u677F\uFF0C\u7B49\u5BA2\u6237\u7AEF\u8865\u4F20\u540E\u91CD\u8BD5", {
@@ -14806,7 +14988,7 @@ var amsgHooks = {
     }
     const occurrenceMs = Date.parse(String(ctx.task.nextSendAt));
     if (!Number.isFinite(occurrenceMs)) {
-      throw fail2("\u4EFB\u52A1\u884C next_send_at \u89E3\u6790\u4E0D\u51FA\u89E6\u53D1\u65F6\u523B", { nextSendAt: ctx.task.nextSendAt });
+      throw fail3("\u4EFB\u52A1\u884C next_send_at \u89E3\u6790\u4E0D\u51FA\u89E6\u53D1\u65F6\u523B", { nextSendAt: ctx.task.nextSendAt });
     }
     const presenceLastUserMessageAt = presence?.charId === charId ? presence.lastUserMessageAt : null;
     const expireInput = {
@@ -14830,17 +15012,17 @@ var amsgHooks = {
     }
     if (!instant) console.log("[amsg:expire-pass]", expireTrace);
     if (!instant && typeof taskMeta.amsgTaskInstruction !== "string") {
-      throw fail2("\u4EFB\u52A1 metadata \u7F3A amsgTaskInstruction\uFF08\u65E7\u683C\u5F0F\u4EFB\u52A1\uFF09");
+      throw fail3("\u4EFB\u52A1 metadata \u7F3A amsgTaskInstruction\uFF08\u65E7\u683C\u5F0F\u4EFB\u52A1\uFF09");
     }
     const globalRows = await ctx.readState(AMSG_GLOBAL_NAMESPACE);
     const toolPackRow = charRows.find((r) => r.key === AMSG_TOOL_PACK_KEY);
     const toolConfigRow = globalRows.find((r) => r.key === AMSG_TOOL_CONFIG_KEY);
-    if (!toolPackRow) throw fail2("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 tool_pack");
-    if (!toolConfigRow) throw fail2("\u4E91\u7AEF\u6CA1\u6709 tool_config");
+    if (!toolPackRow) throw fail3("\u4E91\u7AEF\u6CA1\u6709\u8FD9\u4E2A\u89D2\u8272\u7684 tool_pack");
+    if (!toolConfigRow) throw fail3("\u4E91\u7AEF\u6CA1\u6709 tool_config");
     const toolPack = parseToolPack(await unpackOrFail("tool_pack", toolPackRow.value));
-    if (!toolPack) throw fail2("tool_pack \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
+    if (!toolPack) throw fail3("tool_pack \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
     const toolConfig = parseToolConfig(await unpackOrFail("tool_config", toolConfigRow.value));
-    if (!toolConfig) throw fail2("tool_config \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
+    if (!toolConfig) throw fail3("tool_config \u89E3\u6790\u5931\u8D25\uFF08\u683C\u5F0F\u4E0D\u5BF9\u6216\u6570\u636E\u635F\u574F\uFF09");
     const mcpServers = filterMcpServersForChar(toolConfig.mcpServers, charId);
     const mcpResolve = mcpServers.length ? buildMcpNameMap(mcpServers, { maxNameLen: MCP_FIRE_NAME_BUDGET }) : null;
     const mcpNative = toolConfig.mcpUseNativeTools !== false;
@@ -15267,10 +15449,12 @@ ${FINAL_ROUND_NOTICE}`;
 };
 var resolveVapidEmail = (raw) => raw?.trim() || "mailto:noreply@sullyos.app";
 var OUTBOX_CLEANUP_INDEX_SQL = [
-  `CREATE INDEX IF NOT EXISTS idx_outbox_acked_cleanup
+  // next.27 起上游 initSchema 使用这两个正式名字。沿用同名可避免新库再创建一组
+  // 列完全相同的重复索引；旧库已有的 *_cleanup 索引暂不主动删除。
+  `CREATE INDEX IF NOT EXISTS idx_outbox_acked
      ON message_outbox (acked_at)
      WHERE acked_at IS NOT NULL`,
-  `CREATE INDEX IF NOT EXISTS idx_outbox_created_cleanup
+  `CREATE INDEX IF NOT EXISTS idx_outbox_created
      ON message_outbox (created_at)`
 ];
 var shouldRunHourlyOutboxCleanup = (scheduledTime) => {
@@ -15281,14 +15465,16 @@ var activeScheduledTime = null;
 var createIndexedHourlyCleanupDb = (env) => {
   const db = createD1Adapter(env.DB);
   const initSchema = db.initSchema.bind(db);
-  const cleanupOutbox = db.cleanupOutbox.bind(db);
+  const cleanupOutbox = typeof db.cleanupOutbox === "function" ? db.cleanupOutbox.bind(db) : null;
   const cleanupThisTick = activeScheduledTime !== null && shouldRunHourlyOutboxCleanup(activeScheduledTime);
   db.initSchema = async () => {
     const result = await initSchema();
     for (const sql of OUTBOX_CLEANUP_INDEX_SQL) await env.DB.prepare(sql).run();
     return result;
   };
-  db.cleanupOutbox = cleanupThisTick ? cleanupOutbox : async () => 0;
+  if (cleanupOutbox) {
+    db.cleanupOutbox = cleanupThisTick ? cleanupOutbox : async () => 0;
+  }
   return db;
 };
 var buildWorkerConfig = (env) => {
@@ -15689,6 +15875,43 @@ var src_default2 = {
         success: result.ok,
         data: result.ok ? result : void 0,
         error: result.ok ? void 0 : { code: result.code, message: result.message }
+      });
+    }
+    if (pathname.endsWith("/cron-trigger")) {
+      if (method === "OPTIONS") return new Response(null, { status: 204, headers: CORS_HEADERS });
+      if (method === "GET") {
+        const state = await handleCronTriggerRead(env, request);
+        if (!state.supported && isCronTriggerAuthFailure(state.code)) {
+          return jsonWithCors(401, {
+            success: false,
+            error: { code: state.code, message: state.message }
+          });
+        }
+        return jsonWithCors(200, { success: true, data: state });
+      }
+      if (method !== "POST") {
+        return jsonWithCors(405, {
+          success: false,
+          error: { code: "METHOD_NOT_ALLOWED", message: "/cron-trigger \u53EA\u63A5\u53D7 GET \u548C POST" }
+        });
+      }
+      let enabled;
+      try {
+        enabled = (await request.json())?.enabled;
+      } catch {
+        enabled = void 0;
+      }
+      if (typeof enabled !== "boolean") {
+        return jsonWithCors(400, {
+          success: false,
+          error: { code: "BAD_REQUEST", message: '\u8BF7\u6C42\u4F53\u8981\u662F { "enabled": true | false }' }
+        });
+      }
+      const result = await handleCronTriggerWrite(env, request, enabled);
+      if (result.ok) return jsonWithCors(200, { success: true, data: result });
+      return jsonWithCors(isCronTriggerAuthFailure(result.code) ? 401 : 400, {
+        success: false,
+        error: { code: result.code, message: result.message }
       });
     }
     const report = inspectWorkerEnv(env);

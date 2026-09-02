@@ -332,7 +332,7 @@ function normalizeVapidSubject(email) {
   return /^mailto:/i.test(trimmed) || /^https?:/i.test(trimmed) ? trimmed : `mailto:${trimmed}`;
 }
 
-// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.26_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-4YH3TS4W.mjs
+// node_modules/.pnpm/@rei-standard+amsg-server@2.6.0-next.27_@neondatabase+serverless@1.1.0_pg@8.22.0/node_modules/@rei-standard/amsg-server/dist/chunk-FPVXATA4.mjs
 var DAY_MS = 24 * 60 * 60 * 1e3;
 var TAG_LENGTH_BYTES = 16;
 function importAesKey(hexKey, usage) {
@@ -553,6 +553,19 @@ var CLIENT_STATE_TABLE_SQL = `
     PRIMARY KEY (user_id, namespace, key)
   )
 `;
+var CLIENT_STATE_INDEXES = [
+  {
+    name: "idx_client_state_cleanup",
+    // 服务 cleanupClientState 的
+    //   DELETE FROM client_state WHERE namespace = ? AND updated_at < ?
+    // 主键 (user_id, namespace, key) 最左列是 user_id，按 namespace 起头的条件
+    // 吃不到它。
+    sql: `CREATE INDEX IF NOT EXISTS idx_client_state_cleanup
+          ON client_state (namespace, updated_at)`,
+    description: "TTL cleanup index (cleanupClientState by namespace + updated_at)",
+    critical: false
+  }
+];
 var PUSH_SUBSCRIPTION_TABLE_SQL = `
   CREATE TABLE IF NOT EXISTS push_subscriptions (
     user_id TEXT PRIMARY KEY,
@@ -586,6 +599,57 @@ var MESSAGE_OUTBOX_TABLE_SQL = `
     UNIQUE (user_id, message_id)
   )
 `;
+var MESSAGE_OUTBOX_INDEXES = [
+  {
+    name: "idx_outbox_unacked",
+    // 服务 listUnackedOutbox 的
+    //   SELECT … WHERE user_id = ? AND acked_at IS NULL AND id > ? ORDER BY id
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_unacked
+          ON message_outbox (user_id, id)
+          WHERE acked_at IS NULL`,
+    description: "Unacked outbox paging index (GET /outbox)",
+    critical: false
+  },
+  {
+    name: "idx_outbox_created",
+    // 服务 cleanupOutbox 的
+    //   DELETE FROM message_outbox WHERE created_at < ?
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_created
+          ON message_outbox (created_at)`,
+    description: "Outbox retention cleanup index (cleanupOutbox by created_at)",
+    critical: false
+  },
+  {
+    name: "idx_outbox_acked",
+    // 服务 cleanupOutbox 的
+    //   DELETE FROM message_outbox WHERE acked_at IS NOT NULL AND acked_at < ?
+    // 部分索引只收已 ack 的行：未 ack 的那部分本来就不是这条语句的目标，
+    // idx_outbox_unacked 的 WHERE 条件与它正好互补。
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_acked
+          ON message_outbox (acked_at)
+          WHERE acked_at IS NOT NULL`,
+    description: "Acked outbox cleanup index (cleanupOutbox by acked_at)",
+    critical: false
+  },
+  {
+    name: "idx_outbox_task_undelivered",
+    // 服务 discardUndeliveredOutboxForTask 的
+    //   DELETE FROM message_outbox
+    //   WHERE user_id = ? AND task_uuid = ? AND delivered_at IS NULL AND acked_at IS NULL
+    // 没有它这条只能靶着 user_id 走 (user_id, message_id) 或 idx_outbox_unacked，
+    // 单用户部署下 user_id 对每一行都成立，等于把整个未 ack 积压扫一遍。
+    sql: `CREATE INDEX IF NOT EXISTS idx_outbox_task_undelivered
+          ON message_outbox (user_id, task_uuid)
+          WHERE delivered_at IS NULL AND acked_at IS NULL`,
+    description: "Undelivered-by-task discard index (cancel / supersede)",
+    critical: false
+  }
+];
+var SQLITE_ALL_INDEXES = [
+  ...SQLITE_INDEXES,
+  ...CLIENT_STATE_INDEXES,
+  ...MESSAGE_OUTBOX_INDEXES
+];
 function parseTableName(sql) {
   const match = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/i.exec(sql);
   return match ? match[1] : "";
@@ -620,7 +684,7 @@ var SQLITE_REQUIRED_SCHEMA = Object.freeze({
     describeTable(LLM_CREDENTIALS_TABLE_SQL),
     describeTable(MESSAGE_OUTBOX_TABLE_SQL)
   ])),
-  indexes: Object.freeze(SQLITE_INDEXES.filter((index) => index.critical).map((index) => index.name))
+  indexes: Object.freeze(SQLITE_ALL_INDEXES.filter((index) => index.critical).map((index) => index.name))
 });
 var SERVER_FEATURES = Object.freeze([
   "client-state",
@@ -705,7 +769,10 @@ var SERVER_FEATURES = Object.freeze([
   // client_state 按命名空间过期清理（config 的 clientStateTtl，cron 每跳顺手做）。
   "client-state-ttl",
   // hook ctx 带 emitResult(payload)：往客户端补一条自定义结果（落收件箱 + 推送）。
-  "emit-result"
+  "emit-result",
+  // PUT /client-state 的 entry 认 value: null（删掉这个 key，连切片行一起；同一套
+  // last-write-wins，被拦下的进 skippedEntries；删掉的条数在 data.deleted）。
+  "client-state-delete"
 ]);
 
 // utils/amsgFirePack.ts

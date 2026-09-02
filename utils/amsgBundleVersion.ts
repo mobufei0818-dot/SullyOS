@@ -13,8 +13,9 @@
 //   - utils/amsgWorkerVersion.ts 比的是**上游库** @rei-standard/amsg-server 的 semver；
 //   - utils/buildInfo.ts 的 APP_VERSION 是整个 SullyOS App 的版本。
 //   这里管的只有一样：用户自己那台 Worker 上跑的这份 bundle 是哪天的。
-// 2026-09-02 r1：新角色凭据补传后，关系 Cron 下一分钟快速重试；保留此前全部时钟与 D1 修复。
-export const AMSG_BUNDLE_VERSION = '2026-09-02.r1.relationship-credential-retry';
+// 2026-09-02 r2：接入上游后台 Cron 暂停/恢复、client-state 真删除与 amsg-server next.27；
+// 保留二改的关系凭据补传、关系时钟、朋友圈挂载和 D1 低频清理。
+export const AMSG_BUNDLE_VERSION = '2026-09-02.r2.upstream-cron-pause';
 
 const readBundleDate = (value: string): number | null => {
   const match = /^(\d{4})-(\d{2})-(\d{2})(?:\.|$)/.exec(value.trim());
