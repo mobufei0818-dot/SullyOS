@@ -8,7 +8,7 @@ import TokenImg from '../components/os/TokenImg';
 import type { CharacterProfile, GalleryImage, MemoryFragment, MomentsComment, MomentsEventLedgerEntry, MomentsEventType, MomentsInteractionMode, MomentsMediaRef, MomentsPendingJob, MomentsPost, MomentsPostingMode, MomentsProfile, MomentsReaction, MomentsSettings, MomentsTempStranger, MomentsTempTranscript, MomentsVisibilityMode, MomentsApiConfig, MomentsWorkerConfig, MomentsWorkerDiagnostics } from '../types';
 import { generateChatImage, isImageGenerationConfigured } from '../utils/imageGeneration';
 import { fetchMomentsModels, isMomentsApiReady, momentsApiFromMain, momentsApiFromPreset, planMomentsCharacterPost, planMomentsInteractions, planMomentsNpcCharacterProfile, planMomentsNpcProfiles, planMomentsStranger, planMomentsStrangerCharacterProfile, replyMomentsStranger, testMomentsApi, type MomentsInteractionActorContext } from '../utils/momentsApi';
-import { acknowledgeMomentsDeliveries, claimMomentsTask, completeMomentsTask, getMomentsWorkerDiagnostics, isMomentsWorkerReady, outboxToSyncPayload, pullMomentsDeliveries, pullMomentsTasks, syncMomentsOutbox } from '../utils/momentsSync';
+import { acknowledgeMomentsDeliveries, claimMomentsTask, completeMomentsTask, getMomentsWorkerDiagnostics, hasPendingMomentsSyncWork, isD1DailyLimitError, isMomentsWorkerReady, outboxToSyncPayload, pullMomentsDeliveries, pullMomentsTasks, syncMomentsOutbox } from '../utils/momentsSync';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { mirrorMomentsEventToMemoryPalace, removeMomentsPostFromMemoryPalace, removeMomentsSourcesFromMemoryPalace, repairMomentsMemoryPalaceForCharacter, type MomentsMemoryEventDetail } from '../utils/momentsMemoryPalace';
 import { reportRelationshipJealousyEvents, setRelationshipJealousyForceEnabled } from '../utils/relationshipBackend';
@@ -603,7 +603,11 @@ const MomentsApp: React.FC = () => {
     setMomentsApiBusy('sync');
     try {
       const [items, jobs] = await Promise.all([DB.getMomentsSyncOutbox(), DB.getMomentsPendingJobs()]);
-      if (!items.length && !jobs.some(job => job.state === 'pending')) return;
+      if (!hasPendingMomentsSyncWork(items, jobs)) {
+        await saveMomentsSettingsPatch({ syncStatus: 'synced', syncError: undefined, lastSyncAt: Date.now() });
+        setMomentsApiStatus('当前没有待同步内容，Worker 同步状态正常');
+        return;
+      }
       const userId = worker.userId?.trim() || `moments-user-${USER_PROFILE_ID}`;
       const result = await syncMomentsOutbox(worker, outboxToSyncPayload(items, jobs, userId));
       const acknowledged = new Set([...result.acceptedEventIds, ...result.acceptedTaskIds]);
@@ -664,11 +668,26 @@ const MomentsApp: React.FC = () => {
     if (!isMomentsWorkerReady(worker)) return;
     try {
       const userId = worker.userId?.trim() || `moments-user-${USER_PROFILE_ID}`;
-      setWorkerDiagnostics(await getMomentsWorkerDiagnostics(worker, userId));
+      const [diagnostics, items, jobs] = await Promise.all([
+        getMomentsWorkerDiagnostics(worker, userId),
+        DB.getMomentsSyncOutbox(),
+        DB.getMomentsPendingJobs(),
+      ]);
+      setWorkerDiagnostics(diagnostics);
+      // 诊断路由能成功读取计数，证明 D1 已经恢复。只清理这类已证实过时的额度错误，
+      // 其他同步错误仍然保留，不用一次只读诊断冒充同步成功。
+      if (settingsRef.current.syncStatus === 'failed' && isD1DailyLimitError(settingsRef.current.syncError)) {
+        const noPendingWork = !hasPendingMomentsSyncWork(items, jobs);
+        await saveMomentsSettingsPatch({
+          syncStatus: noPendingWork ? 'synced' : 'idle',
+          syncError: undefined,
+          ...(noPendingWork ? { lastSyncAt: diagnostics.checkedAt } : {}),
+        });
+      }
     } catch (error: any) {
       setMomentsApiStatus(`Worker 诊断读取失败：${error?.message || '网络错误'}`);
     }
-  }, [sharedAmsgWorker]);
+  }, [saveMomentsSettingsPatch, sharedAmsgWorker]);
 
   const refreshAmsgWorker = useCallback(async () => {
     const globalAmsg = await ActiveMsgStore.getGlobalConfig().catch(() => null);
@@ -1787,7 +1806,12 @@ const MomentsApp: React.FC = () => {
               <div className="flex gap-2"><button type="button" onClick={() => void refreshAmsgWorker()} className="flex-1 rounded-xl bg-[#576b95] py-2.5 text-[12px] font-medium text-white">重新读取配置</button><button type="button" onClick={() => void flushMomentsWorker()} disabled={momentsApiBusy === 'sync' || !sharedAmsgWorker} className="flex-1 rounded-xl border border-[#dfe3ee] py-2.5 text-[12px] font-medium text-[#576b95] disabled:opacity-50">{momentsApiBusy === 'sync' ? '同步中…' : '立即重试同步'}</button></div>
               <button type="button" onClick={() => void refreshMomentsWorkerDiagnostics()} disabled={!sharedAmsgWorker} className="w-full rounded-xl border border-[#dfe3ee] py-2.5 text-[12px] font-medium text-[#576b95] disabled:opacity-50">读取 Worker 任务诊断</button>
               <div className="text-[11px] text-[#999]">同步状态：{settings.syncStatus === 'synced' ? `已同步${settings.lastSyncAt ? ` · ${formatMomentTime(settings.lastSyncAt)}` : ''}` : settings.syncStatus === 'failed' ? `失败 · ${settings.syncError || '未知错误'}` : '本机队列待同步'}</div>
-              {workerDiagnostics && <div className="rounded-xl bg-[#f7f8fb] px-3 py-2.5 text-[11px] leading-relaxed text-[#61708a]"><div>云端任务：待执行 {workerDiagnostics.counts.pending || 0} · 执行中 {workerDiagnostics.counts.running || 0} · 已完成 {workerDiagnostics.counts.done || 0} · 失败 {workerDiagnostics.counts.failed || 0}</div>{workerDiagnostics.recent[0] && <div className="mt-1 break-words">最近诊断：{workerDiagnostics.recent[0].message}</div>}<div className="mt-1 text-[#99a2b3]">读取于 {formatMomentTime(workerDiagnostics.checkedAt)}</div></div>}
+              {workerDiagnostics && <div className="rounded-xl bg-[#f7f8fb] px-3 py-2.5 text-[11px] leading-relaxed text-[#61708a]">
+                <div className="font-medium text-[#16945c]">Worker / D1 当前可读</div>
+                <div className="mt-1">云端任务：待执行 {workerDiagnostics.counts.pending || 0} · 执行中 {workerDiagnostics.counts.running || 0} · 已完成 {workerDiagnostics.counts.done || 0} · 失败 {workerDiagnostics.counts.failed || 0}</div>
+                {workerDiagnostics.recent[0] && <div className="mt-1 break-words">最近一条历史诊断（发生于 {formatMomentTime(workerDiagnostics.recent[0].createdAt)}）：{workerDiagnostics.recent[0].message}</div>}
+                <div className="mt-1 text-[#99a2b3]">本次成功读取于 {formatMomentTime(workerDiagnostics.checkedAt)}</div>
+              </div>}
             </div>
           </section>
 

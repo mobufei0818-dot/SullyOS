@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { outboxToSyncPayload } from './momentsSync';
+import { hasPendingMomentsSyncWork, isD1DailyLimitError, outboxToSyncPayload } from './momentsSync';
 
 const outbox = Array.from({ length: 230 }, (_, index) => ({
   id: `event-${index}`, type: 'post' as const, payload: { postId: `post-${index}` }, createdAt: index, retryCount: 0,
@@ -25,5 +25,17 @@ describe('朋友圈 Worker 同步分批契约', () => {
     expect(payload.events).toHaveLength(0);
     expect(payload.tasks).toHaveLength(200);
     expect(payload.tasks.slice(-30).map(item => item.id)).toEqual(delayed.map(item => item.id));
+  });
+
+  it('能区分 D1 日额度历史错误和其它同步失败', () => {
+    expect(isD1DailyLimitError("D1_ERROR: Your account has exceeded D1's free tier daily row read limit.")).toBe(true);
+    expect(isD1DailyLimitError('Worker HTTP 500: upstream timeout')).toBe(false);
+  });
+
+  it('无 outbox 且无 pending 任务时视为无待同步内容', () => {
+    expect(hasPendingMomentsSyncWork([], [])).toBe(false);
+    expect(hasPendingMomentsSyncWork([], [{ ...jobs[0], state: 'done' }])).toBe(false);
+    expect(hasPendingMomentsSyncWork([], [jobs[0]])).toBe(true);
+    expect(hasPendingMomentsSyncWork([outbox[0]], [])).toBe(true);
   });
 });

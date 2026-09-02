@@ -12,6 +12,16 @@ const normalizeWorkerUrl = (url: string) => url.trim().replace(/\/+$/, '');
 export const isMomentsWorkerReady = (config?: MomentsWorkerConfig | null): config is MomentsWorkerConfig =>
   Boolean(config?.url?.trim());
 
+/** Cloudflare D1 免费额度恢复后，用于识别可以被成功诊断覆盖的旧错误。 */
+export const isD1DailyLimitError = (message?: string): boolean =>
+  /exceeded\s+D1(?:'s)?\s+free\s+tier\s+daily\s+row\s+(?:read|write)\s+limit/i.test(message || '');
+
+/** 没有 outbox 且没有 pending 任务时，“立即重试”应当得出“无需同步”的成功结论。 */
+export const hasPendingMomentsSyncWork = (
+  items: MomentsSyncOutboxItem[],
+  jobs: MomentsPendingJob[],
+): boolean => items.length > 0 || jobs.some(job => job.state === 'pending');
+
 /**
  * 把本地朋友圈 outbox 以幂等批次同步到已部署的 AMSG Worker 的 /moments 路由。
  * Worker 只接收事件/任务摘要，不接触聊天密钥；同步失败直接抛出，调用方保留 outbox 等待下一次重试。
