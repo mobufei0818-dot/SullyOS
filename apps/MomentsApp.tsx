@@ -5,12 +5,12 @@ import { DB } from '../utils/db';
 import { putImageBlob } from '../utils/blobRef';
 import { processImageToBlob } from '../utils/file';
 import TokenImg from '../components/os/TokenImg';
-import type { CharacterProfile, GalleryImage, MemoryFragment, MomentsComment, MomentsEventType, MomentsInteractionMode, MomentsMediaRef, MomentsPendingJob, MomentsPost, MomentsPostingMode, MomentsProfile, MomentsReaction, MomentsSettings, MomentsTempStranger, MomentsTempTranscript, MomentsVisibilityMode, MomentsApiConfig, MomentsWorkerConfig, MomentsWorkerDiagnostics } from '../types';
+import type { CharacterProfile, GalleryImage, MemoryFragment, MomentsComment, MomentsEventLedgerEntry, MomentsEventType, MomentsInteractionMode, MomentsMediaRef, MomentsPendingJob, MomentsPost, MomentsPostingMode, MomentsProfile, MomentsReaction, MomentsSettings, MomentsTempStranger, MomentsTempTranscript, MomentsVisibilityMode, MomentsApiConfig, MomentsWorkerConfig, MomentsWorkerDiagnostics } from '../types';
 import { generateChatImage, isImageGenerationConfigured } from '../utils/imageGeneration';
 import { fetchMomentsModels, isMomentsApiReady, momentsApiFromMain, momentsApiFromPreset, planMomentsCharacterPost, planMomentsInteractions, planMomentsNpcCharacterProfile, planMomentsNpcProfiles, planMomentsStranger, planMomentsStrangerCharacterProfile, replyMomentsStranger, testMomentsApi, type MomentsInteractionActorContext } from '../utils/momentsApi';
 import { acknowledgeMomentsDeliveries, claimMomentsTask, completeMomentsTask, getMomentsWorkerDiagnostics, isMomentsWorkerReady, outboxToSyncPayload, pullMomentsDeliveries, pullMomentsTasks, syncMomentsOutbox } from '../utils/momentsSync';
 import { ActiveMsgStore } from '../utils/activeMsgStore';
-import { mirrorMomentsEventToMemoryPalace, removeMomentsPostFromMemoryPalace, removeMomentsSourcesFromMemoryPalace } from '../utils/momentsMemoryPalace';
+import { mirrorMomentsEventToMemoryPalace, removeMomentsPostFromMemoryPalace, removeMomentsSourcesFromMemoryPalace, repairMomentsMemoryPalaceForCharacter, type MomentsMemoryEventDetail } from '../utils/momentsMemoryPalace';
 import { reportRelationshipJealousyEvents, setRelationshipJealousyForceEnabled } from '../utils/relationshipBackend';
 import { MemoryNodeDB } from '../utils/memoryPalace/db';
 import { buildCollaborationContextSnapshot, selectCollaborationMemories } from '../features/collaboration/context';
@@ -119,6 +119,68 @@ const randomPasserbyActorsForPost = (postId: string): MomentsProfile[] => {
       friendshipState: 'temporary' as const,
       updatedAt: Date.now(),
     };
+  });
+};
+
+const actorNameFromMomentsSnapshot = (
+  actorId: string | undefined,
+  post: MomentsPost | undefined,
+  comments: MomentsComment[],
+  reactions: MomentsReaction[],
+  profiles: MomentsProfile[],
+) => {
+  if (!actorId) return '';
+  return comments.find(item => item.actorId === actorId)?.actorName
+    || reactions.find(item => item.actorId === actorId)?.actorName
+    || (post?.authorId === actorId ? post.authorName : '')
+    || profiles.find(item => item.id === actorId)?.displayName
+    || '';
+};
+
+/** 用事件对应的正文/姓名补齐记忆桥，避免长期记忆只剩“参与了评论”这类空动作。 */
+const buildMomentsMemoryEventDetail = (args: {
+  entry: Pick<MomentsEventLedgerEntry, 'actorId' | 'sourceId'>;
+  post?: MomentsPost;
+  comments?: MomentsComment[];
+  reactions?: MomentsReaction[];
+  media?: MomentsMediaRef[];
+  profiles?: MomentsProfile[];
+}): MomentsMemoryEventDetail => {
+  const { entry, post } = args;
+  const comments = args.comments || [];
+  const reactions = args.reactions || [];
+  const profiles = args.profiles || [];
+  const comment = comments.find(item => item.id === entry.sourceId);
+  const reaction = reactions.find(item => item.id === entry.sourceId);
+  const replyTarget = comment?.replyToCommentId
+    ? comments.find(item => item.id === comment.replyToCommentId)?.actorName
+    : actorNameFromMomentsSnapshot(comment?.replyToActorId, post, comments, reactions, profiles);
+  const mediaDescription = (args.media || []).map(item => item.prompt?.trim()).filter(Boolean).slice(0, 3).join('；');
+  return {
+    actorName: comment?.actorName || reaction?.actorName || actorNameFromMomentsSnapshot(entry.actorId, post, comments, reactions, profiles),
+    content: comment?.content,
+    replyToActorName: replyTarget,
+    mediaDescription,
+  };
+};
+
+const loadMomentsMemoryEventDetail = async (
+  entry: Pick<MomentsEventLedgerEntry, 'actorId' | 'sourceId' | 'postId'>,
+  post?: MomentsPost,
+): Promise<MomentsMemoryEventDetail> => {
+  if (!entry.postId) return {};
+  const [comments, reactions, media, actorProfile] = await Promise.all([
+    DB.getMomentsCommentsByPostId(entry.postId),
+    DB.getMomentsReactionsByPostId(entry.postId),
+    DB.getMomentsMediaByPostId(entry.postId),
+    DB.getMomentsProfile(entry.actorId),
+  ]);
+  const comment = comments.find(item => item.id === entry.sourceId);
+  const targetActorId = comment?.replyToActorId;
+  const targetProfile = targetActorId ? await DB.getMomentsProfile(targetActorId) : undefined;
+  return buildMomentsMemoryEventDetail({
+    entry, post, comments, reactions, media,
+    profiles: [actorProfile, targetProfile].filter((item): item is MomentsProfile => Boolean(item)),
   });
 };
 
@@ -247,8 +309,8 @@ const MomentsApp: React.FC = () => {
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
   const loadData = useCallback(async () => {
-    const [storedProfile, storedPosts, storedSettings, allGallery, storedStrangers, storedJobs, storedNpcs] = await Promise.all([
-      DB.getMomentsProfile(USER_PROFILE_ID), DB.getMomentsPosts(), DB.getMomentsSettings(), DB.getGalleryImages(), DB.getMomentsTempStrangers(), DB.getMomentsPendingJobs(), DB.getMomentsProfilesByActorType('npc'),
+    const [storedProfile, storedPosts, storedSettings, allGallery, storedStrangers, storedJobs, storedNpcs, storedLedger] = await Promise.all([
+      DB.getMomentsProfile(USER_PROFILE_ID), DB.getMomentsPosts(), DB.getMomentsSettings(), DB.getGalleryImages(), DB.getMomentsTempStrangers(), DB.getMomentsPendingJobs(), DB.getMomentsProfilesByActorType('npc'), DB.getMomentsEventLedger(),
     ]);
     const globalAmsg = await ActiveMsgStore.getGlobalConfig().catch(() => null);
     const sharedWorker = globalAmsg?.workerUrl?.trim()
@@ -312,6 +374,30 @@ const MomentsApp: React.FC = () => {
       await DB.saveMomentsProfile(next);
       return next;
     }));
+    // 旧版把已阅、图片、点赞和无正文评论都拆成了长期记忆。
+    // 每次进入朋友圈都用原始账本幂等校正，无需用户手动删除已经产生的脏节点。
+    const mediaSnapshot = Object.fromEntries(mediaEntries) as Record<string, MomentsMediaRef[]>;
+    const reactionSnapshot = Object.fromEntries(reactionEntries) as Record<string, MomentsReaction[]>;
+    const commentSnapshot = Object.fromEntries(commentEntries) as Record<string, MomentsComment[]>;
+    const profileSnapshot = [resolvedProfile, ...syncedFriends, ...storedNpcs];
+    const postSnapshot = new Map(nextPosts.map(post => [post.id, post]));
+    const detailsBySourceId = Object.fromEntries(storedLedger.map(entry => {
+      const post = entry.postId ? postSnapshot.get(entry.postId) : undefined;
+      return [entry.sourceId, buildMomentsMemoryEventDetail({
+        entry, post,
+        comments: entry.postId ? commentSnapshot[entry.postId] : [],
+        reactions: entry.postId ? reactionSnapshot[entry.postId] : [],
+        media: entry.postId ? mediaSnapshot[entry.postId] : [],
+        profiles: profileSnapshot,
+      })];
+    }));
+    await Promise.all(syncedFriends.flatMap(friend => friend.characterId ? [repairMomentsMemoryPalaceForCharacter({
+      charId: friend.characterId,
+      selfActorId: friend.id,
+      entries: storedLedger,
+      posts: nextPosts,
+      detailsBySourceId,
+    })] : []));
     setProfile(resolvedProfile);
     setTimelineProfile(current => current.id === USER_PROFILE_ID ? resolvedProfile : current);
     setPosts(nextPosts);
@@ -323,9 +409,9 @@ const MomentsApp: React.FC = () => {
     // 已转正的旧 NPC 行保留作幂等凭据，但不再作为“可添加的临时 NPC”显示。
     setNpcProfiles(storedNpcs.filter(npc => npc.friendshipState !== 'friend' && !npc.characterId));
     setTempStrangers(storedStrangers.filter(stranger => !stranger.addedAsFriendAt));
-    setMediaByPost(Object.fromEntries(mediaEntries));
-    setReactionsByPost(Object.fromEntries(reactionEntries));
-    setCommentsByPost(Object.fromEntries(commentEntries));
+    setMediaByPost(mediaSnapshot);
+    setReactionsByPost(reactionSnapshot);
+    setCommentsByPost(commentSnapshot);
     setGallery(allGallery.sort((a, b) => b.timestamp - a.timestamp));
     setDataReady(true);
   }, [apiConfig, characters, userProfile.avatar, userProfile.name]);
@@ -412,6 +498,8 @@ const MomentsApp: React.FC = () => {
       visibilitySnapshot: sourcePost?.visibility, status: entry.type === 'delete' ? 'deleted' as const : 'active' as const,
     };
     await DB.saveMomentsEventLedger(ledgerEntry);
+    const needsMemoryDetail = ['post', 'seen', 'comment', 'reply', 'share'].includes(entry.type);
+    const memoryDetail = needsMemoryDetail ? await loadMomentsMemoryEventDetail(ledgerEntry, sourcePost) : undefined;
     // 删除事件只用于撤销远端旧内容，不能再给角色写入一条“该动态仍可见”的记忆索引。
     if (entry.type !== 'delete') {
       // “有可见权”不等于“已看见”。索引只写给事实参与者、seen 事件中的角色，或手动转发的接收者。
@@ -431,7 +519,7 @@ const MomentsApp: React.FC = () => {
     const targetCharacterIds = unique([directCharacterId, ...deliveredCharacterIds].filter(Boolean));
     if (targetCharacterIds.length && entry.postId) {
       await Promise.all(targetCharacterIds.map(async charId => {
-        const memoryNodeId = await mirrorMomentsEventToMemoryPalace({ charId, entry: ledgerEntry, post: sourcePost, selfActorId: `moments:character:${charId}` });
+        const memoryNodeId = await mirrorMomentsEventToMemoryPalace({ charId, entry: ledgerEntry, post: sourcePost, selfActorId: `moments:character:${charId}`, detail: memoryDetail });
         if (memoryNodeId) await DB.saveMomentsMemoryIndex({ id: `moments-palace-${entry.sourceId}-${charId}`, actorId: `moments:character:${charId}`, sourceId: entry.sourceId, postId: entry.postId, memoryNodeId, createdAt });
       }));
     }
