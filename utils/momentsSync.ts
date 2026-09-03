@@ -208,17 +208,25 @@ export const outboxToSyncPayload = (items: MomentsSyncOutboxItem[], jobs: Moment
   const eventItems = items.filter(item => item.type !== 'interaction' || item.payload?.dueAt == null).slice(0, 200);
   const taskItems = items.filter(item => item.type === 'interaction' && item.payload?.dueAt != null).slice(0, 200);
   const jobItems = jobs.filter(job => ['pending', 'cancelled', 'done', 'failed'].includes(job.state)).slice(0, Math.max(0, 200 - taskItems.length));
-  return {
-  userId,
-  events: eventItems.map(item => ({ id: item.id, type: item.type, payload: item.payload, createdAt: item.createdAt })),
-  tasks: [
+  // 旧版本可能把同一个互动同时留在 pending_jobs 与 sync_outbox。两者是不同 IndexedDB
+  // 表，单表主键挡不住跨表重号；上传前按 task id 再收敛一次，避免同批撞 D1 主键。
+  const taskRows = [
     ...jobItems.map(job => ({
       id: job.id, type: job.type, actorId: job.actorId || null, postId: job.postId || null,
       dueAt: job.dueAt, state: job.state, payload: job.payload || {}, threadVersion: job.threadVersion || 1,
       updatedAt: job.updatedAt || job.createdAt,
     })),
     ...taskItems.map(item => ({ id: item.id, type: 'interaction', ...(item.payload || {}), createdAt: item.createdAt })),
-  ],
+  ];
+  const seenTaskIds = new Set<string>();
+  return {
+  userId,
+  events: eventItems.map(item => ({ id: item.id, type: item.type, payload: item.payload, createdAt: item.createdAt })),
+  tasks: taskRows.filter(row => {
+    if (!row.id || seenTaskIds.has(row.id)) return false;
+    seenTaskIds.add(row.id);
+    return true;
+  }),
   receipts: [],
   };
 };

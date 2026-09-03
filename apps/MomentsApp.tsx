@@ -18,6 +18,7 @@ import { MemoryNodeDB } from '../utils/memoryPalace/db';
 import { buildCollaborationContextSnapshot, selectCollaborationMemories } from '../features/collaboration/context';
 import type { MemoryNode } from '../utils/memoryPalace/types';
 import { resolveCharTimeZone } from '../utils/timezone';
+import { selectActiveMomentsNpcProfiles } from '../utils/momentsIdentity';
 import { ensureMomentsRuntime, markMomentsRuntimeResyncRequired } from '../utils/momentsRuntimeRecovery';
 
 const USER_PROFILE_ID = 'moments:user';
@@ -240,7 +241,7 @@ const MomentMediaGrid = React.memo(({ media, onOpen, onGenerate, generatingIds }
         return placeholder ? (
           <button type="button" key={item.id} className="flex aspect-square flex-col items-center justify-center gap-1.5 bg-gradient-to-br from-[#f2efff] via-[#faf7ff] to-[#fff1f6] px-3 text-center" onClick={() => onGenerate(item)}>
             <Sparkle size={22} className={generating ? 'animate-pulse text-violet-400' : 'text-violet-400'} />
-            <span className="line-clamp-3 text-[10px] leading-relaxed text-violet-700">{generating ? '正在合成照片…' : failed ? '合成失败，点击重试' : item.prompt || '点击合成照片'}</span>
+            <span className="line-clamp-3 text-[10px] leading-relaxed text-violet-700">{generating ? '正在合成照片…' : failed ? (item.generationError?.includes('连接在收到响应前中断') ? '线路中断，点击安全重试' : '合成失败，点击重试') : item.prompt || '点击合成照片'}</span>
           </button>
         ) : (
           <button type="button" key={item.id} className="aspect-square overflow-hidden bg-slate-100 text-left" onClick={() => onOpen(item)}>
@@ -393,7 +394,8 @@ const MomentsApp: React.FC = () => {
     const mediaSnapshot = Object.fromEntries(mediaEntries) as Record<string, MomentsMediaRef[]>;
     const reactionSnapshot = Object.fromEntries(reactionEntries) as Record<string, MomentsReaction[]>;
     const commentSnapshot = Object.fromEntries(commentEntries) as Record<string, MomentsComment[]>;
-    const profileSnapshot = [resolvedProfile, ...syncedFriends, ...storedNpcs];
+    const activeStoredNpcs = selectActiveMomentsNpcProfiles(storedNpcs, syncedFriends);
+    const profileSnapshot = [resolvedProfile, ...syncedFriends, ...activeStoredNpcs];
     const postSnapshot = new Map(nextPosts.map(post => [post.id, post]));
     const detailsBySourceId = Object.fromEntries(storedLedger.map(entry => {
       const post = entry.postId ? postSnapshot.get(entry.postId) : undefined;
@@ -420,8 +422,8 @@ const MomentsApp: React.FC = () => {
     setSharedAmsgWorker(sharedWorker);
     setPendingJobs(storedJobs);
     setFriends(syncedFriends);
-    // 已转正的旧 NPC 行保留作幂等凭据，但不再作为“可添加的临时 NPC”显示。
-    setNpcProfiles(storedNpcs.filter(npc => npc.friendshipState !== 'friend' && !npc.characterId));
+    // 已转正标记、同一来源下的重复提取项都不再作为独立 NPC 进入页面或云端运行表。
+    setNpcProfiles(activeStoredNpcs);
     setTempStrangers(storedStrangers.filter(stranger => !stranger.addedAsFriendAt));
     setMediaByPost(mediaSnapshot);
     setReactionsByPost(reactionSnapshot);
@@ -1360,7 +1362,13 @@ const MomentsApp: React.FC = () => {
         description: npc?.bio || '', systemPrompt: '', memories: [],
         ...(npc?.bio ? { imageProfile: { appearancePrompt: npc.bio, referenceMode: 'identity' as const } } : {}),
       };
-      const generated = await generateChatImage({ prompt: media.prompt, config: apiConfig, char: author || fallback, includeCharacter: media.includeCharacter === true });
+      const generated = await generateChatImage({
+        prompt: media.prompt,
+        config: apiConfig,
+        char: author || fallback,
+        includeCharacter: media.includeCharacter === true,
+        requestContext: { appName: '朋友圈', purpose: '朋友圈照片合成' },
+      });
       const storedUrl = generated.dataUrl;
       const galleryId = media.galleryImageId || `moments-generated-gallery-${media.id}`;
       await DB.saveGalleryImage({ id: galleryId, charId: author?.id || npc?.id || USER_PROFILE_ID, url: storedUrl, timestamp: Date.now(), savedDate: new Date().toISOString().slice(0, 10), chatContext: [post.content || media.prompt] });
@@ -1368,7 +1376,11 @@ const MomentsApp: React.FC = () => {
       await recordMomentsEvent({ postId: post.id, actorId: post.authorId, type: 'media', sourceId: `${media.id}:ready`, visibleToActorIds: visibleActorIdsForPost(post.visibility), createdAt: Date.now() });
       addToast('朋友圈照片已合成并保存到相册', 'success');
     } catch (error: any) {
-      const message = error?.message || '照片合成失败，请检查生图 API';
+      const rawMessage = error?.message || '照片合成失败，请检查生图 API';
+      const networkInterrupted = error?.name === 'TypeError' || /load failed|failed to fetch|networkerror/i.test(rawMessage);
+      const message = networkInterrupted
+        ? '生图连接在收到响应前中断；朋友圈与聊天使用同一套生图配置。为避免重复扣费没有自动重发，请点击图片手动重试。'
+        : rawMessage;
       await updateMomentMedia(post.id, { ...media, generationStatus: 'failed', generationError: message });
       addToast(message, 'error');
     } finally {
@@ -1419,15 +1431,18 @@ const MomentsApp: React.FC = () => {
     try {
       const plans = await planMomentsNpcProfiles({ config, characters: characters.map(character => ({ id: character.id, name: character.name, description: character.description || '', systemPrompt: character.systemPrompt || '' })) });
       const createdAt = Date.now();
-      const profiles: MomentsProfile[] = plans.map(plan => ({
+      const extractedProfiles: MomentsProfile[] = plans.map(plan => ({
         id: `moments:npc:${plan.sourceCharacterId}:${stableHash(plan.name).toString(36)}`,
         actorType: 'npc', displayName: plan.name, bio: plan.bio, relationLabel: plan.relationLabel,
         parentCharacterId: plan.sourceCharacterId, friendshipState: 'temporary', cover: defaultCover, updatedAt: createdAt,
       }));
+      const profiles = selectActiveMomentsNpcProfiles(extractedProfiles, friends);
+      const planByProfileId = new Map(extractedProfiles.map((profile, index) => [profile.id, plans[index]]));
+      const activePlans = profiles.map(profile => planByProfileId.get(profile.id)!);
       const freshPosts: MomentsPost[] = [];
       const freshMedia: MomentsMediaRef[] = [];
       for (let index = 0; index < profiles.length; index++) {
-        const plan = plans[index]; const npc = profiles[index];
+        const plan = activePlans[index]; const npc = profiles[index];
         if (!plan.initialPost) continue;
         const postId = `moments-npc-post-${npc.id}`;
         const existing = posts.some(post => post.id === postId);

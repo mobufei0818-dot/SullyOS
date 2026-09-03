@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { describeMomentsLocalTime, findImpossibleMomentsTimeClaim, nextMomentsDecisionAt, shouldRunMomentsCron } from './index';
+import { describeMomentsLocalTime, findImpossibleMomentsTimeClaim, MOMENTS_TASK_UPSERT_SQL, nextMomentsDecisionAt, shouldRunMomentsCron } from './index';
 
 describe('moments offline schedule', () => {
+  it('accepts both task primary-key and idempotency-key replays', () => {
+    expect(MOMENTS_TASK_UPSERT_SQL).toContain('ON CONFLICT DO UPDATE');
+    expect(MOMENTS_TASK_UPSERT_SQL).not.toContain('ON CONFLICT(idempotency_key)');
+  });
+
   it('only enters the Moments database path every fifteen minutes', () => {
     const base = Date.UTC(2026, 8, 2, 0, 0, 0);
     expect(shouldRunMomentsCron(base)).toBe(true);

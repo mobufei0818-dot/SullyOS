@@ -27,8 +27,8 @@ describe('朋友圈云端角色运行表核对', () => {
     expect(momentsRuntimeMatchesExpected(payload, [{ ...row, nextDecisionAt: 0 }])).toBe(false);
   });
 
-  it('云端遗留了本地不存在但仍启用的主体时要求重新同步', () => {
+  it('云端遗留任何本地不存在的主体时都要求重新同步清理', () => {
     expect(momentsRuntimeMatchesExpected(payload, [row, { ...row, actorId: 'orphan', displayName: '旧角色' }])).toBe(false);
-    expect(momentsRuntimeMatchesExpected(payload, [row, { ...row, actorId: 'orphan', displayName: '旧角色', enabled: false }])).toBe(true);
+    expect(momentsRuntimeMatchesExpected(payload, [row, { ...row, actorId: 'orphan', displayName: '旧角色', enabled: false }])).toBe(false);
   });
 });

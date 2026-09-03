@@ -1106,7 +1106,7 @@ async function syncRuntime(request, env) {
   }
   let disabled = 0;
   if (asBoolean(body.replaceAll, true)) {
-    const statement = actorIds.length ? env.DB.prepare(`UPDATE moments_actor_runtime SET enabled=0,next_decision_at=0,updated_at=? WHERE user_id=? AND actor_id NOT IN (${actorIds.map(() => "?").join(",")})`).bind(updatedAt, userId, ...actorIds) : env.DB.prepare(`UPDATE moments_actor_runtime SET enabled=0,next_decision_at=0,updated_at=? WHERE user_id=?`).bind(updatedAt, userId);
+    const statement = actorIds.length ? env.DB.prepare(`DELETE FROM moments_actor_runtime WHERE user_id=? AND actor_id NOT IN (${actorIds.map(() => "?").join(",")})`).bind(userId, ...actorIds) : env.DB.prepare(`DELETE FROM moments_actor_runtime WHERE user_id=?`).bind(userId);
     const result = await statement.run();
     disabled = result.meta?.changes || 0;
   }
@@ -1126,6 +1126,18 @@ async function resolveMomentsCredential(env, userId, credentialId) {
 async function writeDiagnostic(db, userId, level, code, message, detail) {
   await db.prepare(`INSERT INTO moments_diagnostics (id,user_id,level,code,message,detail_json,created_at) VALUES (?,?,?,?,?,?,?)`).bind(id(), userId, level, code, message.slice(0, 500), safeJson(detail), now()).run();
 }
+var MOMENTS_TASK_UPSERT_SQL = `INSERT INTO moments_tasks (
+  task_id,user_id,char_id,post_id,task_type,due_at,state,payload_json,thread_version,
+  idempotency_key,attempts,error,created_at,updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,0,NULL,?,?)
+ON CONFLICT DO UPDATE SET
+  due_at=CASE WHEN moments_tasks.state IN ('done','cancelled') AND excluded.state != 'cancelled' THEN moments_tasks.due_at ELSE excluded.due_at END,
+  state=CASE WHEN moments_tasks.state IN ('done','cancelled') AND excluded.state != 'cancelled' THEN moments_tasks.state WHEN moments_tasks.state='running' AND excluded.state='pending' THEN 'running' WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.state ELSE excluded.state END,
+  payload_json=CASE WHEN moments_tasks.state IN ('done','cancelled') AND excluded.state != 'cancelled' THEN moments_tasks.payload_json WHEN moments_tasks.state='running' AND excluded.state='pending' THEN moments_tasks.payload_json WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.payload_json ELSE excluded.payload_json END,
+  thread_version=CASE WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.thread_version ELSE excluded.thread_version END,
+  error=CASE WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.error ELSE excluded.error END,
+  updated_at=MAX(moments_tasks.updated_at,excluded.updated_at)
+WHERE moments_tasks.user_id=excluded.user_id`;
 async function sync(request, env) {
   const body = object(await request.json().catch(() => ({})));
   const userId = asString(body.userId);
@@ -1153,9 +1165,9 @@ async function sync(request, env) {
     const taskId = asString(row.id) || id();
     const payload = object(row.payload || row);
     const idem = asString(row.idempotencyKey) || `task:${taskId}`;
-    const result = await env.DB.prepare(`INSERT INTO moments_tasks (task_id,user_id,char_id,post_id,task_type,due_at,state,payload_json,thread_version,idempotency_key,attempts,error,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,0,NULL,?,?) ON CONFLICT(idempotency_key) DO UPDATE SET due_at=CASE WHEN moments_tasks.state IN ('done','cancelled') AND excluded.state != 'cancelled' THEN moments_tasks.due_at ELSE excluded.due_at END,state=CASE WHEN moments_tasks.state IN ('done','cancelled') AND excluded.state != 'cancelled' THEN moments_tasks.state WHEN moments_tasks.state='running' AND excluded.state='pending' THEN 'running' WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.state ELSE excluded.state END,payload_json=CASE WHEN moments_tasks.state IN ('done','cancelled') AND excluded.state != 'cancelled' THEN moments_tasks.payload_json WHEN moments_tasks.state='running' AND excluded.state='pending' THEN moments_tasks.payload_json WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.payload_json ELSE excluded.payload_json END,thread_version=CASE WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.thread_version ELSE excluded.thread_version END,error=CASE WHEN excluded.updated_at < moments_tasks.updated_at THEN moments_tasks.error ELSE excluded.error END,updated_at=MAX(moments_tasks.updated_at,excluded.updated_at)`).bind(taskId, userId, asString(row.actorId) || asString(payload.actorId) || null, asString(row.postId) || asString(payload.postId) || null, asString(row.type, "interaction"), asNumber(row.dueAt, now()), asString(row.state, "pending"), safeJson(payload), asNumber(row.threadVersion, 1), idem, asNumber(row.createdAt, now()), now()).run();
+    const result = await env.DB.prepare(MOMENTS_TASK_UPSERT_SQL).bind(taskId, userId, asString(row.actorId) || asString(payload.actorId) || null, asString(row.postId) || asString(payload.postId) || null, asString(row.type, "interaction"), asNumber(row.dueAt, now()), asString(row.state, "pending"), safeJson(payload), asNumber(row.threadVersion, 1), idem, asNumber(row.createdAt, now()), now()).run();
     accepted += result.meta?.changes || 0;
-    acceptedTaskIds.push(taskId);
+    if (result.meta?.changes) acceptedTaskIds.push(taskId);
   }
   for (const raw of receipts) {
     const row = object(raw);
@@ -1656,6 +1668,7 @@ var src_default = {
   }
 };
 export {
+  MOMENTS_TASK_UPSERT_SQL,
   src_default as default,
   describeMomentsLocalTime,
   findImpossibleMomentsTimeClaim,

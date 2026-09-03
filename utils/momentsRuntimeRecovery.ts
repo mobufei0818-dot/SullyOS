@@ -24,6 +24,7 @@ import {
   type MomentsRuntimeSyncPayload,
 } from './momentsSync';
 import { resolveCharTimeZone } from './timezone';
+import { selectActiveMomentsNpcProfiles } from './momentsIdentity';
 
 export const MOMENTS_RUNTIME_RESYNC_EVENT = 'sullyos:moments-runtime-resync';
 const PENDING_KEY = 'sullyos_moments_runtime_resync_pending_v1';
@@ -173,7 +174,7 @@ const buildPayload = async (apiConfig: APIConfig, settings: MomentsSettings, wor
       parentCharacterId: existing?.parentCharacterId, updatedAt: existing?.updatedAt || Date.now(),
     };
   });
-  const actors = [...characterActors, ...npcProfiles];
+  const actors = [...characterActors, ...selectActiveMomentsNpcProfiles(npcProfiles, characterActors)];
   const contexts = await buildActorContexts(actors, characters, groups, userProfile?.name || '用户');
   const privacyCandidates = actors.map(actor => ({
     actorId: actor.id,
@@ -241,7 +242,9 @@ const buildPayload = async (apiConfig: APIConfig, settings: MomentsSettings, wor
 export const momentsRuntimeMatchesExpected = (payload: MomentsRuntimeSyncPayload, rows: MomentsRuntimeActorDiagnostic[]): boolean => {
   const actual = new Map(rows.map(row => [row.actorId, row]));
   const expectedIds = new Set(payload.actors.map(actor => actor.actorId));
-  if (rows.some(row => row.enabled && !expectedIds.has(row.actorId))) return false;
+  // replaceAll 的远端运行表必须与本地身份集合完全一致。旧版仅检查“多余且启用”的行，
+  // 导致明确 NPC 转正后的灰色残留永远被当作健康，无法触发自动清理。
+  if (rows.some(row => !expectedIds.has(row.actorId))) return false;
   return payload.actors.every(actor => {
     const row = actual.get(actor.actorId);
     if (!row) return false;

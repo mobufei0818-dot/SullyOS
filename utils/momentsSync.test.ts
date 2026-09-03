@@ -29,6 +29,17 @@ describe('朋友圈 Worker 同步分批契约', () => {
     expect(payload.tasks.slice(-30).map(item => item.id)).toEqual(delayed.map(item => item.id));
   });
 
+  it('同一任务同时残留在 jobs 与 outbox 时只上传一次', () => {
+    const duplicated = [{
+      id: 'job-0', type: 'interaction' as const,
+      payload: { dueAt: 99, postId: 'post-0', idempotencyKey: 'legacy-key' },
+      createdAt: 99, retryCount: 1,
+    }];
+    const payload = outboxToSyncPayload(duplicated, [jobs[0]], 'user-a');
+    expect(payload.tasks.filter(item => item.id === 'job-0')).toHaveLength(1);
+    expect(payload.tasks.find(item => item.id === 'job-0')?.state).toBe('pending');
+  });
+
   it('能区分 D1 日额度历史错误和其它同步失败', () => {
     expect(isD1DailyLimitError("D1_ERROR: Your account has exceeded D1's free tier daily row read limit.")).toBe(true);
     expect(isD1DailyLimitError('Worker HTTP 500: upstream timeout')).toBe(false);

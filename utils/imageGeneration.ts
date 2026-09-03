@@ -73,8 +73,16 @@ export function buildImagePrompt(description: string, config: APIConfig, char?: 
   ].filter(Boolean).join('\n\n');
 }
 
-export async function generateChatImage(input: { prompt: string; config: APIConfig; char: CharacterProfile; includeCharacter?: boolean; }): Promise<{ dataUrl: string; referenceApplied: boolean }> {
+export async function generateChatImage(input: {
+  prompt: string;
+  config: APIConfig;
+  char: CharacterProfile;
+  includeCharacter?: boolean;
+  /** 只影响 API 调用记录标签；生图 URL、Key、模型和请求结构仍完全共用。 */
+  requestContext?: { appName: string; purpose: string };
+}): Promise<{ dataUrl: string; referenceApplied: boolean }> {
   const { config, char } = input;
+  const requestContext = input.requestContext || { appName: '消息', purpose: '聊天生图' };
   const c = config.imageGeneration;
   if (!c?.apiKey) throw new Error('请先在设置 → 其他 API 配置生图 Key');
   if (!c.model) throw new Error('请先在设置 → 其他 API 选择或填写生图模型');
@@ -89,12 +97,12 @@ export async function generateChatImage(input: { prompt: string; config: APIConf
     });
     if (!response.ok) {
       const text = await response.text();
-      recordApiCall({ url, body, status: response.status, ok: false, responseText: text, meta: { appName: '消息', charId: char.id, charName: char.name, purpose: '聊天生图（NovelAI）' }, durationMs: Date.now() - started });
+      recordApiCall({ url, body, status: response.status, ok: false, responseText: text, meta: { ...requestContext, charId: char.id, charName: char.name, purpose: `${requestContext.purpose}（NovelAI）` }, durationMs: Date.now() - started });
       throw new Error(`NovelAI 生图失败：${text.slice(0, 160) || `HTTP ${response.status}`}`);
     }
     const blob = await response.blob();
     const dataUrl = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result)); reader.onerror = () => reject(new Error('读取 NovelAI 图片失败')); reader.readAsDataURL(blob); });
-    recordApiCall({ url, body, status: response.status, ok: true, meta: { appName: '消息', charId: char.id, charName: char.name, purpose: '聊天生图（NovelAI）' }, durationMs: Date.now() - started });
+    recordApiCall({ url, body, status: response.status, ok: true, meta: { ...requestContext, charId: char.id, charName: char.name, purpose: `${requestContext.purpose}（NovelAI）` }, durationMs: Date.now() - started });
     return { dataUrl, referenceApplied: false };
   }
   const base = trimBase(c.baseUrl);
@@ -116,7 +124,9 @@ export async function generateChatImage(input: { prompt: string; config: APIConf
     url = `${base}/images/edits`;
     options = { method: 'POST', headers: { Authorization: `Bearer ${c.apiKey}` }, body: form };
   }
-  const data = await safeFetchJson(url, options, 0, 90_000, { appName: '消息', charId: char.id, charName: char.name, purpose: '聊天生图（OpenAI 兼容）' });
+  // 生图是计费请求，网络断开也不能证明上游没有开始生成，因此保持 0 次自动重试；
+  // 失败后由明确的“点击重试”交给用户决定，避免一次点击产生两笔费用。
+  const data = await safeFetchJson(url, options, 0, 90_000, { ...requestContext, charId: char.id, charName: char.name, purpose: `${requestContext.purpose}（OpenAI 兼容）` });
   const item = data?.data?.[0] || data?.images?.[0];
   const raw = typeof item === 'string' ? item : item?.b64_json || item?.url;
   if (!raw) throw new Error('生图接口没有返回图片，请检查 URL、模型和接口兼容性');
