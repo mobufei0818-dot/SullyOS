@@ -1207,7 +1207,20 @@ async function diagnostics(url, env) {
   const userId = url.searchParams.get("userId")?.trim() || null;
   const counts = await env.DB.prepare(`SELECT state,COUNT(*) AS count FROM moments_tasks ${userId ? "WHERE user_id=?" : ""} GROUP BY state`).bind(...userId ? [userId] : []).all();
   const recent = await env.DB.prepare(`SELECT level,code,message,created_at AS createdAt FROM moments_diagnostics ${userId ? "WHERE user_id=? OR user_id IS NULL" : ""} ORDER BY created_at DESC LIMIT 20`).bind(...userId ? [userId] : []).all();
-  return json({ ok: true, counts: counts.results || [], diagnostics: recent.results || [] });
+  const runtimeActors = userId ? await env.DB.prepare(`SELECT actor_id AS actorId,actor_type AS actorType,display_name AS displayName,
+        posting_mode AS postingMode,enabled,last_decision_at AS lastDecisionAt,next_decision_at AS nextDecisionAt,
+        last_post_at AS lastPostAt,failure_count AS failureCount,updated_at AS updatedAt
+        FROM moments_actor_runtime WHERE user_id=? ORDER BY display_name ASC LIMIT 80`).bind(userId).all() : { results: [] };
+  return json({ ok: true, counts: counts.results || [], diagnostics: recent.results || [], runtimeActors: runtimeActors.results || [] });
+}
+async function runtimeStatus(url, env) {
+  const userId = url.searchParams.get("userId")?.trim();
+  if (!userId) return json({ error: "userId is required" }, 400);
+  const rows = await env.DB.prepare(`SELECT actor_id AS actorId,actor_type AS actorType,display_name AS displayName,
+      posting_mode AS postingMode,enabled,last_decision_at AS lastDecisionAt,next_decision_at AS nextDecisionAt,
+      last_post_at AS lastPostAt,failure_count AS failureCount,updated_at AS updatedAt
+      FROM moments_actor_runtime WHERE user_id=? ORDER BY actor_id ASC LIMIT 80`).bind(userId).all();
+  return json({ ok: true, runtimeActors: rows.results || [] });
 }
 async function listDeliveries(url, env) {
   const userId = url.searchParams.get("userId")?.trim();
@@ -1579,6 +1592,7 @@ var src_default = {
       if (request.method === "POST" && path.endsWith("/deliveries/ack")) return await acknowledgeDeliveries(request, env);
       if (request.method === "POST" && path.endsWith("/tasks/claim")) return await claimTask(request, env);
       if (request.method === "POST" && path.endsWith("/tasks/complete")) return await completeTask(request, env);
+      if (request.method === "GET" && path.endsWith("/runtime-status")) return await runtimeStatus(url, env);
       if (request.method === "GET" && path.endsWith("/diagnostics")) return await diagnostics(url, env);
       return json({ error: "Not found" }, 404);
     } catch (error) {

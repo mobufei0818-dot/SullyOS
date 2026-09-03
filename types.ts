@@ -3796,9 +3796,23 @@ export interface MomentsWorkerConfig {
     userId?: string;
 }
 
+export interface MomentsRuntimeActorDiagnostic {
+    actorId: string;
+    actorType: string;
+    displayName: string;
+    postingMode: string;
+    enabled: boolean;
+    lastDecisionAt?: number;
+    nextDecisionAt: number;
+    lastPostAt?: number;
+    failureCount: number;
+    updatedAt: number;
+}
+
 export interface MomentsWorkerDiagnostics {
     counts: Partial<Record<MomentsPendingJob['state'], number>>;
     recent: Array<{ level: string; code: string; message: string; createdAt: number }>;
+    runtimeActors?: MomentsRuntimeActorDiagnostic[];
     checkedAt: number;
 }
 

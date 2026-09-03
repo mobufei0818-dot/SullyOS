@@ -15,7 +15,7 @@
 //   这里管的只有一样：用户自己那台 Worker 上跑的这份 bundle 是哪天的。
 // 2026-09-02 r3：关系主动消息在思念值与阈值都达到 100 且真正发送成功后，
 // 将纯频率计量器重置为 0/30，重新开始下一轮；不触碰性格、好感或关系数据。
-export const AMSG_BUNDLE_VERSION = '2026-09-03.r1.upstream-schedule-restraint';
+export const AMSG_BUNDLE_VERSION = '2026-09-03.r2.moments-runtime-recovery';
 
 const readBundleDate = (value: string): number | null => {
   const match = /^(\d{4})-(\d{2})-(\d{2})(?:\.|$)/.exec(value.trim());

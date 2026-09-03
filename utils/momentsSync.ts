@@ -1,4 +1,4 @@
-import type { MomentsActorType, MomentsInteractionMode, MomentsPendingJob, MomentsPostingMode, MomentsSyncOutboxItem, MomentsWorkerConfig, MomentsWorkerDiagnostics } from '../types';
+import type { MomentsActorType, MomentsInteractionMode, MomentsPendingJob, MomentsPostingMode, MomentsRuntimeActorDiagnostic, MomentsSyncOutboxItem, MomentsWorkerConfig, MomentsWorkerDiagnostics } from '../types';
 
 export interface MomentsSyncPayload {
   userId: string;
@@ -156,6 +156,36 @@ export async function acknowledgeMomentsDeliveries(config: MomentsWorkerConfig, 
   await postJson(config, '/moments/deliveries/ack', { userId, deliveryIds: deliveryIds.slice(0, 200) });
 }
 
+const parseRuntimeActors = (value: unknown): MomentsRuntimeActorDiagnostic[] =>
+  (Array.isArray(value) ? value : [])
+    .filter((row: any) => row && typeof row.actorId === 'string')
+    .map((row: any) => ({
+      actorId: row.actorId,
+      actorType: String(row.actorType || ''),
+      displayName: String(row.displayName || row.actorId),
+      postingMode: String(row.postingMode || 'off'),
+      enabled: row.enabled === true || Number(row.enabled) === 1,
+      ...(Number(row.lastDecisionAt) > 0 ? { lastDecisionAt: Number(row.lastDecisionAt) } : {}),
+      nextDecisionAt: Number(row.nextDecisionAt) || 0,
+      ...(Number(row.lastPostAt) > 0 ? { lastPostAt: Number(row.lastPostAt) } : {}),
+      failureCount: Number(row.failureCount) || 0,
+      updatedAt: Number(row.updatedAt) || 0,
+    }));
+
+/** 系统启动时只核对角色运行表，避免为了自动修复顺带扫描任务和诊断日志。 */
+export async function getMomentsRuntimeActors(config: MomentsWorkerConfig, userId: string): Promise<MomentsRuntimeActorDiagnostic[]> {
+  if (!isMomentsWorkerReady(config)) throw new Error('朋友圈 Worker URL 尚未配置');
+  const query = new URLSearchParams({ userId });
+  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/runtime-status?${query}`, {
+    headers: { ...(config.clientToken?.trim() ? { 'X-Client-Token': config.clientToken.trim() } : {}) },
+  });
+  const text = await response.text();
+  let data: any = null;
+  try { data = text ? JSON.parse(text) : null; } catch { /* handled below */ }
+  if (!response.ok) throw new Error(data?.error || `Worker HTTP ${response.status}: ${text.slice(0, 160)}`);
+  return parseRuntimeActors(data?.runtimeActors);
+}
+
 export async function getMomentsWorkerDiagnostics(config: MomentsWorkerConfig, userId: string): Promise<MomentsWorkerDiagnostics> {
   if (!isMomentsWorkerReady(config)) throw new Error('朋友圈 Worker URL 尚未配置');
   const query = new URLSearchParams({ userId });
@@ -170,7 +200,8 @@ export async function getMomentsWorkerDiagnostics(config: MomentsWorkerConfig, u
   for (const row of Array.isArray(data?.counts) ? data.counts : []) {
     if (row && typeof row.state === 'string') counts[row.state as MomentsPendingJob['state']] = Number(row.count) || 0;
   }
-  return { counts, recent: Array.isArray(data?.diagnostics) ? data.diagnostics : [], checkedAt: Date.now() };
+  const runtimeActors = parseRuntimeActors(data?.runtimeActors);
+  return { counts, recent: Array.isArray(data?.diagnostics) ? data.diagnostics : [], runtimeActors, checkedAt: Date.now() };
 }
 
 export const outboxToSyncPayload = (items: MomentsSyncOutboxItem[], jobs: MomentsPendingJob[], userId: string): MomentsSyncPayload => {

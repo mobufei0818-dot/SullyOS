@@ -31,6 +31,7 @@ import {
 } from '../../utils/cfProvision';
 import { isAmsgServerVersionAtLeast } from '../../utils/amsgWorkerVersion';
 import { trackEvent } from '../../utils/analytics';
+import { markMomentsRuntimeResyncRequired } from '../../utils/momentsRuntimeRecovery';
 
 // 满血链路吃满这些 worker 特性（amsg-server 2.6.0-next.4+）。探测不到端点（老部署
 // 404 → null）或缺任何一项，就亮「重新部署」提示——worker 跑在用户自己的账号里，
@@ -556,6 +557,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
       }
       setProvisionStep('正在建表…');
       const { warnings } = await ActiveMsgClient.connect();
+      markMomentsRuntimeResyncRequired('worker-connected');
       await refresh();
       warnings.forEach((warning) => addToast(warning.message, 'info'));
       addToast('已连接成功，主动消息 2.0 可以用了。', 'success');
@@ -583,6 +585,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         instantChatEnabled: config.instantChatEnabled,
       });
       const { warnings } = await ActiveMsgClient.connect();
+      markMomentsRuntimeResyncRequired('worker-reconnected');
       await refresh();
       addToast('已连接成功，主动消息 2.0 可以用了。', 'success');
       // 连上了但有一块是哑的（最典型是 VAPID 没配齐：任务建得成、到点一条都推不出去，
@@ -626,8 +629,11 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         addToast(result.message, 'success');
         try {
           await ActiveMsgClient.connect();
+          markMomentsRuntimeResyncRequired('worker-updated');
           await refresh();
         } catch (error: any) {
+          // Worker 代码已经换过，即使紧接着的验证失败也保留补登记标记；联网恢复后全局守护器会重试。
+          markMomentsRuntimeResyncRequired('worker-updated-connect-pending');
           addToast(
             `后端已更新，但紧接着的验证没过：${error?.message || '未知原因'}。手动点一下「重新连接并验证」。`,
             'error',

@@ -38,7 +38,9 @@
 - `GET /moments/tasks?userId=...&dueBefore=...`：读取到期任务；
 - `POST /moments/tasks/claim`：原子认领一条到期任务；
 - `POST /moments/tasks/complete`：报告任务完成、失败、取消或重新排队；
-- `GET /moments/diagnostics?userId=...`：查看任务计数和最近诊断。
+- `GET /moments/runtime-status?userId=...`：系统启动时仅核对角色运行表，不扫描任务和诊断日志；
+- `GET /moments/diagnostics?userId=...`：查看任务计数、最近诊断，以及每位主体的启用档位、上次/下次检查、
+  上次发帖和连续失败数。
 
 `utils/momentsSync.ts` 已使用这些带前缀的路径，并发送 `X-Client-Token`。OPTIONS 预检同时兼容
 `X-Client-Token` 与旧的 `X-Moments-Token`。
@@ -53,6 +55,8 @@
   再用一次统一调用规划所有正式角色、明确 NPC、2–5 位随机路人的点赞/评论/相互回复，不逐人调用模型；
 - Worker 会优先读取主动消息 2.0 的最新 `fire_pack` 私聊上下文；没有时回落到朋友圈加密快照。
   页面关闭后仍可生成和安排互动，重新打开朋友圈只负责拉取事实并写入本地 IndexedDB；
+- 角色运行表不依赖朋友圈页面挂载：系统启动会低成本核对一次，主动消息 Worker 重连/更新后自动补登记；
+  配置和云端状态健康时不重复写 D1，同步失败会在本机保留标记并退避重试；
 - 旧的页面内十分钟规划仅保留为“未启用离线模式”的兼容路径；启用离线模式后由 Worker 独占判断，避免双发；
 - 阶段 5 的醋意强制主动消息仍走现有关系层/AMSG 链路，不由本模块伪造消息。
 

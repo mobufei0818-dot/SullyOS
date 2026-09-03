@@ -18,6 +18,7 @@ import { MemoryNodeDB } from '../utils/memoryPalace/db';
 import { buildCollaborationContextSnapshot, selectCollaborationMemories } from '../features/collaboration/context';
 import type { MemoryNode } from '../utils/memoryPalace/types';
 import { resolveCharTimeZone } from '../utils/timezone';
+import { ensureMomentsRuntime, markMomentsRuntimeResyncRequired } from '../utils/momentsRuntimeRecovery';
 
 const USER_PROFILE_ID = 'moments:user';
 const DEFAULT_SETTINGS: MomentsSettings = {
@@ -43,6 +44,12 @@ const formatMomentTime = (timestamp: number) => {
   const sameDay = date.toDateString() === now.toDateString();
   if (sameDay) return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
   return `${date.getMonth() + 1}月${date.getDate()}日`;
+};
+const formatMomentScheduleTime = (timestamp: number) => {
+  const date = new Date(timestamp);
+  const today = new Date();
+  const clock = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+  return date.toDateString() === today.toDateString() ? `今天 ${clock}` : `${date.getMonth() + 1}/${date.getDate()} ${clock}`;
 };
 
 const defaultCover = 'linear-gradient(135deg, #5e8da7 0%, #9ab7ba 44%, #e7d3bd 100%)';
@@ -705,7 +712,10 @@ const MomentsApp: React.FC = () => {
     setMomentsApiStatus(next
       ? '已读取主动消息 2.0 Worker；朋友圈将复用同一地址、用户 ID、共享密钥和 D1'
       : '主动消息 2.0 尚未配置 Worker 地址，朋友圈云端同步暂不可用');
-    if (next) void flushMomentsWorker(next);
+    if (next) {
+      markMomentsRuntimeResyncRequired('moments-worker-config-refreshed');
+      void flushMomentsWorker(next);
+    }
   }, [flushMomentsWorker]);
 
   const applyDueMomentsJobs = useCallback(async () => {
@@ -951,6 +961,15 @@ const MomentsApp: React.FC = () => {
       }
     }
   }, [apiConfig, buildInteractionActorContexts, characters, dataReady, friends, gallery, npcProfiles, posts, saveMomentsSettingsPatch, settings.autoInteractionEnabled, settings.characterInteractionModes, settings.characterPostingModes, settings.enabled, settings.momentsApi, settings.npcPostingModes, sharedAmsgWorker]);
+
+  const retryAllMomentsSync = useCallback(async () => {
+    markMomentsRuntimeResyncRequired('moments-manual-retry');
+    await Promise.all([
+      flushMomentsWorker(),
+      ensureMomentsRuntime(apiConfig, { force: true, verify: false }),
+    ]);
+    await refreshMomentsWorkerDiagnostics();
+  }, [apiConfig, flushMomentsWorker, refreshMomentsWorkerDiagnostics]);
 
   const planPostInteractions = useCallback(async (post: MomentsPost, earliestDueAt = 0) => {
     if (!settings.autoInteractionEnabled) return;
@@ -1930,12 +1949,20 @@ const MomentsApp: React.FC = () => {
                 <div className="mt-1">用户 ID：{sharedAmsgWorker?.userId || '未读取'}</div>
                 <div className="mt-1">共享密钥：{sharedAmsgWorker?.clientToken ? '已读取（不会在此处显示）' : '未设置'}</div>
               </div>
-              <div className="flex gap-2"><button type="button" onClick={() => void refreshAmsgWorker()} className="flex-1 rounded-xl bg-[#576b95] py-2.5 text-[12px] font-medium text-white">重新读取配置</button><button type="button" onClick={() => void flushMomentsWorker()} disabled={momentsApiBusy === 'sync' || !sharedAmsgWorker} className="flex-1 rounded-xl border border-[#dfe3ee] py-2.5 text-[12px] font-medium text-[#576b95] disabled:opacity-50">{momentsApiBusy === 'sync' ? '同步中…' : '立即重试同步'}</button></div>
+              <div className="flex gap-2"><button type="button" onClick={() => void refreshAmsgWorker()} className="flex-1 rounded-xl bg-[#576b95] py-2.5 text-[12px] font-medium text-white">重新读取配置</button><button type="button" onClick={() => void retryAllMomentsSync()} disabled={momentsApiBusy === 'sync' || !sharedAmsgWorker} className="flex-1 rounded-xl border border-[#dfe3ee] py-2.5 text-[12px] font-medium text-[#576b95] disabled:opacity-50">{momentsApiBusy === 'sync' ? '同步中…' : '立即重试同步'}</button></div>
               <button type="button" onClick={() => void refreshMomentsWorkerDiagnostics()} disabled={!sharedAmsgWorker} className="w-full rounded-xl border border-[#dfe3ee] py-2.5 text-[12px] font-medium text-[#576b95] disabled:opacity-50">读取 Worker 任务诊断</button>
               <div className="text-[11px] text-[#999]">同步状态：{settings.syncStatus === 'synced' ? `已同步${settings.lastSyncAt ? ` · ${formatMomentTime(settings.lastSyncAt)}` : ''}` : settings.syncStatus === 'failed' ? `失败 · ${settings.syncError || '未知错误'}` : '本机队列待同步'}</div>
               {workerDiagnostics && <div className="rounded-xl bg-[#f7f8fb] px-3 py-2.5 text-[11px] leading-relaxed text-[#61708a]">
                 <div className="font-medium text-[#16945c]">Worker / D1 当前可读</div>
                 <div className="mt-1">云端任务：待执行 {workerDiagnostics.counts.pending || 0} · 执行中 {workerDiagnostics.counts.running || 0} · 已完成 {workerDiagnostics.counts.done || 0} · 失败 {workerDiagnostics.counts.failed || 0}</div>
+                {(workerDiagnostics.runtimeActors || []).length > 0 && <div className="mt-2 space-y-1 border-t border-[#e6e9f0] pt-2">
+                  {(workerDiagnostics.runtimeActors || []).map(actor => <div key={actor.actorId} className="break-words">
+                    <span className={actor.enabled ? 'text-[#16945c]' : 'text-[#99a2b3]'}>{actor.displayName} · {actor.postingMode}</span>
+                    <span> · {actor.enabled ? `下次 ${actor.nextDecisionAt ? formatMomentScheduleTime(actor.nextDecisionAt) : '未排上'}` : '未启用'}</span>
+                    <span> · 上次检查 {actor.lastDecisionAt ? formatMomentTime(actor.lastDecisionAt) : '尚无'}</span>
+                    {actor.failureCount > 0 && <span className="text-[#d95757]"> · 连续失败 {actor.failureCount}</span>}
+                  </div>)}
+                </div>}
                 {workerDiagnostics.recent[0] && <div className="mt-1 break-words">最近一条历史诊断（发生于 {formatMomentTime(workerDiagnostics.recent[0].createdAt)}）：{workerDiagnostics.recent[0].message}</div>}
                 <div className="mt-1 text-[#99a2b3]">本次成功读取于 {formatMomentTime(workerDiagnostics.checkedAt)}</div>
               </div>}
