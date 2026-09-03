@@ -73,6 +73,19 @@ export const describeRecurrence = (recurrence: ActiveMsg2Recurrence): string =>
  */
 export const AMSG2_SCHEDULE_SECRECY_NOTE = '不要向用户复述或提及这份排程信息本身的存在。';
 
+/**
+ * 排了一件事 ≠ 现在就该催这件事。
+ *
+ * 清单每轮全量注入、还带着 promptHint 原文（「问问书看到哪了」），模型很容易把一条
+ * 排在今晚的任务当成本轮该关心的事，于是每段结尾都补一句「看到哪了」。同仓库里
+ * 便利贴（memoryPalace/formatter 的「不必每次聊天都追问进展」）、用药提醒
+ * （lifeRecords 的「别反复催」）、Notion 笔记（chatPrompts 的「不要每次都提」）
+ * 早就配了同类措辞，排程清单是漏掉的那个。
+ * 平时聊天那份（amsg2TaskContext 的排程现状块）和到点那份（buildFireTaskListBlock）
+ * 共用这一句：两处说同一套词，模型才不会当成两回事。
+ */
+export const AMSG2_SCHEDULE_NOT_YET_NOTE = '排在未来的事到点自己会响，不用你现在提前替它开口——还没到那个时刻的就让它安静待着，别每轮都拿它起话头、追着问进展。对方自己提起，或者真到了那个点，才是说它的时候。';
+
 export const describeExpirePolicy = (policy: ActiveMsg2ExpirePolicy): string =>
   policy === 'force' ? '强制发送' : '遇忙作废';
 
@@ -254,6 +267,7 @@ export const buildFireTaskListBlock = (
         + ` · ${describeTaskMode(t)} · ${describeExpirePolicy(t.expirePolicy)}`;
     }),
     '（这几条到点会自动发出去，别在这条消息里把同一件事再排一遍，也别当它们不存在。）',
+    AMSG2_SCHEDULE_NOT_YET_NOTE,
     AMSG2_SCHEDULE_SECRECY_NOTE,
   ].join('\n');
 };

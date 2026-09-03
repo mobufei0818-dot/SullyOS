@@ -117,6 +117,15 @@ export interface BuildChatPayloadResult {
     cleanedApiMessages: Array<{ role: string; content: any }>;
     /** [system, ...cleanedApiMessages, 末尾 bilingual reminder?] —— 主 API 直接发这个 */
     fullMessages: Array<{ role: string; content: any }>;
+    /**
+     * fullMessages 里易变尾段那条 system 的下标；想插在钢印**之前**的块按它定位。
+     *
+     * 「回到你自己」焊在 volatileTail 末尾，靠 recency 抢模型开口前的最后一眼。后来
+     * 贴数组尾巴的块（amsg2 排程清单）会把那一眼抢走——一份带具体内容的待办清单
+     * 摆在最后，模型会当成本轮该办的事。插在这个下标前，钢印就还是最后一句。
+     * -1 = 没有可插的尾段（prompt build 被跳过，或 dev 的 system 合并开关把多条并成了一条）。
+     */
+    volatileTailIndex: number;
     /** 本轮记忆召回的脱敏 Trace；Prompt Build 被整体跳过时不存在。 */
     recallTrace?: RecallTrace;
     /** 调试用：bilingual / mcd 是否实际注入 */
@@ -257,6 +266,7 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
             systemPrompt: '',
             cleanedApiMessages,
             fullMessages: [...cleanedApiMessages],
+            volatileTailIndex: -1,
             flags: {
                 bilingualActive: false,
                 mcdActive: false,
@@ -502,6 +512,8 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
         systemPrompt: systemPrompt + volatileTail,
         cleanedApiMessages: messagesWithWorldbookDepth,
         fullMessages: finalMessages,
+        // 合并开关开着时多条 system 被并进开头一条，下标失去意义 → 交出 -1，调用方退回贴尾。
+        volatileTailIndex: finalMessages === fullMessages ? 1 + messagesWithWorldbookDepth.length : -1,
         recallTrace,
         flags: { bilingualActive, mcdActive, luckinActive, luckinChatActive, mcpChatActive, htmlActive, thinkingActive, promptBuildSkipped: false },
     };

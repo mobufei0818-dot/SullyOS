@@ -236,3 +236,17 @@ describe('timelyByWorker —— 时效段交给 worker，前端这份不重复�
         expect(joined).not.toContain('### 此刻的交流深度');
     });
 });
+
+describe('volatileTailIndex —— 想插在钢印之前的块按它定位', () => {
+    it('指向易变尾段那条 system，「回到你自己」在它末尾', async () => {
+        const payload = await buildChatRequestPayload({ ...baseInput() });
+        // 排程清单这类「有用但不该抢最后一眼」的块插在这个下标前；下标要是错位了，
+        // 块会落进历史消息中间（读起来像用户说的话）或者又跑到钢印后面去。
+        expect(payload.volatileTailIndex).toBeGreaterThan(0);
+        const tail = payload.fullMessages[payload.volatileTailIndex];
+        expect(tail?.role).toBe('system');
+        expect(String(tail?.content)).toContain('回到你自己');
+        // 它前面一条是本轮用户消息（前缀缓存的断点在那儿，插入不影响命中）
+        expect(payload.fullMessages[payload.volatileTailIndex - 1]?.role).toBe('user');
+    });
+});

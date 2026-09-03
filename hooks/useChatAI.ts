@@ -44,7 +44,7 @@ import { ActiveMsgStore } from '../utils/activeMsgStore';
 import { markAmsgStateDirty, startAmsgChatPresence, stopAmsgChatPresence } from '../utils/amsgStateSync';
 import { getLastRealUserMessageAt } from '../utils/amsg2ExpireGuard';
 import { getPendingTasks, hasActiveAiTask, isAmsg2EnabledForChar } from '../utils/amsg2Tasks';
-import { buildAmsg2NoticesText, buildAmsg2TaskContextText, collectAmsg2TaskContext } from '../utils/amsg2TaskContext';
+import { buildAmsg2NoticesText, buildAmsg2TaskContextText, collectAmsg2TaskContext, insertAmsg2TaskContextBlock } from '../utils/amsg2TaskContext';
 import { resolveCharTimeZone } from '../utils/timezone';
 import { announceInstantChatRoute, getInstantChatPending, resolveInstantChatReadiness, sendInstantChatTurn, stageInstantChatExpiredNotices } from '../utils/amsgInstantChat';
 // worker 模块的常量叶子（零运行时依赖，前端引它不带进 worker 环境）：
@@ -1255,7 +1255,13 @@ export const useChatAI = ({
                     userProfile.name,
                 );
                 // 常驻简介让这一块总是非空：没任务时角色也得知道自己随时能排。
-                return [...messages, { role: 'system', content: text }];
+                const block = { role: 'system', content: text };
+                // 插在易变尾段**之前**，不贴数组尾巴：「回到你自己」钢印焊在 volatileTail 末尾，
+                // 靠 recency 抢模型开口前的最后一眼；一份带 promptHint 原文的清单摆在它后面，
+                // 排在今晚的事会被当成本轮就该催的事（「书看到哪了」每轮问一遍的由来）。
+                // 插入点在本轮用户消息之后，前缀缓存的断点更靠前，命中率一个 token 都不受影响。
+                // 工具循环的 loopMessages 是 baseReqBody.messages 追加尾巴，前缀没动，下标照用。
+                return insertAmsg2TaskContextBlock(messages, block, payload.volatileTailIndex);
             };
 
             // ─── Instant Push 分支 ───

@@ -128,3 +128,47 @@ describe('意识流档位', () => {
         expect(getFlowNarrativeKey(21)).toBe('evening');
     });
 });
+
+describe('日程不是给对方列的待办', () => {
+    // 病象：用户随口说「今天想看书」，之后每一轮结尾都被问「书看到哪了」。日程这条路
+    // 走得通——生成侧明写「对话里提到的事必须严格遵循」，意识系那档还把「惦记对方」
+    // 列为推荐动作，对方的计划因此会渗进 slot 的 description；角色也能用
+    // CHANGE_SCHEDULE 往表里写任意文本。而这张表每轮全量注入、贴着生成点。
+    // 「不是台词」那句 footnote 只跟着意识流独白，管不到日程行，所以那两段一直是裸的。
+    const withUserPlan: RenderableSchedule = {
+        slots: [
+            { startTime: '13:00', activity: '写稿' },
+            { startTime: '20:00', activity: '看书', description: '小明说他今天也想看书，顺手翻两页' },
+        ],
+    };
+    const SCOPE = '不是给对方列的待办';
+
+    it('完整日程那份带上分寸句', () => {
+        const out = buildScheduleInjection(withUserPlan, undefined, at(14), { includeFullDay: true });
+        expect(out).toContain('小明说他今天也想看书'); // 内容照给，管的是怎么读它
+        expect(out).toContain(SCOPE);
+        expect(out).toContain('不用追着问进展');
+    });
+
+    it('没有意识流独白时也带 —— 那句「不是台词」管的不是这件事', () => {
+        const out = buildScheduleInjection(withUserPlan, undefined, at(14), { includeFullDay: true });
+        expect(out).not.toContain('不是台词'); // 这份没有独白，footnote 本就不出现
+        expect(out).toContain(SCOPE);
+    });
+
+    it('主动消息到点那份（不列完整日程）同样带', () => {
+        const out = buildScheduleInjection(withUserPlan, '脑子里还转着那段稿子。', at(14), {
+            includeChangeInstruction: true,
+        });
+        expect(out).toContain('不是台词');  // 有独白，footnote 在
+        expect(out).toContain(SCOPE);       // 分寸句也在，两句各管各的
+    });
+
+    it('分寸句在块尾，排在改期教学之后', () => {
+        const out = buildScheduleInjection(withUserPlan, undefined, at(14), {
+            includeFullDay: true,
+            includeChangeInstruction: true,
+        });
+        expect(out.indexOf(SCOPE)).toBeGreaterThan(out.indexOf('CHANGE_SCHEDULE'));
+    });
+});

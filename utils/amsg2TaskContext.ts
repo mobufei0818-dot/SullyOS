@@ -17,7 +17,7 @@ import { DB } from './db';
 import { resolveCharTimeZone } from './timezone';
 import { detectExpiredOccurrences, hasDeliveredProactiveNear } from './amsg2ExpireGuard';
 import {
-  AMSG2_SCHEDULE_SECRECY_NOTE, canExpire, currentOccurrenceMs, describeExpirePolicy,
+  AMSG2_SCHEDULE_NOT_YET_NOTE, AMSG2_SCHEDULE_SECRECY_NOTE, canExpire, currentOccurrenceMs, describeExpirePolicy,
   describeRecurrence, describeTaskMode, formatTaskTime, getPendingTasks, isPendingTask,
   shortTaskId,
 } from './amsg2Tasks';
@@ -214,6 +214,8 @@ export function buildAmsg2TaskContextText(
     parts.push('（想调整就用 schedule/cancel/renew 工具；内容方向变了用 cancel + schedule 重建。'
       + (hasNewThisTurn ? '标着「本轮刚排的」是你这次回复里已经排好的，别再排一条一样的。' : '')
       + '）');
+    // 只在有任务时说：一条都没排的时候没有可催的事，白占一行还提醒模型「催」这件事存在。
+    parts.push(AMSG2_SCHEDULE_NOT_YET_NOTE);
   }
 
   parts.push(...buildNoticeSections(expired, charTz));
@@ -223,6 +225,27 @@ export function buildAmsg2TaskContextText(
   parts.push(AMSG2_SCHEDULE_SECRECY_NOTE.replace('用户', target));
 
   return parts.join('\n');
+}
+
+/**
+ * 把排程块插进本轮要发的消息数组：紧挨易变尾段**之前**，而不是贴数组尾巴。
+ *
+ * 「回到你自己」钢印焊在 volatileTail 末尾，靠 recency 抢模型开口前的最后一眼
+ * （chatRequestPayload 的 volatileTailIndex 就是给这种块定位用的）。这一块贴在它后面
+ * 的那阵子，模型最后读到的是一份带 promptHint 原文的待办清单，于是把排在今晚的任务
+ * 当成本轮就该办的事——用户侧的表现是「说了今天要看书，之后每轮结尾都问看到哪了」。
+ *
+ * 插入点落在本轮用户消息之后，而前缀缓存的断点比它更靠前，所以命中率一个 token 都不动。
+ * volatileTailIndex 为 -1（prompt build 跳过 / dev 的 system 合并开关）时退回贴尾：
+ * 位置不理想，但块本身不能丢——角色得知道自己名下有哪些任务，否则会重复排。
+ */
+export function insertAmsg2TaskContextBlock<T>(
+  messages: T[],
+  block: T,
+  volatileTailIndex: number,
+): T[] {
+  if (volatileTailIndex < 0 || volatileTailIndex > messages.length) return [...messages, block];
+  return [...messages.slice(0, volatileTailIndex), block, ...messages.slice(volatileTailIndex)];
 }
 
 export interface Amsg2TaskContextResult {
