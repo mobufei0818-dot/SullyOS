@@ -24,6 +24,33 @@ const mockCompletion = (content: object) => {
 };
 
 describe('朋友圈评论区相互回复', () => {
+  it('用户帖子中模型漏掉正式角色/NPC时，已入选者会各补一次点赞', async () => {
+    mockCompletion({ interactions: [] });
+    const userPost: MomentsPost = { ...post, authorType: 'user', authorId: 'moments:user', authorName: '林焕培' };
+    const plan = await planMomentsInteractions({
+      config, post: userPost, now: 1_000_000,
+      actors: [
+        actor('moments:character:a', '甲'),
+        { ...actor('moments:npc:b', '乙'), actorType: 'npc' },
+        actor('moments:passerby:1', '路人'),
+      ],
+    });
+
+    expect(plan.interactions.map(item => [item.actorId, item.kind])).toEqual([
+      ['moments:character:a', 'reaction'],
+      ['moments:npc:b', 'reaction'],
+    ]);
+  });
+
+  it('角色自己发帖时仍允许模型自然决定无人互动', async () => {
+    mockCompletion({ interactions: [] });
+    const plan = await planMomentsInteractions({
+      config, post, now: 1_000_000,
+      actors: [actor('moments:character:a', '甲')],
+    });
+    expect(plan.interactions).toEqual([]);
+  });
+
   it('回复轮只保留评论，并保存回复评论者或点赞者的目标', async () => {
     const now = 1_000_000;
     mockCompletion({ interactions: [

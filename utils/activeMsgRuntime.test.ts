@@ -20,7 +20,9 @@ import {
   notePageBecameVisible,
   wasDeliveredWhileAway,
   purgeInboxArtifacts,
+  repairPushSubscriptionIfNeeded,
   refreshPushSubscriptionIfMarked,
+  resetPushSubscriptionRepairForTesting,
   resolveBackfillTimestamp,
   resolveFireExpireDecision,
   resolveInboxFailureAction,
@@ -1366,8 +1368,14 @@ describe('refreshPushSubscriptionIfMarked', () => {
     db.close();
   };
 
+  beforeEach(() => {
+    vi.stubGlobal('Notification', { permission: 'granted' });
+  });
+
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    resetPushSubscriptionRepairForTesting();
     await clearMarker();
   });
 
@@ -1398,6 +1406,54 @@ describe('refreshPushSubscriptionIfMarked', () => {
 
     await expect(refreshPushSubscriptionIfMarked()).resolves.toBe('kept');
     await expect(markerExists()).resolves.toBe(true);
+  });
+});
+
+describe('repairPushSubscriptionIfNeeded', () => {
+  beforeEach(async () => {
+    resetPushSubscriptionRepairForTesting();
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: 'https://worker.example.com' });
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    resetPushSubscriptionRepairForTesting();
+    await ActiveMsgStore.saveGlobalConfig({ workerUrl: '' });
+  });
+
+  it('已授权但本地订阅静默消失 → 自动补登记，不需要 marker', async () => {
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    vi.spyOn(ActiveMsgClient, 'getPushStatus').mockResolvedValue({
+      supported: true, permission: 'granted', hasSubscription: false,
+      vapidConfigured: true, transport: 'web-push',
+    });
+    const register = vi.spyOn(ActiveMsgClient, 'registerPushSubscription').mockResolvedValue(undefined);
+
+    await expect(repairPushSubscriptionIfNeeded()).resolves.toBe('refreshed');
+    expect(register).toHaveBeenCalledTimes(1);
+  });
+
+  it('订阅仍健康 → 不重复登记', async () => {
+    vi.stubGlobal('Notification', { permission: 'granted' });
+    vi.spyOn(ActiveMsgClient, 'getPushStatus').mockResolvedValue({
+      supported: true, permission: 'granted', hasSubscription: true,
+      vapidConfigured: true, transport: 'web-push',
+    });
+    const register = vi.spyOn(ActiveMsgClient, 'registerPushSubscription').mockResolvedValue(undefined);
+
+    await expect(repairPushSubscriptionIfNeeded()).resolves.toBe('no-action');
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it.each(['default', 'denied'] as const)('权限为 %s → 不弹窗、不尝试登记', async (permission) => {
+    vi.stubGlobal('Notification', { permission });
+    const getStatus = vi.spyOn(ActiveMsgClient, 'getPushStatus');
+    const register = vi.spyOn(ActiveMsgClient, 'registerPushSubscription').mockResolvedValue(undefined);
+
+    await expect(repairPushSubscriptionIfNeeded()).resolves.toBe('no-action');
+    expect(getStatus).not.toHaveBeenCalled();
+    expect(register).not.toHaveBeenCalled();
   });
 });
 

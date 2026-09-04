@@ -98,8 +98,14 @@ describe('私聊（apps/Chat.tsx）的用户引用', () => {
 
     it('存相册失败不拖垮发消息：saveGalleryImage 被 try 包住', () => {
         // 输入框在这一步之前已经清空，放任它抛出去就是「图片发着发着没了」
-        const calls = source.match(/DB\.saveGalleryImage\(/g) || [];
-        const guarded = source.match(/try\s*\{\s*await DB\.saveGalleryImage\(/g) || [];
+        // 只检查「用户发送图片」这条路径；文件后半还有聊天生图存相册，它也有自己的
+        // try/catch，但 try 内先做查重和上下文整理，不能拿“try 后必须立刻 save”误判。
+        const sendPath = source.slice(
+            source.indexOf('const savedUserMsgId = await DB.saveMessage(msgPayload)'),
+            source.indexOf('const handleGeneratePhoto'),
+        );
+        const calls = sendPath.match(/DB\.saveGalleryImage\(/g) || [];
+        const guarded = sendPath.match(/try\s*\{\s*await DB\.saveGalleryImage\(/g) || [];
         expect(guarded.length).toBeGreaterThan(0);
         expect(calls).toHaveLength(guarded.length);
     });

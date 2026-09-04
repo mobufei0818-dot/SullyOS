@@ -17,7 +17,9 @@
 // 将纯频率计量器重置为 0/30，重新开始下一轮；不触碰性格、好感或关系数据。
 // 2026-09-04 r1：朋友圈任务同步同时兼容 task_id 与幂等键重放，并在全量运行表同步时
 // 物理清除已经转正或删除的旧 NPC 身份，避免诊断名单残留重复角色。
-export const AMSG_BUNDLE_VERSION = '2026-09-04.r1.moments-task-identity';
+// 2026-09-04 r2：同步上游聊天输出防穿帮清洗规则；通知订阅的静默丢失修复在网页端完成，
+// 不改 D1 表结构与 Cron 频率，但发布同批 Worker bundle 以保证前后端代码基线一致。
+export const AMSG_BUNDLE_VERSION = '2026-09-04.r2.upstream-sanitize';
 
 const readBundleDate = (value: string): number | null => {
   const match = /^(\d{4})-(\d{2})-(\d{2})(?:\.|$)/.exec(value.trim());

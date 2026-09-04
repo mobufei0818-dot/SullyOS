@@ -7091,7 +7091,7 @@ function stripReasoningTags2(content) {
 }
 
 // utils/amsgBundleVersion.ts
-var AMSG_BUNDLE_VERSION = "2026-09-04.r1.moments-task-identity";
+var AMSG_BUNDLE_VERSION = "2026-09-04.r2.upstream-sanitize";
 
 // utils/amsgTaskKinds.ts
 var AMSG_TASK_KIND_KEY = "amsgKind";

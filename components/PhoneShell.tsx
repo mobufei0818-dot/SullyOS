@@ -873,10 +873,9 @@ const PhoneShell: React.FC = () => {
         return (
       <div 
         onClick={() => {
-            // Only ask once when permission is still undecided; don't keep poking blocked/denied browsers.
-            if ('Notification' in window && Notification.permission === 'default') {
-                Notification.requestPermission();
-            }
+            // 解锁只负责解锁。通知授权必须由「设置 → 主动消息 2.0」里的明确按钮触发；
+            // 把权限弹窗藏在锁屏点击里，会让用户一次随手关闭永久变成 denied，随后连带
+            // 依赖推送回传的即时对话一起失效。
             unlock();
         }}
         className="relative w-full h-full bg-cover bg-center cursor-pointer overflow-hidden group font-light select-none overscroll-none"

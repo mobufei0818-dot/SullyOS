@@ -2320,6 +2320,9 @@ const INSTANT_STATUS_CHECK_MAX_FAILURES = 5;
  */
 export const handlePageBecameVisible = (): void => {
   notePageBecameVisible();
+  // 浏览器可能静默回收 PushSubscription，却没有可靠触发 pushsubscriptionchange。
+  // 已授权时在回前台顺手补一次；不会请求权限，也不会在订阅健康时访问 Worker。
+  void repairPushSubscriptionIfNeeded();
   // 先 await flush 落库 round-1 旁白, 再跑 runner 触发 round-2, 避免 "B+A".
   void (async () => {
     await flushInboxToChat();
@@ -2579,6 +2582,12 @@ export const refreshPushSubscriptionIfMarked = async (): Promise<'no-marker' | '
   }
   if (!marked) return 'no-marker';
 
+  // 自动修复只能复用已经授予的权限，绝不在启动、解锁或回前台时偷偷弹授权框。
+  // marker 留着，用户从设置页明确授权后下一次自检会继续补。
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') {
+    return 'kept';
+  }
+
   try {
     await ActiveMsgClient.registerPushSubscription();
     await clearPushSubscriptionChangeMarker();
@@ -2591,6 +2600,54 @@ export const refreshPushSubscriptionIfMarked = async (): Promise<'no-marker' | '
     trackEvent('2.0推送订阅自检失败');
     return 'kept';
   }
+};
+
+// marker 不是可靠事件：iOS/PWA 更新、系统清理站点数据等情况下，本地订阅可能直接
+// 消失而 SW 没机会留下标记。启动和回前台因此还要做一次轻量健康检查。并发入口共用
+// 一个 Promise；失败后一分钟内不重打，防止 visibilitychange 抖动制造请求风暴。
+let pushSubscriptionRepairInFlight: Promise<'no-action' | 'refreshed' | 'kept'> | null = null;
+let pushSubscriptionRepairRetryAt = 0;
+const PUSH_SUBSCRIPTION_REPAIR_RETRY_MS = 60_000;
+
+const runPushSubscriptionRepair = async (): Promise<'no-action' | 'refreshed' | 'kept'> => {
+  const config = await ActiveMsgStore.getGlobalConfig();
+  if (!config.workerUrl?.trim()) return 'no-action';
+
+  // Web Push 的自动修复只在用户已经明确授权后运行；default / denied 都交给设置页按钮。
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return 'no-action';
+
+  const markerResult = await refreshPushSubscriptionIfMarked();
+  if (markerResult === 'refreshed' || markerResult === 'kept') return markerResult;
+
+  try {
+    const status = await ActiveMsgClient.getPushStatus();
+    if (!status.supported || status.transport !== 'web-push' || status.hasSubscription) return 'no-action';
+    await ActiveMsgClient.registerPushSubscription();
+    log.info('检测到本地推送订阅缺失，已自动重新登记到 worker');
+    return 'refreshed';
+  } catch (e) {
+    log.warn('自动修复缺失的推送订阅失败，稍后回到前台时再试', { error: e });
+    trackEvent('2.0推送订阅自动修复失败');
+    return 'kept';
+  }
+};
+
+export const repairPushSubscriptionIfNeeded = (): Promise<'no-action' | 'refreshed' | 'kept'> => {
+  if (pushSubscriptionRepairInFlight) return pushSubscriptionRepairInFlight;
+  if (Date.now() < pushSubscriptionRepairRetryAt) return Promise.resolve('no-action');
+
+  pushSubscriptionRepairInFlight = runPushSubscriptionRepair()
+    .then((result) => {
+      pushSubscriptionRepairRetryAt = result === 'kept' ? Date.now() + PUSH_SUBSCRIPTION_REPAIR_RETRY_MS : 0;
+      return result;
+    })
+    .finally(() => { pushSubscriptionRepairInFlight = null; });
+  return pushSubscriptionRepairInFlight;
+};
+
+export const resetPushSubscriptionRepairForTesting = (): void => {
+  pushSubscriptionRepairInFlight = null;
+  pushSubscriptionRepairRetryAt = 0;
 };
 
 const handleDeepLink = () => {
@@ -2645,10 +2702,10 @@ export const ActiveMsgRuntime = {
         }
 
         // SW 的 pushsubscriptionchange 写完标记后会通知一声：页面开着就立刻消费，
-        // 不用等下次启动。真正的判定/清理都在 refreshPushSubscriptionIfMarked 里，
+        // 不用等下次启动。真正的判定/清理都在 repairPushSubscriptionIfNeeded 里，
         // 通知丢了也没关系（启动兜底会再查一遍标记）。
         if (type === 'active-msg-subscription-change') {
-          void refreshPushSubscriptionIfMarked();
+          void repairPushSubscriptionIfNeeded();
           return;
         }
 
@@ -2724,7 +2781,7 @@ export const ActiveMsgRuntime = {
     // 订阅自检兜底：后台期间 SW 收到 pushsubscriptionchange 写了标记、而通知丢失
     // （页面没开着）时，启动这里把它消费掉。fire-and-forget——它要打网络请求，
     // 不能拦着下面的 inbox flush。
-    void refreshPushSubscriptionIfMarked();
+    void repairPushSubscriptionIfNeeded();
 
     // 启动兜底: 先 flush 落库 (含上次被杀进程时卡在 inbox 的 round-1 旁白), 再跑 runner
     // 触发 round-2, 保证冷启动恢复时旁白也排在 round-2 回复之前.

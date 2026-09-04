@@ -85,9 +85,15 @@ describe('② 订阅刷新接线（SW 标记 ↔ 主线程消费）', () => {
     const src = read('./activeMsgRuntime.ts');
     const init = sliceBetween(src, 'export const ActiveMsgRuntime', 'handleDeepLink();');
     // 启动路径 fire-and-forget 一次
-    expect(init).toContain('void refreshPushSubscriptionIfMarked()');
+    expect(init).toContain('void repairPushSubscriptionIfNeeded()');
     // SW postMessage（页面开着时立即处理）
     expect(init).toContain("type === 'active-msg-subscription-change'");
+  });
+
+  it('锁屏点击不再隐式请求通知权限', () => {
+    const src = read('../components/PhoneShell.tsx');
+    const lockScreen = sliceBetween(src, 'if (isLocked)', '{/* 锁屏柔和淡入');
+    expect(lockScreen).not.toContain('Notification.requestPermission()');
   });
 });
 

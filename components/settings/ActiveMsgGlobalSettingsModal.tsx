@@ -1631,12 +1631,28 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
         <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 space-y-3">
           <div className="flex items-center justify-between gap-3">
             <span className="font-bold text-slate-700">
-              {pushStatus?.transport === 'unified-push' ? 'UnifiedPush 通知' : '通知权限'}
+              {pushStatus?.transport === 'unified-push' ? 'UnifiedPush 通知' : '通知与推送'}
             </span>
             <span className={`text-xs font-bold ${pushStatus?.hasSubscription ? 'text-emerald-600' : 'text-amber-600'}`}>
-              {pushStatus?.hasSubscription ? '已开启' : '未开启'}
+              {pushStatus?.hasSubscription ? '可接收' : '待修复'}
             </span>
           </div>
+          {pushStatus?.transport !== 'unified-push' ? (
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="flex items-center justify-between gap-2 rounded-xl bg-white border border-slate-200 px-3 py-2">
+                <span className="text-slate-400">系统权限</span>
+                <span className={`font-bold ${pushStatus?.permission === 'granted' ? 'text-emerald-600' : 'text-amber-600'}`}>
+                  {pushStatus?.permission === 'granted' ? '已授权' : pushStatus?.permission === 'denied' ? '已拒绝' : pushStatus?.permission === 'default' ? '待授权' : '不支持'}
+                </span>
+              </div>
+              <div className="flex items-center justify-between gap-2 rounded-xl bg-white border border-slate-200 px-3 py-2">
+                <span className="text-slate-400">推送订阅</span>
+                <span className={`font-bold ${pushStatus?.hasSubscription ? 'text-emerald-600' : 'text-amber-600'}`}>
+                  {pushStatus?.hasSubscription ? '已建立' : '未建立'}
+                </span>
+              </div>
+            </div>
+          ) : null}
           <p className="text-xs leading-relaxed text-slate-500">
             这是第二步。只有你真的想让角色在后台主动推送消息时，才需要点。
           </p>
@@ -1669,7 +1685,7 @@ const ActiveMsgGlobalSettingsModal: React.FC<ActiveMsgGlobalSettingsModalProps> 
             disabled={loading}
             className="w-full py-3 bg-violet-500 text-white font-bold rounded-2xl active:scale-95 transition-transform disabled:opacity-50"
           >
-            {loading ? '处理中...' : pushStatus?.transport === 'unified-push' ? '连接 ntfy 并开启通知' : '开启通知与推送'}
+            {loading ? '处理中...' : pushStatus?.transport === 'unified-push' ? '连接 ntfy 并开启通知' : pushStatus?.hasSubscription ? '重新建立推送订阅' : '开启通知与推送'}
           </button>
         </div>
 

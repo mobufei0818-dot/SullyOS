@@ -175,7 +175,9 @@ export async function planMomentsInteractions(args: {
     '你是朋友圈互动规划器。只输出 JSON，不要 Markdown，不要解释。',
     args.replyRound
       ? '用户刚在评论区说了新内容。请一次性规划这一轮自然回复，最多 3 条；候选人可以回复用户、回复已有评论者，或 @ 已点赞的人。互动是相互的，发帖者也可以回复别人。只有确实在回应某条评论时才填写 replyToCommentId/replyToActorId；只是围绕动态继续说话时必须省略目标，作为普通评论。不要让所有人都机械回复最新用户评论。不要再规划普通点赞。'
-      : '为这条朋友圈一次性规划首轮点赞/评论；不要为凑数强行互动，最多 8 条评论。',
+      : args.post.authorType === 'user'
+        ? '为用户发布的这条朋友圈一次性规划首轮点赞/评论；候选名单已经过概率和可见性筛选，其中正式角色与明确 NPC 每人都必须互动一次，随机路人可按自然程度取舍；最多 8 条评论。'
+        : '为这条朋友圈一次性规划首轮点赞/评论；不要为凑数强行互动，最多 8 条评论。',
     '每个人的措辞、亲疏、情绪和边界必须来自该人的 persona、与用户的当前关系、近期私聊；回复另一个角色时还必须参考双方共同经历过的群聊上下文。没有共同上下文就只按当下评论自然回应，不得编造共同经历。',
     '这是一通统一规划调用，不要把不同角色写成同一种语气，也不要让角色知道自己看不到的私聊。',
     '每个 actorId 最多出现一次；可见角色已由系统筛选，不要新增名单外的人。',
@@ -231,6 +233,23 @@ export async function planMomentsInteractions(args: {
         ? Math.min(Math.max(clampDueAt(row.dueAt, now), now + 60_000), now + 60 * 60_000)
         : clampDueAt(row.dueAt, now),
       idempotencyKey: `moments:${args.post.id}:v${args.threadVersion || 1}:${actorId}:${kind}`,
+    });
+  }
+  // 用户帖先在本地完成“谁会刷到”的概率筛选，模型只负责决定点赞还是评论、怎么说。
+  // 模型偶尔返回空数组或漏 actor 时，过去会出现用户发帖后一位正式角色/NPC 都没反应。
+  // 只给已入选的正式角色/明确 NPC 补点赞；随机路人仍由调用方按自己的密度规则处理。
+  if (!args.replyRound && args.post.authorType === 'user') {
+    args.actors.forEach((actor, index) => {
+      if (used.has(actor.id) || actor.id.startsWith('moments:passerby:')) return;
+      used.add(actor.id);
+      interactions.push({
+        actorId: actor.id,
+        actorType: actor.actorType === 'npc' ? 'npc' : 'character',
+        actorName: actor.displayName,
+        kind: 'reaction',
+        dueAt: now + (2 + index * 3) * 60_000,
+        idempotencyKey: `moments:${args.post.id}:v${args.threadVersion || 1}:${actor.id}:reaction`,
+      });
     });
   }
   return { postId: args.post.id, threadVersion: args.threadVersion || 1, interactions: interactions.sort((a, b) => a.dueAt - b.dueAt) };
