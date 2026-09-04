@@ -1579,7 +1579,7 @@ async function removeQueuedRequest(id) {
 }
 
 // worker/sw-keep-alive.ts
-var SW_VERSION = "1.17.0";
+var SW_VERSION = "1.18.0";
 var PING_INTERVAL = 15e3;
 var MAX_MANUAL_ALIVE_MS = 5 * 6e4;
 var ACTIVE_MSG_DB_NAME = "ActiveMsg";
@@ -1608,16 +1608,83 @@ function summarizeAmsgPayload(payload) {
     hasBlob: payload?._blob === true
   };
 }
+var SW_TRACE_DB_NAME = "ActiveMsgSwTrace";
+var SW_TRACE_DB_VERSION = 1;
+var SW_TRACE_STORE = "entries";
+var SW_TRACE_LIMIT = 300;
+var swTraceDbPromise = null;
+function openSwTraceDb() {
+  if (swTraceDbPromise) return swTraceDbPromise;
+  const promise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(SW_TRACE_DB_NAME, SW_TRACE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SW_TRACE_STORE)) {
+        db.createObjectStore(SW_TRACE_STORE, { keyPath: "seq", autoIncrement: true });
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => {
+        db.close();
+        if (swTraceDbPromise === promise) swTraceDbPromise = null;
+      };
+      db.onclose = () => {
+        if (swTraceDbPromise === promise) swTraceDbPromise = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => {
+      if (swTraceDbPromise === promise) swTraceDbPromise = null;
+      reject(request.error);
+    };
+    request.onblocked = () => {
+      if (swTraceDbPromise === promise) swTraceDbPromise = null;
+      reject(new Error("sw trace db blocked"));
+    };
+  });
+  swTraceDbPromise = promise;
+  return promise;
+}
+async function appendSwTrace(entry) {
+  const db = await openSwTraceDb();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(SW_TRACE_STORE, "readwrite");
+    const store = tx.objectStore(SW_TRACE_STORE);
+    store.add(entry);
+    const countRequest = store.count();
+    countRequest.onsuccess = () => {
+      const excess = countRequest.result - SW_TRACE_LIMIT;
+      if (excess <= 0) return;
+      let removed = 0;
+      const cursorRequest = store.openCursor();
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor || removed >= excess) return;
+        cursor.delete();
+        removed += 1;
+        cursor.continue();
+      };
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
 function traceSw(event, payload, extra = {}) {
+  const entry = {
+    ts: (/* @__PURE__ */ new Date()).toISOString(),
+    event,
+    swVersion: SW_VERSION,
+    ...payload !== void 0 ? summarizeAmsgPayload(payload) : {},
+    ...extra
+  };
   try {
-    console.log("[InstantTrace:SW]", {
-      ts: (/* @__PURE__ */ new Date()).toISOString(),
-      event,
-      ...payload !== void 0 ? summarizeAmsgPayload(payload) : {},
-      ...extra
-    });
+    console.log("[InstantTrace:SW]", entry);
   } catch {
   }
+  void appendSwTrace(entry).catch(() => {
+  });
 }
 installReiSW(sw, {
   defaultIcon: "./icons/icon-192.png",
@@ -1676,17 +1743,47 @@ function stopKeepAlive() {
   if (manualKeepAliveCount === 0) manualKeepAliveStartedAt = 0;
   refreshKeepAlive();
 }
+function tracePathOf(url) {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return "?";
+  }
+}
 async function notifyClients(data) {
-  const clients = await sw.clients.matchAll({ type: "window", includeUncontrolled: true });
+  let clients = [];
+  let matchError;
+  try {
+    clients = await sw.clients.matchAll({ type: "window", includeUncontrolled: true });
+  } catch (e) {
+    matchError = e instanceof Error ? e.name : String(e);
+  }
+  let posted = 0;
+  const failures = [];
+  for (const client of clients) {
+    try {
+      client.postMessage(data);
+      posted += 1;
+    } catch (e) {
+      failures.push(e instanceof Error ? e.name : String(e));
+    }
+  }
   traceSw("notify-clients", void 0, {
     type: data.type,
     charId: data.charId,
     sessionId: data.sessionId,
-    count: clients.length
+    count: clients.length,
+    posted,
+    targets: clients.map((client) => ({
+      path: tracePathOf(client.url),
+      visibility: client.visibilityState,
+      focused: client.focused,
+      // 冻结的页面收得下 postMessage，但要等解冻才会处理——只有部分浏览器报这个字段。
+      frozen: client.frozen
+    })),
+    ...failures.length > 0 ? { failures } : {},
+    ...matchError ? { matchError } : {}
   });
-  for (const client of clients) {
-    client.postMessage(data);
-  }
 }
 function fireProactiveTrigger(charId) {
   void notifyClients({ type: "proactive-trigger", charId });
@@ -2074,6 +2171,13 @@ sw.addEventListener("message", (event) => {
     case "GET_SW_VERSION":
       event.ports[0]?.postMessage({ version: SW_VERSION });
       break;
+    case "SW_CHANNEL_PROBE": {
+      const nonce = event.data?.nonce;
+      traceSw("channel-probe-received", void 0, { nonce });
+      event.ports[0]?.postMessage({ type: "sw-channel-probe-port-ack", nonce, swVersion: SW_VERSION });
+      event.waitUntil(notifyClients({ type: "sw-channel-probe-ack", nonce, swVersion: SW_VERSION }));
+      break;
+    }
     case "keepalive-start":
       startKeepAlive();
       break;
