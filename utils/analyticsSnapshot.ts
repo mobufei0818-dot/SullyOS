@@ -204,7 +204,10 @@ export function collectCharSettings(
         日常聊天协同: anyOn(x => x.chatCollaborationEnabled),
         自定义时区: anyOn(x => x.customTimezoneEnabled),
         生活记录注入: anyOn(x => x.lifeRecordEnabled),
-        小红书: anyOn(x => x.xhsEnabled),
+        // 叫「角色小红书」而不是「小红书」：功能启用那条里已经有一个「小红书」，问的是
+        // 全局桥接配没配、开没开。同名不同义会在查询侧混成一个 key，两条事件的数字叠在
+        // 一起，谁也说不清看到的是哪个。角色级的加「角色」前缀，跟角色提示音一个路子。
+        角色小红书: anyOn(x => x.xhsEnabled),
         隐藏系统日志: anyOn(x => x.hideSystemLogs),
         见面轻阅读: anyOn(x => x.dateLightReading),
         观测协议: anyOn(x => x.dateObserve?.enabled),

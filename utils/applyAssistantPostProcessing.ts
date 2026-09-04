@@ -54,6 +54,7 @@ import { normalizeAssistantActionFormatting } from './assistantActionFormat';
 import { markAmsgStateDirty } from './amsgStateSync';
 import { announceScheduleChanges, applyAssistantScheduleChanges } from './scheduleChange';
 import { isBlobRef } from './blobRef';
+import { stripLeakedSourceTags } from './sanitize';
 
 // ─── 模块内辅助 ──────────────────────────────────────────────────────────────
 
@@ -84,8 +85,8 @@ const normalizeAiContent = (raw: string): string => {
     cleaned = cleaned.replace(/<(?:think|thinking|thought)>[\s\S]*$/gi, '');
     cleaned = cleaned.replace(/\[\d{4}[-/年]\d{1,2}[-/月]\d{1,2}.*?\]/g, '');
     cleaned = cleaned.replace(/^[\w一-龥]+:\s*/, '');
-    // Strip source tags [聊天]/[通话]/[约会] leaked from history context — replace with newline to preserve intended splits
-    cleaned = cleaned.replace(/\s*\[(?:聊天|通话|约会)\]\s*/g, '\n');
+    // Strip source tags leaked from history context, including model-mutated forms such as [聊chat].
+    cleaned = stripLeakedSourceTags(cleaned);
     cleaned = cleaned.replace(/\[(?:你|User|用户|System)\s*发送了表情包[:：]\s*(.*?)\]/g, '[[SEND_EMOJI: $1]]');
     return cleaned;
 };

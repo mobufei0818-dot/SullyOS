@@ -15,6 +15,7 @@ import {
     readAllInstantTraces,
     readRecentInstantTraces,
 } from '../utils/instantTraceLog';
+import { shareOrDownloadBlob } from '../utils/shareExport';
 import {
     describeExpirePolicy,
     describeRecurrence,
@@ -162,7 +163,7 @@ const Amsg2DebugPanel: React.FC = () => {
     // 缓冲里一共攒了多少条（列表只显示得下最近几条）。导出按钮报的是这个数，
     // 用户才知道自己交出去的是全部现场、不是屏幕上这几行。
     const [traceTotal, setTraceTotal] = useState(0);
-    const [traceExport, setTraceExport] = useState<'idle' | 'copied' | 'failed'>('idle');
+    const [traceExport, setTraceExport] = useState<'idle' | 'done' | 'failed'>('idle');
     const [nowMs, setNowMs] = useState(() => Date.now());
     // null = 还没拖过，用默认的右上角；拖过之后记实际坐标。不持久化，关掉重开回默认。
     const [position, setPosition] = useState<Amsg2PanelPosition | null>(null);
@@ -228,19 +229,26 @@ const Amsg2DebugPanel: React.FC = () => {
     };
 
     /**
-     * 把整个 trace 缓冲复制到剪贴板。
+     * 把整个 trace 缓冲导出成一个 json 文件。
      *
-     * 只做复制、不做下载：这个按钮的使用场景就是「用户在手机上，隔着屏幕把现场发过来」，
-     * 而 iOS 装成 PWA 之后 blob 下载基本是死的，复制到聊天框才是真能走通的那条路。
-     * 复制失败（没给权限 / 不是安全上下文）就把按钮改成「复制失败」，别假装成功——
-     * 用户会以为已经拿到了，然后粘出来一片空白。
+     * 走 shareOrDownloadBlob（跟导出备份同一条路）而不是自己拼 `<a download>`：这个按钮
+     * 的使用场景就是「用户在手机上，隔着屏幕把现场发过来」，而原生壳 / iOS PWA 里裸的
+     * blob 下载基本是死的——那条路上先试系统分享面板，实在不行才退回浏览器下载。
+     * 失败（分享被拒 / 原生插件挂了）就把按钮改成「导出失败」，别假装成功——
+     * 用户会以为文件已经在手上了。
      */
     const exportTraces = async () => {
         const text = formatInstantTraceLog();
         if (!text) return;
         try {
-            await navigator.clipboard.writeText(text);
-            setTraceExport('copied');
+            const result = await shareOrDownloadBlob({
+                blob: new Blob([text], { type: 'application/json' }),
+                fileName: `sullyos_amsg2_trace_${new Date().toISOString().replace(/[:.]/g, '-')}.json`,
+                shareTitle: 'SullyOS amsg2 trace',
+            });
+            // 用户自己在分享面板上点了取消：既不算成功也不是错，按钮回到原样就行。
+            if (result === 'cancelled') return;
+            setTraceExport('done');
         } catch {
             setTraceExport('failed');
         }
@@ -393,9 +401,9 @@ const Amsg2DebugPanel: React.FC = () => {
                             flexShrink: 0,
                         }}
                     >
-                        {traceExport === 'copied' ? '已复制'
-                            : traceExport === 'failed' ? '复制失败'
-                                : traceTotal === 0 ? '暂无' : `复制全部 (${traceTotal})`}
+                        {traceExport === 'done' ? '已导出'
+                            : traceExport === 'failed' ? '导出失败'
+                                : traceTotal === 0 ? '暂无' : `导出全部 (${traceTotal})`}
                     </button>
                 </div>
                 {traces.length === 0 ? (

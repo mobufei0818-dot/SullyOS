@@ -501,3 +501,33 @@ describe('当前角色设置 · 桌面陪伴与通话形象', () => {
         expectNoLeak(flags);
     });
 });
+
+
+/**
+ * event_data 的行数守卫。
+ *
+ * umami 把事件的每个属性单独存成 event_data 表的一行，所以「一条事件挂几个 key」
+ * 直接就是「一次上报写几行」。这三条快照事件是全仓库仅有的、属性数量上双的事件，
+ * 加起来占了那张表九成的体积——其余五百多个事件全是 0~1 个属性，合计不到一成。
+ *
+ * 所以这里钉的不是正确性，是成本。加 key 一直有种免费的错觉：写的时候只多一行代码，
+ * 账单上是每个用户每次冷启动多一行。撞上限了别直接改这里的数字，先在那条事件里找找
+ * 有没有已经不看了的 key——腾一格出来比加一格便宜。
+ *
+ * 上限是「当前值 + 2」：留一点顺手加的余量，又不至于让人一路加到六十都没人吭声。
+ */
+describe('快照事件的属性宽度', () => {
+    const plainChar = (id: string) => ({ id, name: '小明' } as unknown as CharacterProfile);
+
+    it('当前外观', () => {
+        expect(Object.keys(collectAppearance({} as OSTheme, undefined)).length).toBeLessThanOrEqual(38);
+    });
+
+    it('当前角色设置', () => {
+        expect(Object.keys(collectCharSettings([plainChar('a')], 'a')).length).toBeLessThanOrEqual(38);
+    });
+
+    it('当前功能启用', () => {
+        expect(Object.keys(collectFeatureFlags(poisonedSources())).length).toBeLessThanOrEqual(35);
+    });
+});

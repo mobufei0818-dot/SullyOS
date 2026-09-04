@@ -78,12 +78,26 @@ function installFakeDom(
     });
 }
 
+/**
+ * 四组快照的槽位顺序，跟 analytics.ts 里的 SNAPSHOT_SLOTS 一致。
+ * 不用手动核对是否同步：那边顺序一改，「四个槽位各报各的」那条就会挂。
+ */
+const SLOT_ORDER = ['data-scale', 'appearance', 'char-settings', 'features'] as const;
+type Slot = (typeof SLOT_ORDER)[number];
+
 /** 每个用例都要重新 import：环境变量是在模块加载那一刻读死的。 */
-async function loadModule(configured: boolean) {
+async function loadModule(configured: boolean, slot: Slot = 'data-scale') {
     vi.resetModules();
     vi.stubEnv('VITE_UMAMI_SCRIPT_URL', configured ? SCRIPT_URL : '');
     vi.stubEnv('VITE_UMAMI_WEBSITE_ID', configured ? WEBSITE_ID : '');
-    return import('./analytics');
+    // 模块加载那一刻会掷一次骰子，决定这次冷启动报四组快照里的哪一组。用例要能稳定
+    // 测到指定的那组，这里把骰子按住，import 完就松手——别影响到用例自己的代码。
+    const dice = vi.spyOn(Math, 'random').mockReturnValue(SLOT_ORDER.indexOf(slot) / SLOT_ORDER.length);
+    try {
+        return await import('./analytics');
+    } finally {
+        dice.mockRestore();
+    }
 }
 
 beforeEach(() => {
@@ -461,6 +475,50 @@ describe('规模档位', () => {
         expect(keys).not.toContain('umami.disabled');
         // 唯一允许出现的键是开关本身（用户偏好），而且这次没动过开关，所以应该一个键都没有。
         expect(keys).toHaveLength(0);
+    });
+});
+
+/**
+ * 回归守卫：四组快照事件轮流报，一次页面加载只出一组。
+ *
+ * 这四条是全仓库唯一带几十个属性的事件（外观 36 个、角色设置 36 个、功能启用 33 个、
+ * 数据规模最多 8 个）。umami 把每个属性存成 event_data 的一行，四条一起发就是一次
+ * 冷启动写 113 行——那张表九成的体积是这么来的，其余五百多个事件加起来不到一成。
+ *
+ * 所以「一次只出一组」是这几条事件的成本底线，不是可有可无的优化。哪天有人为了让
+ * 交叉分析好做一点，把某一组挪出轮转变成每次都报，这里就会挂。
+ */
+describe('快照事件的槽位轮转', () => {
+    /** 四组挨个调一遍，返回实际发出去的事件名。 */
+    const fireAll = (a: Awaited<ReturnType<typeof loadModule>>) => {
+        a.trackDataScaleOnce({ ...SCALE });
+        a.trackCurrentAppearanceOnce({ 深色模式: '开' });
+        a.trackCurrentCharSettingsOnce({ 记忆宫殿: '有人开' });
+        a.trackCurrentFeaturesOnce({ 天气: '开' });
+        return tracked.map(([name]) => name);
+    };
+
+    it('一次页面加载只报一组，另外三组静默跳过', async () => {
+        installFakeDom({ withUmami: true });
+        const a = await loadModule(true, 'appearance');
+        expect(fireAll(a)).toEqual(['当前外观']);
+    });
+
+    it('四个槽位各报各的那一条，没有哪组被永久锁死', async () => {
+        const expected = ['数据规模', '当前外观', '当前角色设置', '当前功能启用'];
+        for (let i = 0; i < SLOT_ORDER.length; i++) {
+            installFakeDom({ withUmami: true });
+            const a = await loadModule(true, SLOT_ORDER[i]);
+            expect(fireAll(a)).toEqual([expected[i]]);
+        }
+    });
+
+    it('轮到的那组仍然一次会话只报一次', async () => {
+        installFakeDom({ withUmami: true });
+        const a = await loadModule(true, 'features');
+        a.trackCurrentFeaturesOnce({ 天气: '开' });
+        a.trackCurrentFeaturesOnce({ 天气: '关' });
+        expect(tracked).toHaveLength(1);
     });
 });
 

@@ -236,6 +236,45 @@ export function trackEvent(
  */
 const reportedScales = new Set<string>();
 
+/** 四组快照事件的槽位名。顺序无所谓，只是给下面那个随机数一个可枚举的集合。 */
+const SNAPSHOT_SLOTS = ['data-scale', 'appearance', 'char-settings', 'features'] as const;
+
+/** 快照槽位。四组各自对应一条事件。 */
+export type SnapshotSlot = (typeof SNAPSHOT_SLOTS)[number];
+
+/**
+ * 本次页面加载轮到报哪一组快照——四组里随机挑一组，另外三组这次直接不报。
+ *
+ * 为什么要轮：这四条事件本身次数不多（一次冷启动各一条），但它们是全仓库唯一带几十个
+ * 属性的事件——外观 36 个、角色设置 36 个、功能启用 33 个、数据规模最多 8 个。umami 把
+ * 每个属性存成 event_data 的一行，所以一次冷启动就是 113 行。乘上所有人的启动次数，
+ * 这四条占了 event_data 九成的体积，其余五百多个事件加起来不到一成。四组轮流报之后，
+ * 一次冷启动平均 28 行，同样的问题照样答得出来，账少了四分之三。
+ *
+ * 为什么用随机数而不是「记住上次报的是哪组」：轮转状态一旦要跨页面加载保留，就得往用户
+ * 设备上写东西，那是文件头第 3 条明令禁止的——统计不给自己记账。随机数不留痕，样本量
+ * 一大，四组的分布自然就均了。
+ *
+ * 对查询侧的影响：每组的样本量降到原来的四分之一，算「多少人开了 X」这类比例完全够用。
+ * 会变差的是跨事件关联——以前四条事件在同一次冷启动里发出，现在一次只有一条，
+ * 「开了 MCP 的人数据规模多大」这种交叉问题得靠同一个 session 里的多次冷启动凑齐，
+ * 覆盖率不如从前。真要做这类分析就单独想办法，别把四条又合回去：合回去只是让事件数
+ * 从四条变一条，属性还是那 113 个，event_data 一行都不会少。
+ */
+const activeSnapshotSlot: SnapshotSlot =
+  SNAPSHOT_SLOTS[Math.floor(Math.random() * SNAPSHOT_SLOTS.length)];
+
+/**
+ * 这次冷启动轮到的是不是这一组。
+ *
+ * 取数那侧（analyticsSnapshot 的几个 collector，其中两个要读 IndexedDB）也该先问一句
+ * 再动手，没轮到就别白跑。上报函数内部还会再问一次，两处都判不是重复——取数点漏了
+ * 只是白费一次 CPU，上报点漏了就是白发一条事件。
+ */
+export function shouldReportSnapshot(slot: SnapshotSlot): boolean {
+  return activeSnapshotSlot === slot;
+}
+
 /** 记忆条数档位。区间与公告一致。 */
 export function bucketMemoryCount(count: number): string {
   if (count <= 0) return '0';
@@ -331,6 +370,7 @@ export function trackDataScaleOnce(params: {
   persistedStorage: boolean | null;
   standalone: boolean;
 }): void {
+  if (!shouldReportSnapshot('data-scale')) return;
   if (reportedScales.has('data-scale')) return;
   reportedScales.add('data-scale');
   trackEvent('数据规模', {
@@ -363,6 +403,7 @@ export function trackDataScaleOnce(params: {
  * 所有取值都必须是内置预设的 id。用户自己捏的一律传 'custom'，绝不能传他起的名字。
  */
 export function trackCurrentAppearanceOnce(params: Record<string, string>): void {
+  if (!shouldReportSnapshot('appearance')) return;
   if (reportedScales.has('appearance')) return;
   reportedScales.add('appearance');
   trackEvent('当前外观', params);
@@ -403,6 +444,7 @@ export function anyCharToggle(values: Array<boolean | undefined>, defaultOn: boo
 
 /** 每次会话最多一次，报当前活跃角色的选择 + 全部角色的开关汇总。 */
 export function trackCurrentCharSettingsOnce(params: Record<string, string>): void {
+  if (!shouldReportSnapshot('char-settings')) return;
   if (reportedScales.has('char-settings')) return;
   reportedScales.add('char-settings');
   trackEvent('当前角色设置', params);
@@ -419,6 +461,7 @@ export function trackCurrentCharSettingsOnce(params: Record<string, string>): vo
  * 账号名、服务器名一个字都不进这里。
  */
 export function trackCurrentFeaturesOnce(params: Record<string, string>): void {
+  if (!shouldReportSnapshot('features')) return;
   if (reportedScales.has('features')) return;
   reportedScales.add('features');
   trackEvent('当前功能启用', params);

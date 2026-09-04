@@ -34,7 +34,7 @@ import { isGlobalStreamEnabled, upgradeChatBodyToStream, assembleUpgradedRespons
 import { rewriteStaleWorkerUrl } from '../utils/proxyWorker';
 import { buildFetchFailureDetail, classifyFetchFailure, describeReachabilityProbe, parseTargetUrl, probeOriginReachability, shouldProbeReachability, summarizeFetchRequestBody } from '../utils/networkFailureDiagnosis';
 import { INSTALLED_APPS, HIDDEN_APP_NAMES } from '../constants';
-import { isAnalyticsRequestUrl, trackEvent, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
+import { isAnalyticsRequestUrl, trackEvent, shouldReportSnapshot, trackDataScaleOnce, trackCurrentAppearanceOnce, trackCurrentCharSettingsOnce, trackCurrentFeaturesOnce } from '../utils/analytics';
 import { collectAppearance, collectCharSettings, collectDataScale, collectFeatureFlagsAsync } from '../utils/analyticsSnapshot';
 import { normalizeApiConfig, normalizeApiPreset } from '../utils/apiConfigNormalize';
 import { getCheckPhoneApi, setCheckPhoneApi } from '../utils/checkPhoneApi';
@@ -1040,6 +1040,8 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const scaleReportedRef = useRef(false);
   useEffect(() => {
       if (!isDataLoaded || scaleReportedRef.current) return;
+      // 四组快照轮流报，这次没轮到就连取数都别跑（要读 IndexedDB）。见 utils/analytics.ts。
+      if (!shouldReportSnapshot('data-scale')) return;
       scaleReportedRef.current = true;
       void (async () => {
           trackDataScaleOnce(await collectDataScale(characters));
@@ -1051,12 +1053,13 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   // 拿来决定砍哪个预设会砍反。取数和收敛都在 utils/analyticsSnapshot.ts 里，
   // 用户自己捏的主题、字体、白框 CSS 一律收敛成 custom / 用了，不带他起的名字。
   useEffect(() => {
-      if (!isDataLoaded) return;
+      if (!isDataLoaded || !shouldReportSnapshot('appearance')) return;
       trackCurrentAppearanceOnce(collectAppearance(theme, characters.find(c => c.id === activeCharacterId)));
   }, [isDataLoaded, characters, activeCharacterId, theme]);
 
   useEffect(() => {
       if (!isDataLoaded || characters.length === 0) return;
+      if (!shouldReportSnapshot('char-settings')) return;
       trackCurrentCharSettingsOnce(collectCharSettings(characters, activeCharacterId));
   }, [isDataLoaded, characters, activeCharacterId]);
 
@@ -1071,6 +1074,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
   const featuresReportedRef = useRef(false);
   useEffect(() => {
       if (!isDataLoaded || featuresReportedRef.current) return;
+      if (!shouldReportSnapshot('features')) return;
       featuresReportedRef.current = true;
       void (async () => {
           trackCurrentFeaturesOnce(await collectFeatureFlagsAsync({
