@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { getMomentsRuntimeActors, getMomentsWorkerDiagnostics, hasPendingMomentsSyncWork, isD1DailyLimitError, outboxToSyncPayload } from './momentsSync';
+import { compactMomentsRuntimePayload, getMomentsRuntimeActors, getMomentsWorkerDiagnostics, hasPendingMomentsSyncWork, isD1DailyLimitError, outboxToSyncPayload, syncMomentsRuntime } from './momentsSync';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -88,5 +88,56 @@ describe('朋友圈 Worker 同步分批契约', () => {
     expect(result).toEqual([expect.objectContaining({
       actorId: 'moments:npc:b', postingMode: 'low', enabled: true, nextDecisionAt: 1788409000000,
     })]);
+  });
+
+  it('运行快照会剔除本机图片本体，只保留小型公开 URL 和文字摘要', () => {
+    const hugeImage = `data:image/jpeg;base64,${'A'.repeat(3_000_000)}`;
+    const payload = compactMomentsRuntimePayload({
+      userId: 'user-a', enabled: true, autoInteractionEnabled: true, credentialId: 'moments/default',
+      actors: [{
+        actorId: 'moments:character:a', actorType: 'character', characterId: 'a', displayName: '角色甲',
+        avatar: hugeImage, postingMode: 'high', interactionMode: 'normal', timezoneId: 'Asia/Shanghai', timezoneOffsetMinutes: 480,
+        pack: {
+          persona: '冷静', userRelationship: '朋友', privateChat: '最近聊天', sharedGroupChat: '共同群聊', recentPosts: [],
+          galleryOptions: [
+            { id: 'local-data', url: hugeImage, review: '楼梯间自拍' },
+            { id: 'local-ref', url: 'blobref:gallery/a', review: '窗边咖啡' },
+            { id: 'public', url: 'https://cdn.example/photo.jpg', review: '海边' },
+          ],
+          privacyCandidates: [],
+        },
+      }],
+      updatedAt: 123,
+    });
+    expect(payload.actors[0].avatar).toBeUndefined();
+    expect(payload.actors[0].pack.galleryOptions).toEqual([
+      { id: 'local-data', review: '楼梯间自拍' },
+      { id: 'local-ref', review: '窗边咖啡' },
+      { id: 'public', url: 'https://cdn.example/photo.jpg', review: '海边' },
+    ]);
+    expect(JSON.stringify(payload).length).toBeLessThan(10_000);
+  });
+
+  it('相同运行快照的并发恢复只上传一次，并标记为可恢复后台请求', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const fetchMock = vi.fn(async (..._args: any[]) => {
+      await gate;
+      return new Response(JSON.stringify({ upserted: 1, disabled: 0 }), { status: 200 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const base = {
+      userId: 'user-coalesce', enabled: true, autoInteractionEnabled: true, credentialId: 'moments/default',
+      actors: [],
+    };
+    const first = syncMomentsRuntime({ url: 'https://worker.example' }, { ...base, updatedAt: 100 });
+    const second = syncMomentsRuntime({ url: 'https://worker.example' }, { ...base, updatedAt: 200 });
+    await Promise.resolve();
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual([{ upserted: 1, disabled: 0 }, { upserted: 1, disabled: 0 }]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0][1] as any).__sullyMeta).toEqual(expect.objectContaining({
+      appName: '朋友圈', purpose: '同步朋友圈角色运行快照', background: true,
+    }));
   });
 });

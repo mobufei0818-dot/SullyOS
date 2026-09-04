@@ -46,6 +46,55 @@ export interface MomentsRuntimeSyncPayload {
 
 const normalizeWorkerUrl = (url: string) => url.trim().replace(/\/+$/, '');
 
+type MomentsFetchMeta = {
+  appName: '朋友圈';
+  purpose: string;
+  /** 后台自愈失败会保留在朋友圈诊断里，不应点亮全局 SYSTEM ERROR。 */
+  background: true;
+};
+
+const withMomentsFetchMeta = (init: RequestInit, purpose: string): RequestInit => ({
+  ...init,
+  __sullyMeta: { appName: '朋友圈', purpose, background: true } satisfies MomentsFetchMeta,
+} as RequestInit);
+
+/**
+ * 运行快照只能携带云端可以直接读取的小型公开 URL。
+ * data:/blob:/blobref: 都是本机图片本体或本机令牌；上传它们既无助于 Worker 看图，
+ * 又会让四个角色的 /runtime 请求膨胀到数 MB。
+ */
+export const compactMomentsAssetReference = (value?: string): string | undefined => {
+  const trimmed = value?.trim();
+  if (!trimmed || trimmed.length > 4096) return undefined;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? trimmed : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/** 最后一层硬防线：无论调用方如何组包，/runtime 都不会再夹带本机图片本体。 */
+export const compactMomentsRuntimePayload = (payload: MomentsRuntimeSyncPayload): MomentsRuntimeSyncPayload => ({
+  ...payload,
+  actors: payload.actors.map(actor => {
+    const { avatar: rawAvatar, pack, ...rest } = actor;
+    const avatar = compactMomentsAssetReference(rawAvatar);
+    return {
+      ...rest,
+      ...(avatar ? { avatar } : {}),
+      pack: {
+        ...pack,
+        galleryOptions: (pack.galleryOptions || []).map(option => {
+          const { url: rawUrl, ...summary } = option;
+          const url = compactMomentsAssetReference(rawUrl);
+          return { ...summary, ...(url ? { url } : {}) };
+        }),
+      },
+    };
+  }),
+});
+
 export const isMomentsWorkerReady = (config?: MomentsWorkerConfig | null): config is MomentsWorkerConfig =>
   Boolean(config?.url?.trim());
 
@@ -65,14 +114,14 @@ export const hasPendingMomentsSyncWork = (
  */
 export async function syncMomentsOutbox(config: MomentsWorkerConfig, payload: MomentsSyncPayload): Promise<{ accepted: number; acceptedEventIds: string[]; acceptedTaskIds: string[] }> {
   if (!isMomentsWorkerReady(config)) throw new Error('朋友圈 Worker URL 尚未配置');
-  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/sync`, {
+  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/sync`, withMomentsFetchMeta({
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(config.clientToken?.trim() ? { 'X-Client-Token': config.clientToken.trim() } : {}),
     },
     body: JSON.stringify(payload),
-  });
+  }, '同步朋友圈待办与事件'));
   const text = await response.text();
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* handled below */ }
@@ -87,9 +136,9 @@ export async function syncMomentsOutbox(config: MomentsWorkerConfig, payload: Mo
 export async function pullMomentsTasks(config: MomentsWorkerConfig, userId: string, dueBefore = Date.now()): Promise<MomentsPendingJob[]> {
   if (!isMomentsWorkerReady(config)) throw new Error('朋友圈 Worker URL 尚未配置');
   const query = new URLSearchParams({ userId, dueBefore: String(dueBefore) });
-  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/tasks?${query.toString()}`, {
+  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/tasks?${query.toString()}`, withMomentsFetchMeta({
     headers: { ...(config.clientToken?.trim() ? { 'X-Client-Token': config.clientToken.trim() } : {}) },
-  });
+  }, '拉取朋友圈待执行任务'));
   const text = await response.text();
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* handled below */ }
@@ -100,7 +149,7 @@ export async function pullMomentsTasks(config: MomentsWorkerConfig, userId: stri
 export async function pullMomentsDeliveries(config: MomentsWorkerConfig, userId: string): Promise<Array<{ id: string; taskId: string; payload: Record<string, unknown>; createdAt: number }>> {
   if (!isMomentsWorkerReady(config)) throw new Error('朋友圈 Worker URL 尚未配置');
   const query = new URLSearchParams({ userId });
-  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/deliveries?${query}`, { headers: { ...(config.clientToken?.trim() ? { 'X-Client-Token': config.clientToken.trim() } : {}) } });
+  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/deliveries?${query}`, withMomentsFetchMeta({ headers: { ...(config.clientToken?.trim() ? { 'X-Client-Token': config.clientToken.trim() } : {}) } }, '拉取朋友圈云端投递'));
   const text = await response.text(); let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* handled below */ }
   if (!response.ok) throw new Error(data?.error || `Worker HTTP ${response.status}: ${text.slice(0, 160)}`);
@@ -109,11 +158,11 @@ export async function pullMomentsDeliveries(config: MomentsWorkerConfig, userId:
 
 const postJson = async (config: MomentsWorkerConfig, path: string, body: Record<string, unknown>) => {
   if (!isMomentsWorkerReady(config)) throw new Error('朋友圈 Worker URL 尚未配置');
-  const response = await fetch(`${normalizeWorkerUrl(config.url)}${path}`, {
+  const response = await fetch(`${normalizeWorkerUrl(config.url)}${path}`, withMomentsFetchMeta({
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(config.clientToken?.trim() ? { 'X-Client-Token': config.clientToken.trim() } : {}) },
     body: JSON.stringify(body),
-  });
+  }, path === '/moments/runtime' ? '同步朋友圈角色运行快照' : '提交朋友圈后台状态'));
   const text = await response.text();
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* handled below */ }
@@ -133,9 +182,27 @@ export async function syncMomentsRuntime(
   config: MomentsWorkerConfig,
   payload: MomentsRuntimeSyncPayload,
 ): Promise<{ upserted: number; disabled: number }> {
-  const data = await postJson(config, '/moments/runtime', payload as unknown as Record<string, unknown>);
-  return { upserted: Number(data?.upserted || 0), disabled: Number(data?.disabled || 0) };
+  const compacted = compactMomentsRuntimePayload(payload);
+  const key = `${normalizeWorkerUrl(config.url)}\u0000${JSON.stringify({ ...compacted, updatedAt: 0 })}`;
+  const existing = runtimeSyncInFlightByPayload.get(key);
+  if (existing) return existing;
+  const pending = runtimeSyncTail
+    .catch(() => undefined)
+    .then(async () => {
+      const data = await postJson(config, '/moments/runtime', compacted as unknown as Record<string, unknown>);
+      return { upserted: Number(data?.upserted || 0), disabled: Number(data?.disabled || 0) };
+    });
+  runtimeSyncInFlightByPayload.set(key, pending);
+  runtimeSyncTail = pending.then(() => undefined, () => undefined);
+  void pending.then(
+    () => { if (runtimeSyncInFlightByPayload.get(key) === pending) runtimeSyncInFlightByPayload.delete(key); },
+    () => { if (runtimeSyncInFlightByPayload.get(key) === pending) runtimeSyncInFlightByPayload.delete(key); },
+  );
+  return pending;
 }
+
+let runtimeSyncTail: Promise<void> = Promise.resolve();
+const runtimeSyncInFlightByPayload = new Map<string, Promise<{ upserted: number; disabled: number }>>();
 
 export async function claimMomentsTask(config: MomentsWorkerConfig, userId: string, taskId: string): Promise<{ claimed: boolean; task?: MomentsPendingJob }> {
   try {
@@ -176,9 +243,9 @@ const parseRuntimeActors = (value: unknown): MomentsRuntimeActorDiagnostic[] =>
 export async function getMomentsRuntimeActors(config: MomentsWorkerConfig, userId: string): Promise<MomentsRuntimeActorDiagnostic[]> {
   if (!isMomentsWorkerReady(config)) throw new Error('朋友圈 Worker URL 尚未配置');
   const query = new URLSearchParams({ userId });
-  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/runtime-status?${query}`, {
+  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/runtime-status?${query}`, withMomentsFetchMeta({
     headers: { ...(config.clientToken?.trim() ? { 'X-Client-Token': config.clientToken.trim() } : {}) },
-  });
+  }, '核对朋友圈角色运行表'));
   const text = await response.text();
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* handled below */ }
@@ -189,9 +256,9 @@ export async function getMomentsRuntimeActors(config: MomentsWorkerConfig, userI
 export async function getMomentsWorkerDiagnostics(config: MomentsWorkerConfig, userId: string): Promise<MomentsWorkerDiagnostics> {
   if (!isMomentsWorkerReady(config)) throw new Error('朋友圈 Worker URL 尚未配置');
   const query = new URLSearchParams({ userId });
-  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/diagnostics?${query}`, {
+  const response = await fetch(`${normalizeWorkerUrl(config.url)}/moments/diagnostics?${query}`, withMomentsFetchMeta({
     headers: { ...(config.clientToken?.trim() ? { 'X-Client-Token': config.clientToken.trim() } : {}) },
-  });
+  }, '读取朋友圈 Worker 诊断'));
   const text = await response.text();
   let data: any = null;
   try { data = text ? JSON.parse(text) : null; } catch { /* handled below */ }

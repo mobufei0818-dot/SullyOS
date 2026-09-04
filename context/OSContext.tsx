@@ -1273,6 +1273,7 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                   // 完全相反，不分开的话用户只能瞎试。详见 utils/networkFailureDiagnosis.ts。
                   const logId = `log-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
                   const requestMeta = (sendArgs[1] as any)?.__sullyMeta || ambientMetaAtStart;
+                  const backgroundNetworkFailure = requestMeta?.background === true;
                   const recentSuccess = recentSuccessfulFetches.get(requestComparisonKey);
                   const baseDetail = buildFetchFailureDetail({
                       url: urlStr,
@@ -1287,7 +1288,9 @@ export const OSProvider: React.FC<{ children: React.ReactNode }> = ({ children }
                       id: logId,
                       timestamp: Date.now(),
                       type: 'network',
-                      source: 'Network',
+                      // 朋友圈运行快照/任务同步自带本地队列和退避重试。失败仍留日志供诊断，
+                      // 但不应像聊天发送失败一样常驻点亮全局 SYSTEM ERROR。
+                      source: backgroundNetworkFailure ? 'Background Network' : 'Network',
                       message: err.message || 'Fetch Failed',
                       detail: baseDetail,
                   }, ...prev.slice(0, 49)]);

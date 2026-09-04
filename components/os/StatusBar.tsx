@@ -60,14 +60,16 @@ const StatusBar: React.FC = () => {
     initBattery();
   }, []);
 
-  const hasError = systemLogs.length > 0;
+  // 有本地队列和自动退避的后台同步失败仍保留在日志中，但不打断用户当前聊天/浏览。
+  // 手动请求、聊天请求和存储错误继续按原规则点亮全局错误入口。
+  const hasError = systemLogs.some(log => log.source !== 'Background Network');
   const hasIndexedDbBackingStoreError = systemLogs.some(log => {
     const text = `${log.message} ${log.detail || ''}`.toLowerCase();
     return text.includes('backing store') || text.includes('indexeddb.open');
   });
   // 「连不上」这类错误光看日志没用，多半要用户自己在设备上试几刀才能定位，
   // 所以顺手把自查顺序摆在终端里，省得每次都要去群里问。
-  const hasNetworkFailure = systemLogs.some(log => log.type === 'network' && log.source === 'Network');
+  const hasNetworkFailure = systemLogs.some(log => log.type === 'network' && (log.source === 'Network' || log.source === 'Background Network'));
 
   // 三档状态栏布局；旧版 hideStatusBar 存档仍可解析。错误指示器与本设置无关，始终独立渲染。
   const statusBarMode = resolveStatusBarMode(theme.statusBarMode, theme.hideStatusBar);

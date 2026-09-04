@@ -756,8 +756,22 @@ const MomentsApp: React.FC = () => {
           setPendingJobs(prev => prev.map(item => item.id === job.id ? executable : item));
         }
         if (executable.type === 'post' && payload.post && typeof payload.post === 'object') {
-          const scheduledPost = payload.post as MomentsPost;
-          const scheduledMedia = Array.isArray(payload.media) ? payload.media as MomentsMediaRef[] : [];
+          const rawScheduledPost = payload.post as MomentsPost;
+          const localAuthor = friends.find(item => item.id === rawScheduledPost.authorId)
+            || npcProfiles.find(item => item.id === rawScheduledPost.authorId);
+          // 云端运行快照不再携带 base64/blob 图片本体。帖子落回本机时，用稳定的
+          // galleryImageId / authorId 从 IndexedDB 恢复本机图片；公开 https 引用仍可直接使用。
+          const scheduledMedia = (Array.isArray(payload.media) ? payload.media as MomentsMediaRef[] : []).flatMap(media => {
+            if (!media.galleryImageId) return [media];
+            const localImage = gallery.find(image => image.id === media.galleryImageId);
+            if (localImage) return [{ ...media, url: localImage.url, generationStatus: 'ready' as const }];
+            return media.url && !media.url.startsWith('moments-gallery-pending:') ? [media] : [];
+          });
+          const scheduledPost: MomentsPost = {
+            ...rawScheduledPost,
+            ...(localAuthor?.avatar ? { authorAvatar: localAuthor.avatar } : {}),
+            mediaIds: scheduledMedia.map(media => media.id),
+          };
           const exists = posts.some(item => item.id === scheduledPost.id) || (await DB.getMomentsPosts()).some(item => item.id === scheduledPost.id);
           if (!exists) {
             await Promise.all([DB.saveMomentsPost(scheduledPost), DB.saveMomentsVisibilitySnapshot(scheduledPost.visibility), DB.saveMomentsMediaRefs(scheduledMedia)]);
@@ -815,7 +829,7 @@ const MomentsApp: React.FC = () => {
     } finally {
       dueJobsInFlight.current = false;
     }
-  }, [flushMomentsWorker, friends, npcProfiles, posts, reactionsByPost, recordMomentsEvent, sharedAmsgWorker, visibleActorIdsForPost]);
+  }, [flushMomentsWorker, friends, gallery, npcProfiles, posts, reactionsByPost, recordMomentsEvent, sharedAmsgWorker, visibleActorIdsForPost]);
 
   const buildInteractionActorContexts = useCallback(async (actors: MomentsProfile[]): Promise<MomentsInteractionActorContext[]> => {
     const characterIds = unique(actors.map(actor => actor.characterId).filter((id): id is string => Boolean(id)));
