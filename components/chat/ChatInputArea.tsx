@@ -1,11 +1,12 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Alarm, Sparkle, FadersHorizontal, LinkSimple, Star, Briefcase } from '@phosphor-icons/react';
+import { ShareNetwork, Trash, Plus, Smiley, PaperPlaneTilt, Money, BookOpenText, GearSix, Image, Lock, ArrowsClockwise, ChatCircleDots, CalendarBlank, ForkKnife, Coffee, Code, Brain, PencilSimple, BellSimpleRinging, Alarm, Sparkle, FadersHorizontal, LinkSimple, Star, Briefcase, PersonSimpleWalk } from '@phosphor-icons/react';
 import { CharacterProfile, ChatTheme, EmojiCategory, Emoji } from '../../types';
 import { PRESET_THEMES } from './ChatConstants';
 import TokenImg from '../os/TokenImg';
 import { AcnhActionTile } from '../os/acnhIcons';
 import { isIOSStandaloneWebApp } from '../../utils/iosStandalone';
 import { trackEvent } from '../../utils/analytics';
+import SameSpaceComposer, { type SameSpaceComposerProps } from '../../features/sameSpaceChat/SameSpaceComposer';
 
 const EMOJI_PAGE_SIZE = 40;
 
@@ -60,6 +61,8 @@ interface ChatInputAreaProps {
     chromeStyle?: 'soft' | 'flat' | 'floating' | 'pixel';
     /** 动森彩蛋模式：输入栏换成木质草绿圆角。 */
     acnh?: boolean;
+    /** SAME_SPACE_CHAT: absent in group chat and while the feature is off. */
+    sameSpace?: SameSpaceComposerProps;
 }
 
 const ChatInputArea: React.FC<ChatInputAreaProps> = ({
@@ -83,6 +86,7 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
     sendButtonStyle = 'circle',
     chromeStyle = 'soft',
     acnh = false,
+    sameSpace,
 }) => {
     const chatImageInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -408,6 +412,8 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
             <div className={`fixed inset-0 z-[-1] ${isPixelStyle ? 'bg-[#eadfce]/70 backdrop-blur-[2px]' : isDiscordStyle ? 'bg-slate-950/70 backdrop-blur-[2px]' : 'bg-white/60 backdrop-blur-[2px]'}`} />
         )}
         <div className={`sully-chat-inputbar ${shellClass} pb-safe shrink-0 z-40 relative`}>
+            {/* SAME_SPACE_CHAT: compact action/time editor stays inside the existing white composer shell. */}
+            {!selectionMode && sameSpace && <SameSpaceComposer {...sameSpace} dark={isDiscordStyle} pixel={isPixelStyle} />}
             
             {selectionMode ? (
                 <div className={`p-3 flex gap-2 ${isPixelStyle ? 'bg-[#f3e7d6]' : isDiscordStyle ? 'bg-slate-900/60 backdrop-blur-md' : 'bg-white/50 backdrop-blur-md'}`}>
@@ -456,8 +462,8 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                     </div>
                     <button 
                         onClick={onSend} 
-                        disabled={!input.trim()} 
-                        className={`${sendButtonClass} ${input.trim() ? '' : 'opacity-45 shadow-none'}`}
+                        disabled={!input.trim() && !sameSpace?.actionDraft.trim()}
+                        className={`${sendButtonClass} ${input.trim() || sameSpace?.actionDraft.trim() ? '' : 'opacity-45 shadow-none'}`}
                     >
                         {sendButtonStyle === 'pill' ? <span>发送</span> : <PaperPlaneTilt className="w-5 h-5" weight="fill" />}
                     </button>
@@ -637,6 +643,14 @@ const ChatInputArea: React.FC<ChatInputAreaProps> = ({
                             onClickCapture={handleActionsClickCapture}
                         >
                           <div className={`p-6 grid grid-cols-4 gap-8 ${actionsPage === 0 ? '' : 'hidden'}`}>
+                            {/* SAME_SPACE_CHAT: a private-chat-only entry; group chat replaces this entire grid. */}
+                            <button onClick={() => onPanelAction('same-space-toggle')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform relative ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
+                                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${sameSpace ? (isDiscordStyle ? 'bg-violet-500/20 text-violet-300 border-violet-400/40' : 'bg-violet-100 text-violet-600 border-violet-200') : (isDiscordStyle ? 'bg-slate-800 text-violet-300 border-violet-400/20' : 'bg-violet-50 text-violet-500 border-violet-100')}`}>
+                                    <PersonSimpleWalk className="w-6 h-6" weight="bold" />
+                                </div>
+                                <span className="text-xs font-bold">{sameSpace ? '结束同处' : '同处聊天'}</span>
+                                {sameSpace && <span className={`absolute top-0 right-1 w-2.5 h-2.5 rounded-full border-2 ${isDiscordStyle ? 'bg-violet-400 border-slate-900' : 'bg-violet-500 border-white'}`} />}
+                            </button>
                             <button onClick={() => onPanelAction('collaboration')} className={`flex flex-col items-center gap-2 active:scale-95 transition-transform ${acnh ? 'text-[#725d42]' : isDiscordStyle ? 'text-slate-200' : 'text-slate-600'}`}>
                                 <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shadow-sm border ${acnh ? 'bg-white/70 border-[#e6dab4] text-[#7c6ee6]' : isDiscordStyle ? 'bg-slate-800 text-indigo-300 border-indigo-400/20' : 'bg-indigo-50 text-indigo-500 border-indigo-100'}`}>
                                     <Briefcase className="w-6 h-6" weight="fill" />

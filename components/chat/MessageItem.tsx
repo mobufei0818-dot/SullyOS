@@ -19,6 +19,8 @@ import HtmlCard from './HtmlCard';
 import LuckinCard from './LuckinCard';
 import LuckinCheckoutCard from './LuckinCheckoutCard';
 import QixiEventCardView from './QixiEventCard';
+import SameSpaceActionBubble from '../../features/sameSpaceChat/SameSpaceActionBubble';
+import { isSameSpaceActionMessage } from '../../features/sameSpaceChat/model';
 
 // 思考链卡片支持的 12 种风格预设 — 同时被 MessageItem 与 ThinkingChainSettingsModal 复用
 export type ThinkingChainStyleId = 'echo' | 'whisper' | 'minimal' | 'ink' | 'neon' | 'terminal' | 'stellar' | 'tama' | 'pixel' | 'muji' | 'ins' | 'custom';
@@ -2059,6 +2061,11 @@ const MessageItem = React.memo(({
             </div>
         </>
     );
+
+    // SAME_SPACE_CHAT: the metadata flag, never punctuation, chooses the action bubble.
+    if (isSameSpaceActionMessage(m)) {
+        return commonLayout(<SameSpaceActionBubble content={m.content} isUser={isUser} />);
+    }
 
     // [New] Social Card Rendering
     // --- Chat Forward Card ---

@@ -38,6 +38,7 @@ import { cleanApiMessages, flattenImageContentParts } from './promptMessageClean
 import { materializeVisionDescriptions } from './visionApi';
 import type { RecallEntryPoint, RecallTrace } from './memoryPalace/trace';
 import { loadCollaborationFileCabinetBlock } from '../features/collaboration/chatLibrary';
+import { buildSameSpaceChatPrompt } from '../features/sameSpaceChat/model';
 
 export { cleanApiMessages, flattenImageContentParts } from './promptMessageCleanup';
 
@@ -470,6 +471,15 @@ export async function buildChatRequestPayload(input: BuildChatPayloadInput): Pro
             volatileTail += await loadCollaborationFileCabinetBlock(
                 char.id,
                 historyMsgsForPrompt,
+                userProfile?.name || '用户',
+            );
+        }
+        // SAME_SPACE_CHAT: only ordinary ChatApp turns inherit the same-space scene.
+        // Worker-driven proactive messages use another entry point and stay online-only.
+        if (char.sameSpaceChat?.enabled) {
+            volatileTail += buildSameSpaceChatPrompt(
+                char.sameSpaceChat,
+                char.name,
                 userProfile?.name || '用户',
             );
         }

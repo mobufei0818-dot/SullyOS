@@ -101,7 +101,7 @@ describe('私聊（apps/Chat.tsx）的用户引用', () => {
         // 只检查「用户发送图片」这条路径；文件后半还有聊天生图存相册，它也有自己的
         // try/catch，但 try 内先做查重和上下文整理，不能拿“try 后必须立刻 save”误判。
         const sendPath = source.slice(
-            source.indexOf('const savedUserMsgId = await DB.saveMessage(msgPayload)'),
+            source.indexOf('const savedUserMsgId = text ? await DB.saveMessage(msgPayload)'),
             source.indexOf('const handleGeneratePhoto'),
         );
         const calls = sendPath.match(/DB\.saveGalleryImage\(/g) || [];

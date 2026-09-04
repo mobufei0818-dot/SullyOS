@@ -16,6 +16,7 @@ import { formatLifeSimResetCardForContext } from './lifeSimChatCard';
 import { formatQixiEventCardForContext, tryParseQixiEventChatCard } from './qixiChatCard';
 import { formatTransferRecord } from './transferFormat';
 import { formatStatCount } from './videoParser';
+import { isSameSpaceActionMessage, wrapSameSpaceActionForHistory } from '../features/sameSpaceChat/model';
 
 /**
  * 表情包消息的 content 存的是图床 URL，本身不带名字。拼上下文时要靠这个反查出
@@ -100,6 +101,12 @@ export function normalizeMessageContent(
     userName: string,
 ): string {
     const type = msg.type as string;
+
+    // SAME_SPACE_CHAT: preserve who acted when archives/memory summaries consume chat history.
+    if (isSameSpaceActionMessage(msg)) {
+        const actor = msg.role === 'user' ? userName : charName;
+        return wrapSameSpaceActionForHistory(msg.content, actor);
+    }
 
     // 纯视觉类给占位；语音优先使用配套转写，避免把音频资源地址送进上下文。
     if (type === 'image') return '[图片]';

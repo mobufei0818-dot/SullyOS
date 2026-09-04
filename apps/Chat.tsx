@@ -123,6 +123,7 @@ import {
     validateInstallableArtifact,
 } from '../features/collaboration/makers';
 import { upsertMountedWorldbooks } from '../utils/worldbook';
+import { createSameSpaceChatState, getSameSpaceSceneTime } from '../features/sameSpaceChat/model';
 
 const CollaborationWindow = React.lazy(() => import('../features/collaboration/CollaborationWindow'));
 
@@ -184,6 +185,8 @@ const Chat: React.FC = () => {
     // 角色切换「登场」过场是否显示。切换/进入角色时由 useLayoutEffect 在绘制前置真，覆盖住加载、避免闪到新聊天。
     const [showEntry, setShowEntry] = useState(false);
     const [input, setInput] = useState('');
+    // SAME_SPACE_CHAT: action text has its own draft and never pollutes the dialogue box.
+    const [sameSpaceActionDraft, setSameSpaceActionDraft] = useState('');
     const [showPanel, setShowPanel] = useState<'none' | 'actions' | 'emojis' | 'chars'>('none');
     const [collaborationOpen, setCollaborationOpen] = useState(false);
     const [collaborationPreviewAssetId, setCollaborationPreviewAssetId] = useState<string | null>(null);
@@ -428,6 +431,7 @@ const Chat: React.FC = () => {
         [currentThemeId, customThemes],
     );
     const draftKey = `chat_draft_${activeCharacterId}`;
+    const sameSpaceDraftKey = `same_space_action_draft_${activeCharacterId}`;
 
     // Filter categories and emojis by active character's visibility (used for both AI prompt and UI)
     const visibleCategories = useMemo(() => categories.filter(cat => {
@@ -1094,6 +1098,7 @@ const Chat: React.FC = () => {
             loadEmojiData();
             const savedDraft = localStorage.getItem(draftKey);
             setInput(savedDraft || '');
+            setSameSpaceActionDraft(localStorage.getItem(sameSpaceDraftKey) || '');
             if (char) {
                 setSettingsContextLimit(char.contextLimit || 500);
                 setSettingsContextRangeMode(resolveContextRangeMode(char));
@@ -1308,6 +1313,13 @@ const Chat: React.FC = () => {
         else localStorage.removeItem(draftKey);
     };
 
+    // SAME_SPACE_CHAT: preserve an unfinished action per character.
+    const handleSameSpaceActionDraftChange = (val: string) => {
+        setSameSpaceActionDraft(val);
+        if (val.trim()) localStorage.setItem(sameSpaceDraftKey, val);
+        else localStorage.removeItem(sameSpaceDraftKey);
+    };
+
     useLayoutEffect(() => {
         if (!scrollRef.current || selectionMode) return;
         const currentLastId = messages.length > 0 ? messages[messages.length - 1].id : null;
@@ -1431,8 +1443,9 @@ const Chat: React.FC = () => {
 
     // --- Actions ---
 
-    const handleSendText = async (customContent?: string, customType?: MessageType, metadata?: any) => {
-        if (!char || (!input.trim() && !customContent)) return;
+    const handleSendText = async (customContent?: string, customType?: MessageType, metadata?: any, options?: { sameSpaceActionDraft?: string }) => {
+        const stagedAction = options?.sameSpaceActionDraft?.trim() || '';
+        if (!char || (!input.trim() && !customContent && !stagedAction)) return;
         // 只累加内存里的计数，这里不发任何请求；页面切走时才按区间报一次。见 utils/analytics.ts
         noteMessageSent();
         // 借用户"发送"这个手势解锁音频上下文，好让稍后 AI 回复时的白框提示音能顺利播放（移动端自动播放策略）。
@@ -1479,6 +1492,23 @@ const Chat: React.FC = () => {
         }
 
         if (!customContent) { setInput(''); localStorage.removeItem(draftKey); }
+
+        // SAME_SPACE_CHAT: action and dialogue become distinct messages, but this function reaches
+        // the AI trigger only once. Image/emoji/card sends never consume the staged action.
+        if (stagedAction && char.sameSpaceChat?.enabled && !customContent && type === 'text') {
+            await DB.saveMessage({
+                charId: char.id,
+                role: 'user',
+                type: 'text',
+                content: stagedAction,
+                metadata: {
+                    sameSpaceAction: true,
+                    sameSpaceSceneTime: getSameSpaceSceneTime(char.sameSpaceChat),
+                },
+            } as any);
+            setSameSpaceActionDraft('');
+            localStorage.removeItem(sameSpaceDraftKey);
+        }
         
         // 图片 / 表情消息存的是短令牌，图片二进制单独躺在 blob_assets 里，省掉 base64 那 ~33%
         // 的膨胀。同一张图之前存过就直接复用它的令牌；转不动时原样还回这条 data URL，图不会丢。
@@ -1514,7 +1544,7 @@ const Chat: React.FC = () => {
             setReplyTarget(null);
         }
 
-        const savedUserMsgId = await DB.saveMessage(msgPayload);
+        const savedUserMsgId = text ? await DB.saveMessage(msgPayload) : undefined;
 
         if (type === 'image') {
             // 相册是消息的附带记录：保留来源消息引用供收藏/去重使用，但相册写入失败
@@ -1782,7 +1812,7 @@ const Chat: React.FC = () => {
         // 选表情、选分类之类的动作不上报。
         if ([
             'transfer', 'archive', 'settings', 'chrome-css', 'chrome-sound', 'fine-tune',
-            'meetup', 'proactive', 'active-msg-2', 'schedule', 'mcd-request', 'luckin-request',
+            'meetup', 'proactive', 'active-msg-2', 'schedule', 'mcd-request', 'luckin-request', 'same-space-toggle',
             'html-mode-toggle', 'html-mode-settings', 'thinking-settings', 'favorites', 'collaboration',
             // 独立小功能：点一下就是用了一次，跟「打开某个面板」同一性质。
             // send-emoji / select-category 这些是「挑哪一个」，不进名单。
@@ -1791,6 +1821,27 @@ const Chat: React.FC = () => {
             trackEvent('打开聊天功能面板项', { action: type });
         }
         switch (type) {
+            // SAME_SPACE_CHAT: per-character toggle, independent from the full Date app.
+            case 'same-space-toggle': {
+                if (!char) break;
+                setShowPanel('none');
+                if (char.sameSpaceChat?.enabled) {
+                    updateCharacter(char.id, { sameSpaceChat: undefined });
+                    setSameSpaceActionDraft('');
+                    localStorage.removeItem(sameSpaceDraftKey);
+                    void DB.saveMessage({
+                        charId: char.id,
+                        role: 'system',
+                        type: 'system',
+                        content: '已结束同处聊天，恢复线上聊天。',
+                        metadata: { sameSpaceTransition: 'end' },
+                    } as any).then(() => reloadMessages(visibleCountRef.current));
+                } else {
+                    updateCharacter(char.id, { sameSpaceChat: createSameSpaceChatState() });
+                    addToast(`已与${char.name}进入同处聊天`, 'success');
+                }
+                break;
+            }
             case 'collaboration': setShowPanel('none'); setCollaborationOpen(true); break;
             case 'memory-link': setShowPanel('none'); setMemoryRepairOpen(true); break;
             case 'favorites': setShowPanel('none'); setFavoritesOpen(true); break;
@@ -3655,7 +3706,10 @@ const Chat: React.FC = () => {
     }), [emojis, activeCategory, hiddenCategoryIds]);
 
     // Memoize ChatInputArea callbacks
-    const handleSendCallback = useCallback(() => handleSendText(), [char, input, replyTarget]);
+    const handleSendCallback = useCallback(
+        () => handleSendText(undefined, undefined, undefined, { sameSpaceActionDraft }),
+        [char, input, replyTarget, sameSpaceActionDraft],
+    );
     const handleCharSelectCallback = useCallback((id: string) => { setActiveCharacterId(id); setShowPanel('none'); }, []);
     // 角色自定义聊天背景：字段值可能是 blobref 令牌（二进制在 IndexedDB），这里解析成能直接
     // 喂进 CSS url() 的地址；data: / http(s) 之类的非令牌值渲染期原样透传。
@@ -4658,6 +4712,14 @@ const Chat: React.FC = () => {
                     sendButtonStyle={osTheme.chatSendButtonStyle}
                     chromeStyle={osTheme.chatChromeStyle}
                     acnh={acnh}
+                    // SAME_SPACE_CHAT: all UI/state callbacks are passed through one removable prop.
+                    sameSpace={char.sameSpaceChat?.enabled ? {
+                        state: char.sameSpaceChat,
+                        actionDraft: sameSpaceActionDraft,
+                        setActionDraft: handleSameSpaceActionDraftChange,
+                        onStateChange: (state) => updateCharacter(char.id, { sameSpaceChat: state }),
+                        onEnd: () => handlePanelAction('same-space-toggle'),
+                    } : undefined}
                 />
             </div>
 

@@ -5,6 +5,7 @@ import { DB } from './db';
 import { formatLifeSimResetCardForContext } from './lifeSimChatCard';
 import { formatQixiEventCardForContext, tryParseQixiEventChatCard } from './qixiChatCard';
 import { normalizeMessageContent, stickerNameFromUrl, theaterWhenPhrase } from './messageFormat';
+import { isSameSpaceActionMessage, wrapSameSpaceActionForHistory } from '../features/sameSpaceChat/model';
 import { formatTransferRecord } from './transferFormat';
 import { computeCurrentListening, getCurrentSlot } from './charMusicSchedule';
 import { getCharLyricSnippet } from './charLyricCache';
@@ -1166,6 +1167,16 @@ ${userProfile.name} 给你反馈时，别当成约束，当成信任——ta 在
                     if (source === 'story_theater_memory') return `[剧情：${m.metadata?.theaterTitle || '共同经历'}]`;
                     return '[聊天]';
                 })();
+
+                // SAME_SPACE_CHAT: actions are observations, not spoken dialogue.
+                // Name the actor explicitly so neither participant's action is attributed to the other.
+                if (isSameSpaceActionMessage(m)) {
+                    const actor = m.role === 'user' ? (userProfile?.name || '用户') : char.name;
+                    return {
+                        role: m.role,
+                        content: `${timeStr} ${wrapSameSpaceActionForHistory(String(m.content || ''), actor)}`,
+                    };
+                }
                 
                 if (m.replyTo) {
                     // 引用回复：把"被引用的原话"做成独立的上下文框，用户的新回复另起一行突出出来。

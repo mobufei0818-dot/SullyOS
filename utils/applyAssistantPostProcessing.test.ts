@@ -46,6 +46,27 @@ const quotedUserMsg = {
     timestamp: Date.now() - 1000,
 };
 
+// SAME_SPACE_CHAT: dedicated action tags must become metadata-backed action bubbles;
+// ordinary dialogue continues through the existing renderer in the original order.
+describe('同处聊天动作气泡', () => {
+    it('把动作与台词分开落库，且不把内部标签显示给用户', async () => {
+        const charId = `c-same-space-${Date.now()}`;
+        const ctx = makeCtx(charId, []);
+        ctx.instantRender = true;
+        await applyAssistantPostProcessing(
+            '[[SAME_SPACE_ACTION]]把杯子往你那边推了推[[/SAME_SPACE_ACTION]]\n还热，慢点喝。',
+            ctx,
+        );
+
+        const msgs = await DB.getRecentMessagesByCharId(charId, 20);
+        const texts = msgs.filter(m => m.role === 'assistant' && m.type === 'text');
+        expect(texts.map(m => m.content)).toEqual(['把杯子往你那边推了推', '还热，慢点喝。']);
+        expect(texts[0].metadata?.sameSpaceAction).toBe(true);
+        expect(texts[1].metadata?.sameSpaceAction).not.toBe(true);
+        expect(texts.some(m => m.content.includes('SAME_SPACE_ACTION'))).toBe(false);
+    });
+});
+
 describe('renderAndPersist 引用解析', () => {
     it('[[QUOTE:]] 单独成行 (后跟 SEND_EMOJI + 正文) 时引用顺延到第一条文字气泡', async () => {
         const charId = `c-quote-${Date.now()}`;
@@ -651,4 +672,3 @@ describe('ctx.spokenAt — 日程改动按说出口那一刻判', () => {
         expect(notifyScheduleChangeFailed.mock.calls[0][0]).toContain('没有找到对得上的时段');
     });
 });
-

@@ -37,6 +37,7 @@ export const CARD_STRIPPED_FIELDS = [
   'thinkingChainCustomPrompt',
   'thinkingChainCustomCss',
   'chatCollaborationEnabled', // 用户在本机选择的日常聊天注意力模式
+  'sameSpaceChat',             // SAME_SPACE_CHAT: 本机当前同处场景的临时运行状态
 
   // 3) 语言 / 语音 / 组织类本地偏好
   'groupId',                 // 角色分组是发卡人自己的整理方式，指向的分组 id 在接收方本地也不存在

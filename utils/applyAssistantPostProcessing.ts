@@ -36,6 +36,7 @@ import { extractPublishedNoteId, ownedPostToNote } from './xhsFreeRoamOwnership'
 import { selectOwnedPostsForReference } from './xhsOwnedPostReference';
 import { safeFetchJson } from './safeApi';
 import { extractHtmlBlocks } from './htmlPrompt';
+import { splitSameSpaceAssistantOutput } from '../features/sameSpaceChat/model';
 import {
     AgenticToolCtx,
     resolveXhsConfig,
@@ -732,6 +733,35 @@ export async function applyAssistantPostProcessing(
     // 把一段文本 (parseAndExecuteActions / HTML 之外的部分) 渲染成气泡并落库 —— 双语 / 表情 / 引用 / 分段
     // 与原 inline 末尾逻辑一致。抽出来是为了让"执行功能前的本轮正文 A"能在二轮前先展示, 二轮结果 B 复用同一套。
     const renderAndPersist = async (rawContent: string, firstThinkingChain: string | null): Promise<void> => {
+        // SAME_SPACE_CHAT: split dedicated model action markers before the generic parser can
+        // chunk or sanitize them. Dialogue still travels through the existing full pipeline.
+        const sameSpaceSegments = splitSameSpaceAssistantOutput(rawContent);
+        if (sameSpaceSegments.some(segment => segment.kind === 'action')) {
+            let pendingThinking = firstThinkingChain;
+            for (const segment of sameSpaceSegments) {
+                if (!segment.content.trim()) continue;
+                if (segment.kind === 'action') {
+                    await typingPause(Math.min(Math.max(segment.content.length * 35, 350), 1400));
+                    await persistMessage({
+                        charId: char.id,
+                        role: 'assistant',
+                        type: 'text',
+                        content: segment.content.trim(),
+                        metadata: {
+                            ...(mcdInheritMeta || {}),
+                            ...(pendingThinking ? { thinkingChain: pendingThinking } : {}),
+                            sameSpaceAction: true,
+                        },
+                    } as any);
+                    setMessages(await DB.getRecentMessagesByCharId(char.id, 200));
+                    pendingThinking = null;
+                } else {
+                    await renderAndPersist(segment.content, pendingThinking);
+                    pendingThinking = null;
+                }
+            }
+            return;
+        }
         let firstMeta: any = firstThinkingChain ? { thinkingChain: firstThinkingChain } : null;
         const takeMeta = (base: any): any => {
             const merged = firstMeta ? { ...(base || {}), ...firstMeta } : base;
