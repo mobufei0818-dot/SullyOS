@@ -27,7 +27,7 @@ import { EventBoxDB, MemoryNodeDB } from './db';
 import type { LightLLMConfig } from './pipeline';
 import { vectorizeAndStore } from './vectorStore';
 import { bulkSetArchived } from './supabaseVector';
-import { safeFetchJson, extractJson } from '../safeApi';
+import { safeFetchJson, extractContent, extractJson } from '../safeApi';
 import { enforceSummaryLengthBudget } from './summaryLengthBudget';
 
 const VALID_ROOMS: MemoryRoom[] = [
@@ -55,6 +55,29 @@ interface CompressionLLMResult {
     room: MemoryRoom;
     importance: number;
     mood: string;
+}
+
+/**
+ * 检测模型把“怎么算字数 / 怎么压缩”的过程误塞进整合回忆正文。
+ *
+ * 只凭一个英文短语就拒绝会误伤真实对话，所以要求至少命中两种典型信号；
+ * 显式 think 标签则可以直接判定。这个守卫主要兜 Gemini/推理中转把未标记
+ * reasoning 混进 content 的情况，例如：Paragraph 1: 31 chars / Still too long。
+ */
+export function hasSummaryReasoningLeak(content: string): boolean {
+    const text = content.trim();
+    if (!text) return false;
+    if (/<(?:think|thinking|thought)>/i.test(text)) return true;
+
+    const signals = [
+        /\bparagraph\s*\d+\s*:\s*\d+\s*(?:chars?|characters?)\b/i,
+        /\btotal\s*:\s*[\d\s+]+\s*(?:chars?|characters?)\b/i,
+        /\bstill\s+too\s+long\b/i,
+        /\bneed\s+to\s+get\s+under\s+\d+\b/i,
+        /\blet(?:'|’)s\s+(?:count|condense|compress|shorten)\b/i,
+        /(?:^|\n)\s*(?:analysis|reasoning)\s*:/i,
+    ];
+    return signals.reduce((count, pattern) => count + (pattern.test(text) ? 1 : 0), 0) >= 2;
 }
 
 /**
@@ -197,7 +220,9 @@ async function callCompressionLLM(
             2, 120_000, { appName: '记忆宫殿', purpose: '事件压缩' }
         );
 
-        const reply = data.choices?.[0]?.message?.content || '';
+        // 统一剥除 <think> 块并兼容分段 content / reasoning-only 中转。
+        // 未标记的推理泄漏由 hasSummaryReasoningLeak 在手动重整路径继续拦截。
+        const reply = extractContent(data);
         let parsed: any = extractJson(reply);
         const parseFailed = !parsed || typeof parsed !== 'object';
         const contentMissing = !parseFailed && (!parsed.content || typeof parsed.content !== 'string');
@@ -227,6 +252,13 @@ async function callCompressionLLM(
                 (t) => recompressSummary(t, EVENT_BOX_SUMMARY_TARGET_MAX_CHARS, llmConfig, charName),
                 EVENT_BOX_SUMMARY_HARD_MAX_CHARS,
             );
+        }
+        // 这种输出即使 JSON 合法、长度也没过硬上限，语义上仍不是回忆正文。
+        // 自动压缩同样拒绝，避免以后继续产出截图里的污染 summary；活节点会保留，
+        // 下次触发仍可重试。手动重新整合的外层还会立即再试一次。
+        if (hasSummaryReasoningLeak(content)) {
+            console.error(`🧹 [Compression] 检测到整合回忆混入字数计算/推理过程，已拒绝保存`);
+            return null;
         }
         return {
             content,
@@ -430,6 +462,142 @@ function createSummaryNode(box: EventBox, result: CompressionLLMResult, now: num
         isBoxSummary: true,
         archived: false,
         origin: 'system',
+    };
+}
+
+export interface RegenerateEventBoxSummaryResult {
+    box: EventBox;
+    summary: MemoryNode;
+    sourceCount: number;
+}
+
+/**
+ * 手动“重新整合全部回忆”。
+ *
+ * 与自动增量压缩刻意不同：
+ * - 原料始终是 archived + live 的全部成员，不使用旧 summary，避免坏总结自我复制；
+ * - 不改变 live/archived/sealed/compressionCount，只替换总结与盒元数据；
+ * - 新总结必须先成功生成 Embedding，才会覆盖旧 summary 节点；
+ * - 已封盒同样允许执行。
+ */
+export async function regenerateEventBoxSummary(
+    boxId: string,
+    llmConfig: LightLLMConfig,
+    embeddingConfig: EmbeddingConfig,
+    charName: string,
+    userName?: string,
+    remoteVectorConfig?: RemoteVectorConfig,
+): Promise<RegenerateEventBoxSummaryResult> {
+    const box = await EventBoxDB.getById(boxId);
+    if (!box) throw new Error('这个事件盒已经不存在了');
+
+    const sourceIds = [...new Set([
+        ...box.archivedMemoryIds,
+        ...box.liveMemoryIds,
+    ])].filter(id => id !== box.summaryNodeId);
+    const loaded = await Promise.all(sourceIds.map(id => MemoryNodeDB.getById(id)));
+    const sourceNodes = loaded
+        .filter((node): node is MemoryNode => Boolean(
+            node
+            && node.charId === box.charId
+            && node.id !== box.summaryNodeId
+            && !node.isBoxSummary,
+        ))
+        .sort((a, b) => a.createdAt - b.createdAt);
+    if (sourceNodes.length === 0) throw new Error('盒内没有可用于重新整合的原始记忆');
+
+    // 输出结构失败或出现典型推理泄漏时自动重试一次。两次都失败则保持旧总结不动。
+    let result: CompressionLLMResult | null = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const candidate = await callCompressionLLM(
+            box,
+            null, // 关键：绝不把旧 summary 当原料
+            sourceNodes,
+            llmConfig,
+            charName,
+            userName,
+        );
+        if (candidate && !hasSummaryReasoningLeak(candidate.content)) {
+            result = candidate;
+            break;
+        }
+        if (candidate) {
+            console.error(`🧹 [Compression] ${box.id} 第 ${attempt} 次重新整合混入推理过程，已拒绝保存`);
+        }
+    }
+    if (!result) {
+        throw new Error('副 API 两次都没有返回干净的整合回忆，原内容已保留');
+    }
+
+    const now = Date.now();
+    const existing = box.summaryNodeId
+        ? await MemoryNodeDB.getById(box.summaryNodeId)
+        : undefined;
+    const summaryNode: MemoryNode = existing
+        ? {
+            ...existing,
+            content: result.content,
+            room: result.room,
+            importance: result.importance,
+            mood: result.mood,
+            tags: result.tags,
+            lastAccessedAt: now,
+            embedded: false,
+            eventBoxId: box.id,
+            isBoxSummary: true,
+            archived: false,
+            origin: 'system',
+        }
+        : createSummaryNode(box, result, now);
+
+    // vectorizeAndStore 先请求 Embedding，拿到向量后才保存 node/vector。
+    // 不预存 summaryNode，确保网络侧 Embedding 失败时旧正文完全不被覆盖。
+    const remoteCfg = remoteVectorConfig?.enabled && remoteVectorConfig.initialized
+        ? remoteVectorConfig
+        : getRemoteVectorConfig();
+    const vectorized = await vectorizeAndStore(
+        [summaryNode],
+        embeddingConfig,
+        remoteCfg,
+        { skipDedup: true },
+    );
+    if (vectorized.stored !== 1) {
+        throw new Error('整合回忆已生成，但语义向量没有成功写入，原内容已保留');
+    }
+
+    // LLM/Embedding 等待期间盒子可能又进了新成员；重新读取后只覆盖总结元数据，
+    // 保留最新的成员列表与 sealed 状态。
+    const freshBox = await EventBoxDB.getById(box.id);
+    if (!freshBox) throw new Error('整合完成时事件盒已不存在');
+    freshBox.summaryNodeId = summaryNode.id;
+    freshBox.name = result.name;
+    freshBox.tags = result.tags;
+    freshBox.updatedAt = now;
+    freshBox.lastCompressedAt = now;
+    await EventBoxDB.save(freshBox);
+
+    // 与自动压缩保持一致：若总结属于门牌房间，让新的干净结论继续沉淀。
+    // 门牌失败不影响已经成功落库的总结与向量。
+    try {
+        const { isPlateRoom, updatePlateFromBoxSummary } = await import('./roomPlates');
+        if (isPlateRoom(summaryNode.room)) {
+            await updatePlateFromBoxSummary(
+                freshBox.charId,
+                summaryNode.room,
+                summaryNode.content,
+                llmConfig,
+                charName,
+                userName,
+            );
+        }
+    } catch (e: any) {
+        console.warn(`🚪 [Compression] 重新整合后的门牌同步失败（总结与向量已生效）: ${e?.message || e}`);
+    }
+
+    return {
+        box: freshBox,
+        summary: { ...summaryNode, embedded: true },
+        sourceCount: sourceNodes.length,
     };
 }
 

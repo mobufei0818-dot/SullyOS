@@ -70,7 +70,7 @@ const ingestNotification = async (notification: PushNotificationSchema): Promise
   };
   await ActiveMsgStore.saveInboxMessage(inbox);
   rememberReceivedId(messageId);
-  await flushInboxToChat();
+  await flushInboxToChat('原生推送');
 };
 
 const registerToken = async (token: Token) => {

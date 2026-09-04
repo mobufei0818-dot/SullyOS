@@ -69,6 +69,6 @@ export const ingestNativeAmsgPayload = async (
 
   await ActiveMsgStore.saveInboxMessage(inbox);
   rememberReceivedId(messageId);
-  await flushInboxToChat();
+  await flushInboxToChat('原生收件箱');
   return { charId, messageId };
 };

@@ -176,7 +176,9 @@ export {
 } from './eventBox';
 export {
     maybeCompressEventBoxes, compressAllEligibleBoxes,
+    regenerateEventBoxSummary, hasSummaryReasoningLeak,
 } from './eventBoxCompression';
+export type { RegenerateEventBoxSummaryResult } from './eventBoxCompression';
 
 // 房间门牌（情景→语义固化层）
 export {

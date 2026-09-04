@@ -282,6 +282,23 @@ LLM 日志里的聊天历史动辄几十条，整段塞进 localStorage 很快�
 
 > 折叠是**通用**的——对所有捕获类的 `data` 一视同仁，未来加的捕获类自动享受，不用各自处理。当前规则只有一条：递归遇到 key=`messages` 的数组就整组替换成 metadata，其它字段一律原样。
 
+### 主动消息的 trace 是另一套（无条件记录）
+
+上面那套要先勾选才录。主动消息 / instant push 这条链路另有一套 **不用勾、正式版照录** 的记录，落在 `localStorage` 的 `instant_push_trace_log_v1`（滚动留 200 条，刷新不丢），实现在 [`utils/instantTraceLog.ts`](../utils/instantTraceLog.ts)。Service Worker 那一侧的记录存在独立的 `ActiveMsgSwTrace` 库里（SW 访问不到 localStorage），导出时两边合成一份、按时间排好。
+
+入口在 amsg2 观察窗的 `trace` 那一行，点「导出全部」得到一个 json。因为不用提前开任何开关，**可以先复现、事后再导**。
+
+排「通知都弹了、聊天界面半天不出字」这类问题时，看这几个字段：
+
+| 字段 | 在哪条记录上 | 说明 |
+|---|---|---|
+| `trigger` | `runtime-flush-start` | 这趟冲刷是谁发起的。`SW通知` 是唯一的实时路径，其余（`轮询补收` / `回到前台` / `启动` / `上线补收`…）都是兜底，各自带着几秒到一分钟的固有延迟 |
+| `waitedMs` | `runtime-inbox-message` | 这条消息在收件箱里躺了多久才轮到它。跟正文长短无关，纯粹是「没人来捞」的时间 |
+| `count` / `posted` / `targets` | `notify-clients`（SW 侧） | SW 喊页面时找到几个页面、各自可见性、发成功几个 |
+| `portAck` / `clientsAck` | `runtime-sw-channel-probe` | 启动时的通道体检。两条路分开测：port 通而 clients 不通 = SW 活着但找不到页面 |
+
+面板上还有一行现成的结论：**实时通道正常**（附上次收到 SW 消息的时刻），或者 **没收到过 SW 消息**。后者意味着消息全靠兜底轮询在捞，每条最多白等 60 秒——这种状态下功能表面上是正常的（消息照样会到），所以只能靠主动看，等不到用户来报。
+
 ---
 
 ## 十、容易踩的坑

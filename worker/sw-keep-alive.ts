@@ -71,8 +71,12 @@ import { installReiSW } from '@rei-standard/amsg-sw';
  *  - 1.17.0: 升级 amsg-sw，通知的 silent 认 'when-visible' 这一档：静不静音改由 SW 按
  *            收到推送那一刻的窗口可见性算，用户看着页面时安静、切后台照常响铃震动。
  *            老 SW 把这个字符串当真值，会一律静音。
+ *  - 1.18.0: SW 侧 trace 落到独立的 ActiveMsgSwTrace 库（原来只写 console.log，远端用户
+ *            手上等于没有），并把 notifyClients 记细：找到几个页面、各自可见性、
+ *            postMessage 成没成。排「推送到了、通知也弹了、界面半天不动」这类故障时，
+ *            SW 到底有没有喊到页面是第一个要回答的问题。
  */
-const SW_VERSION = '1.17.0';
+const SW_VERSION = '1.18.0';
 
 const PING_INTERVAL = 15_000;
 const MAX_MANUAL_ALIVE_MS = 5 * 60_000;
@@ -114,15 +118,101 @@ function summarizeAmsgPayload(payload: any): Record<string, any> {
   };
 }
 
+// ─── SW 侧 trace 的持久化 ───
+//
+// traceSw 原本只写 console.log。SW 的 console 在远端用户那儿等于不存在（手机上没有
+// DevTools，装成 PWA 更没有），于是「SW 到底有没有收到推送、有没有喊到页面」这一整段
+// 全是盲区——排障时只能看到页面侧的记录，而页面侧的第一条记录已经是「开始处理」了。
+//
+// 存在**独立的小库**里，不往 ActiveMsg 库塞：那个库一升版本就要走 onupgradeneeded，
+// 主线程正开着旧版本连接的话会 blocked（openInboxDb 里就为此写了 onblocked 分支），
+// 排障用的日志不值得给收件箱这条关键路径带上这种风险。
+const SW_TRACE_DB_NAME = 'ActiveMsgSwTrace';
+const SW_TRACE_DB_VERSION = 1;
+const SW_TRACE_STORE = 'entries';
+/** 留多少条。一轮多段回复能打十几条，留够翻几轮的量。 */
+const SW_TRACE_LIMIT = 300;
+
+let swTraceDbPromise: Promise<IDBDatabase> | null = null;
+
+function openSwTraceDb(): Promise<IDBDatabase> {
+  if (swTraceDbPromise) return swTraceDbPromise;
+
+  const promise = new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(SW_TRACE_DB_NAME, SW_TRACE_DB_VERSION);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains(SW_TRACE_STORE)) {
+        db.createObjectStore(SW_TRACE_STORE, { keyPath: 'seq', autoIncrement: true });
+      }
+    };
+    request.onsuccess = () => {
+      const db = request.result;
+      // 跟另外两个库同款的失效自愈：被强关 / 别处升版本时清缓存，下次重开。
+      db.onversionchange = () => {
+        db.close();
+        if (swTraceDbPromise === promise) swTraceDbPromise = null;
+      };
+      db.onclose = () => {
+        if (swTraceDbPromise === promise) swTraceDbPromise = null;
+      };
+      resolve(db);
+    };
+    request.onerror = () => {
+      if (swTraceDbPromise === promise) swTraceDbPromise = null;
+      reject(request.error);
+    };
+    request.onblocked = () => {
+      if (swTraceDbPromise === promise) swTraceDbPromise = null;
+      reject(new Error('sw trace db blocked'));
+    };
+  });
+
+  swTraceDbPromise = promise;
+  return promise;
+}
+
+/** 追加一条并把超出上限的最老记录删掉。整个函数的失败都被调用方吞掉。 */
+async function appendSwTrace(entry: Record<string, any>): Promise<void> {
+  const db = await openSwTraceDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(SW_TRACE_STORE, 'readwrite');
+    const store = tx.objectStore(SW_TRACE_STORE);
+    store.add(entry);
+    // 同一个事务里 count 能看到刚 add 的那条，多出来的从最老的一头删。
+    const countRequest = store.count();
+    countRequest.onsuccess = () => {
+      const excess = countRequest.result - SW_TRACE_LIMIT;
+      if (excess <= 0) return;
+      let removed = 0;
+      const cursorRequest = store.openCursor();
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor || removed >= excess) return;
+        cursor.delete();
+        removed += 1;
+        cursor.continue();
+      };
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
 function traceSw(event: string, payload?: any, extra: Record<string, any> = {}) {
+  const entry = {
+    ts: new Date().toISOString(),
+    event,
+    swVersion: SW_VERSION,
+    ...(payload !== undefined ? summarizeAmsgPayload(payload) : {}),
+    ...extra,
+  };
   try {
-    console.log('[InstantTrace:SW]', {
-      ts: new Date().toISOString(),
-      event,
-      ...(payload !== undefined ? summarizeAmsgPayload(payload) : {}),
-      ...extra,
-    });
+    console.log('[InstantTrace:SW]', entry);
   } catch { /* ignore */ }
+  // 不 await：trace 是旁路，写库慢了 / 挂了都不能拖住推送处理本身。
+  void appendSwTrace(entry).catch(() => { /* trace 写不进去就算了 */ });
 }
 
 installReiSW(sw, {
@@ -193,17 +283,64 @@ function stopKeepAlive() {
   refreshKeepAlive();
 }
 
+/**
+ * 页面地址里只留路径，不带查询串和 hash——排障要认的是「这是哪个页面」，
+ * 而查询串/hash 上可能挂着不该进日志的东西。
+ */
+function tracePathOf(url: string): string {
+  try {
+    return new URL(url).pathname;
+  } catch {
+    return '?';
+  }
+}
+
+/**
+ * 把消息喊给所有打开着的页面。
+ *
+ * 这里的 trace 记得比别处细，因为「推送到了、通知也弹了，页面却毫无反应」这类故障
+ * 全卡在这一步，而它三种坏法长得一模一样（都是页面那边什么都没发生）：
+ *   1. matchAll 压根没找到页面 → count 为 0
+ *   2. 找到了但 postMessage 抛错 → posted 少于 count，failures 里有原因
+ *   3. 都成了，是页面自己没处理 → 这里全绿，页面侧却没有对应的收到记录
+ * 不把这三样分开记，就只能靠猜。
+ */
 async function notifyClients(data: Record<string, any>) {
-  const clients = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  let clients: readonly Client[] = [];
+  let matchError: string | undefined;
+  try {
+    clients = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  } catch (e) {
+    matchError = e instanceof Error ? e.name : String(e);
+  }
+
+  let posted = 0;
+  const failures: string[] = [];
+  for (const client of clients) {
+    try {
+      client.postMessage(data);
+      posted += 1;
+    } catch (e) {
+      failures.push(e instanceof Error ? e.name : String(e));
+    }
+  }
+
   traceSw('notify-clients', undefined, {
     type: data.type,
     charId: data.charId,
     sessionId: data.sessionId,
     count: clients.length,
+    posted,
+    targets: clients.map((client) => ({
+      path: tracePathOf(client.url),
+      visibility: (client as WindowClient).visibilityState,
+      focused: (client as WindowClient).focused,
+      // 冻结的页面收得下 postMessage，但要等解冻才会处理——只有部分浏览器报这个字段。
+      frozen: (client as any).frozen,
+    })),
+    ...(failures.length > 0 ? { failures } : {}),
+    ...(matchError ? { matchError } : {}),
   });
-  for (const client of clients) {
-    client.postMessage(data);
-  }
 }
 
 function fireProactiveTrigger(charId: string) {
@@ -760,6 +897,20 @@ sw.addEventListener('message', (event: ExtendableMessageEvent) => {
       // BuildBadge 通过 MessageChannel + port 协议查询；不响应时 BuildBadge 显示 sw@?
       event.ports[0]?.postMessage({ version: SW_VERSION });
       break;
+    case 'SW_CHANNEL_PROBE': {
+      // 页面主动探一次「SW 还能不能喊到我」。两条路各回一次，为的是把故障分开：
+      //   - port 这条是「谁问谁答」，页面把回信地址一起递过来（BuildBadge 查版本走它）；
+      //   - clients 这条要 SW 自己去把页面找出来，**推送通知页面走的正是它**。
+      // 只有后者不通，说明 SW 活得好好的、只是找不到页面——这两种坏法在用户那儿
+      // 长得一模一样（界面就是不动），不分开测就只能靠猜。
+      const nonce = event.data?.nonce;
+      traceSw('channel-probe-received', undefined, { nonce });
+      event.ports[0]?.postMessage({ type: 'sw-channel-probe-port-ack', nonce, swVersion: SW_VERSION });
+      // 故意复用 notifyClients：探测必须跟真实推送走同一条路才作数，
+      // 顺带还留下一条 notify-clients 记录（找到几个页面、各自什么状态）。
+      event.waitUntil(notifyClients({ type: 'sw-channel-probe-ack', nonce, swVersion: SW_VERSION }));
+      break;
+    }
     case 'keepalive-start':
       startKeepAlive();
       break;

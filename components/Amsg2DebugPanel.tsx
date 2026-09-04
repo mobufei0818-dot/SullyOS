@@ -11,11 +11,12 @@ import {
     type Amsg2PanelPosition,
 } from '../utils/amsg2DebugView';
 import {
-    formatInstantTraceLog,
+    formatFullTraceLog,
     readAllInstantTraces,
     readRecentInstantTraces,
 } from '../utils/instantTraceLog';
 import { shareOrDownloadBlob } from '../utils/shareExport';
+import { summarizeChannelHealth, type SwChannelHealth } from '../utils/swChannelProbe';
 import {
     describeExpirePolicy,
     describeRecurrence,
@@ -170,6 +171,8 @@ const Amsg2DebugPanel: React.FC = () => {
     const panelRef = useRef<HTMLDivElement | null>(null);
     const dragRef = useRef<{ pointerId: number; startX: number; startY: number; origin: Amsg2PanelPosition } | null>(null);
 
+    const [health, setHealth] = useState<SwChannelHealth | null>(null);
+
     useEffect(() => subscribeDevDebugAvailability(setAvailable), []);
     useEffect(() => subscribeDevDebugFlags((flags) => setEnabled(flags.amsg2Panel)), []);
 
@@ -179,7 +182,10 @@ const Amsg2DebugPanel: React.FC = () => {
         if (!active) return;
         const readTraces = () => {
             setTraces(readRecentInstantTraces(TRACE_SHOWN));
-            setTraceTotal(readAllInstantTraces().length);
+            const all = readAllInstantTraces();
+            setTraceTotal(all.length);
+            // 用全部两百条算，而不是上面显示的那几条：通道断没断要看一段时间的走势。
+            setHealth(summarizeChannelHealth(all));
         };
         readTraces();
         const timer = window.setInterval(readTraces, TRACE_RELOAD_MS);
@@ -238,7 +244,9 @@ const Amsg2DebugPanel: React.FC = () => {
      * 用户会以为文件已经在手上了。
      */
     const exportTraces = async () => {
-        const text = formatInstantTraceLog();
+        // 页面侧 + SW 侧合在一起导：只有页面那半截的话，「推送到没到、SW 有没有喊到
+        // 页面」全看不见，而这类故障的答案恰恰在那一段。
+        const text = await formatFullTraceLog();
         if (!text) return;
         try {
             const result = await shareOrDownloadBlob({
@@ -406,6 +414,27 @@ const Amsg2DebugPanel: React.FC = () => {
                                 : traceTotal === 0 ? '暂无' : `导出全部 (${traceTotal})`}
                     </button>
                 </div>
+                {/* 实时通道的体检结论。放在最显眼处是因为这条腿断了之后功能表面上还是好的——
+                    消息照样到，只是每条都白等最多一分钟，用户多半当成「网络卡」而不会来报。 */}
+                {health && health.status !== 'idle' && (
+                    <div
+                        style={{
+                            fontSize: 11,
+                            marginBottom: 3,
+                            color: health.status === 'ok' ? C.dim : C.red,
+                        }}
+                    >
+                        {health.status === 'ok'
+                            ? `实时通道正常 · 上次收到 SW 消息 ${hhmmss(new Date(health.lastSwMessageAt!).getTime())}`
+                            : '⚠ 没收到过 SW 消息，消息全靠兜底轮询捞（每条最多白等 60 秒）'}
+                        {health.flushByTrigger.length > 0 && (
+                            <span style={{ color: C.dim }}>
+                                {' · 冲刷来源 '}
+                                {health.flushByTrigger.map((item) => `${item.trigger}×${item.count}`).join(' ')}
+                            </span>
+                        )}
+                    </div>
+                )}
                 {traces.length === 0 ? (
                     <div style={{ color: C.dim, fontSize: 11 }}>（暂无）</div>
                 ) : (

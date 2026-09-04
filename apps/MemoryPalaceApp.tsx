@@ -13,6 +13,7 @@ import {
     bootstrapPlatesFromHistory, markPlateBootstrapDone,
     getBootstrapResume, setBootstrapResume, clearBootstrapResume,
     updateStoredMemoryNode,
+    regenerateEventBoxSummary,
     DEFAULT_CHARACTER_ACCOMMODATION,
 } from '../utils/memoryPalace';
 import type { Anticipation, MigrationProgress, DigestResult, MemoryLink, EventBox, DigestReport } from '../utils/memoryPalace';
@@ -694,6 +695,7 @@ export default function MemoryPalaceApp() {
     const [boxNameDraft, setBoxNameDraft] = useState('');
     const [boxTagsDraft, setBoxTagsDraft] = useState('');
     const [savingBox, setSavingBox] = useState(false);
+    const [regeneratingBoxId, setRegeneratingBoxId] = useState<string | null>(null);
 
     // 迁移状态
     const [migrating, setMigrating] = useState(false);
@@ -1193,6 +1195,73 @@ export default function MemoryPalaceApp() {
             alert(`保存失败：${e?.message || e}`);
         } finally {
             setSavingBox(false);
+        }
+    };
+
+    /**
+     * 用盒内全部 archived + live 原始节点重新生成 summary。
+     * 数据层保证 Embedding 成功后才覆盖旧正文；这里负责确认、忙碌态和刷新 UI。
+     */
+    const handleRegenerateBoxSummary = async (box: EventBox) => {
+        if (!char || regeneratingBoxId) return;
+        const lightApi = memoryPalaceConfig.lightLLM;
+        const embedding = memoryPalaceConfig.embedding;
+        if (!lightApi?.baseUrl || !lightApi.apiKey || !lightApi.model) {
+            addToast('请先在记忆宫殿设置中完整配置副 API', 'error');
+            return;
+        }
+        if (!embedding?.baseUrl || !embedding.apiKey || !embedding.model) {
+            addToast('请先在记忆宫殿设置中完整配置 Embedding API', 'error');
+            return;
+        }
+
+        const sourceCount = new Set([
+            ...box.archivedMemoryIds,
+            ...box.liveMemoryIds,
+        ]).size;
+        if (sourceCount === 0) {
+            addToast('盒内没有可用于重新整合的原始记忆', 'error');
+            return;
+        }
+        if (!window.confirm(
+            `重新整合「${box.name || '未命名事件'}」？\n\n`
+            + `副 API 会重新读取盒内全部 ${sourceCount} 条原始记忆，不使用当前整合回忆；`
+            + `随后重新生成语义向量。新总结和向量都成功后才会覆盖当前内容。`,
+        )) return;
+
+        setRegeneratingBoxId(box.id);
+        try {
+            const result = await regenerateEventBoxSummary(
+                box.id,
+                lightApi,
+                embedding,
+                char.name,
+                userProfile?.name,
+                remoteVectorConfig,
+            );
+
+            const fresh = result.box;
+            const live = (await Promise.all(
+                fresh.liveMemoryIds.map(id => MemoryNodeDB.getById(id)),
+            )).filter((node): node is MemoryNode => Boolean(node));
+            const archived = (await Promise.all(
+                fresh.archivedMemoryIds.map(id => MemoryNodeDB.getById(id)),
+            )).filter((node): node is MemoryNode => Boolean(node));
+            setBoxMembers(prev => ({
+                ...prev,
+                [fresh.id]: { summary: result.summary, live, archived },
+            }));
+
+            const boxes = await EventBoxDB.getByCharId(char.id);
+            boxes.sort((a, b) => b.updatedAt - a.updatedAt);
+            setAllBoxes(boxes);
+            setSelectedNode(prev => prev?.id === result.summary.id ? result.summary : prev);
+            await loadStats();
+            addToast(`已重新整合 ${result.sourceCount} 条原始记忆，语义向量已更新`, 'success');
+        } catch (e: any) {
+            addToast(`重新整合失败：${e?.message || e}`, 'error');
+        } finally {
+            setRegeneratingBoxId(null);
         }
     };
 
@@ -5470,6 +5539,33 @@ create table if not exists memory_vectors (
 
                                 {expanded && members && (
                                     <div style={{ padding: '0 12px 12px', borderTop: '1px solid #e0e7ff' }}>
+                                        {(members.live.length > 0 || members.archived.length > 0) && (
+                                            <div style={{
+                                                marginTop: 10, padding: '9px 10px', borderRadius: 8,
+                                                border: '1px solid #c7d2fe', background: '#eef2ff',
+                                                display: 'flex', alignItems: 'center', gap: 10,
+                                            }}>
+                                                <div style={{ flex: 1, minWidth: 0, fontSize: 10, lineHeight: 1.45, color: '#6366f1' }}>
+                                                    从全部 {members.live.length + members.archived.length} 条原始记忆重做总结，并重新生成语义向量
+                                                </div>
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); handleRegenerateBoxSummary(box); }}
+                                                    disabled={regeneratingBoxId !== null}
+                                                    title="不使用旧整合回忆，重新读取全部归档和活节点"
+                                                    style={{
+                                                        display: 'inline-flex', alignItems: 'center', gap: 4,
+                                                        flexShrink: 0, padding: '5px 9px', borderRadius: 7,
+                                                        border: '1px solid #a5b4fc', background: '#fff',
+                                                        color: '#4f46e5', fontSize: 10, fontWeight: 700,
+                                                        cursor: regeneratingBoxId !== null ? 'wait' : 'pointer',
+                                                        opacity: regeneratingBoxId !== null && regeneratingBoxId !== box.id ? 0.5 : 1,
+                                                    }}
+                                                >
+                                                    <Icon name="refresh" size={11} />
+                                                    <span>{regeneratingBoxId === box.id ? '重新整合中…' : '重新整合'}</span>
+                                                </button>
+                                            </div>
+                                        )}
                                         {members.summary && (
                                             <div
                                                 onClick={() => openMemory(members.summary!, 'boxes')}
